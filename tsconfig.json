@@ -1,7 +1,10 @@
 {
-  "files": [],
-  "references": [
-    { "path": "packages/protocol" },
-    { "path": "packages/sdk" }
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "packages/protocol/src",
+    "packages/sdk/src"
   ]
 }

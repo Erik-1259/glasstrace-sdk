@@ -67,7 +67,7 @@ registerGlasstrace({
 ### Drizzle ORM Adapter
 
 ```typescript
-import { withGlasstraceConfig } from "@glasstrace/sdk/drizzle";
+import { GlasstraceDrizzleLogger } from "@glasstrace/sdk/drizzle";
 ```
 
 ## CLI

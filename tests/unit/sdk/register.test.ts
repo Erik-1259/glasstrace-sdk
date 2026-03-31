@@ -1,0 +1,455 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  registerGlasstrace,
+  _resetRegistrationForTesting,
+  getDiscoveryHandler,
+} from "../../../packages/sdk/src/register.js";
+import { _resetConfigForTesting } from "../../../packages/sdk/src/init-client.js";
+
+/** Valid developer API key for testing (gt_dev_ prefix + 48 hex chars). */
+const TEST_DEV_API_KEY = "gt_dev_" + "a".repeat(48);
+
+/** Alternate valid developer API key for isolation between tests. */
+const TEST_DEV_API_KEY_ALT = "gt_dev_" + "b".repeat(48);
+
+/** Duration (ms) to wait for background promises to settle in async tests. */
+const BACKGROUND_SETTLE_MS = 200;
+
+/** Creates a mock fetch Response matching the SdkInitResponse schema. */
+function createMockInitResponse(): ReturnType<typeof vi.fn> {
+  return vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({
+      config: {
+        requestBodies: false,
+        queryParamValues: false,
+        envVarValues: false,
+        fullConsoleOutput: false,
+        importGraph: false,
+      },
+      subscriptionStatus: "anonymous",
+      minimumSdkVersion: "0.0.0",
+      apiVersion: "v1",
+      tierLimits: {
+        tracesPerMinute: 100,
+        storageTtlHours: 48,
+        maxTraceSizeBytes: 512000,
+        maxConcurrentSessions: 1,
+      },
+    }),
+  });
+}
+
+/** Waits for fire-and-forget background promises to settle. */
+async function waitForBackgroundWork(ms = BACKGROUND_SETTLE_MS): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+describe("registerGlasstrace() Orchestrator", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetRegistrationForTesting();
+    _resetConfigForTesting();
+    vi.restoreAllMocks();
+    // Reset env
+    delete process.env.NODE_ENV;
+    delete process.env.VERCEL_ENV;
+    delete process.env.GLASSTRACE_API_KEY;
+    delete process.env.GLASSTRACE_FORCE_ENABLE;
+    delete process.env.GLASSTRACE_ENV;
+    delete process.env.GLASSTRACE_COVERAGE_MAP;
+    delete process.env.GLASSTRACE_DISCOVERY_ENABLED;
+
+    // Mock fetch globally to prevent real network calls
+    vi.stubGlobal("fetch", createMockInitResponse());
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    _resetRegistrationForTesting();
+    _resetConfigForTesting();
+  });
+
+  describe("Checkpoint 1: Production detection", () => {
+    it("should disable SDK when NODE_ENV is production", () => {
+      process.env.NODE_ENV = "production";
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Disabled in production"),
+      );
+    });
+
+    it("should disable SDK when VERCEL_ENV is production", () => {
+      process.env.VERCEL_ENV = "production";
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Disabled in production"),
+      );
+    });
+
+    it("should allow registration in production when GLASSTRACE_FORCE_ENABLE is true", () => {
+      process.env.NODE_ENV = "production";
+      process.env.GLASSTRACE_FORCE_ENABLE = "true";
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      const productionWarning = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("Disabled in production"),
+      );
+      expect(productionWarning).toBeUndefined();
+    });
+  });
+
+  describe("Checkpoint 2: Anonymous mode", () => {
+    it("should select anonymous auth mode when no API key is provided", () => {
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Auth mode = anonymous"),
+      );
+    });
+
+    it("should register discovery endpoint in anonymous development mode", async () => {
+      process.env.NODE_ENV = "development";
+      vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).not.toBeNull();
+    });
+  });
+
+  describe("Checkpoint 3: Dev key mode", () => {
+    it("should select dev-key auth mode when GLASSTRACE_API_KEY is set", () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Auth mode = dev-key"),
+      );
+    });
+
+    it("should not expose discovery endpoint in dev-key mode", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).toBeNull();
+    });
+  });
+
+  describe("Checkpoint 4: OTel configuration", () => {
+    it("should configure OTel without throwing", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const result = registerGlasstrace();
+      expect(result).toBeUndefined();
+
+      await waitForBackgroundWork();
+
+      // Verify initialization completed by checking that console.warn was called
+      // (dev-key mode always warns about dev-key usage)
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it("should log OTel configuration step in verbose mode", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      await waitForBackgroundWork();
+
+      const messages = infoSpy.mock.calls
+        .map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("Step 6"))).toBe(true);
+    });
+  });
+
+  describe("Checkpoint 5: Non-blocking background init", () => {
+    it("should return synchronously without waiting for background work", () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const start = Date.now();
+      registerGlasstrace();
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(100);
+    });
+
+    it("should send init request to the backend in the background", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const fetchSpy = createMockInitResponse();
+      vi.stubGlobal("fetch", fetchSpy);
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe("Checkpoint 6: Verbose logging", () => {
+    it("should log all synchronous initialization steps when verbose is enabled", () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      const messages = infoSpy.mock.calls
+        .map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("Step 1"))).toBe(true);
+      expect(messages.some((m) => m.includes("Step 2"))).toBe(true);
+      expect(messages.some((m) => m.includes("Step 3"))).toBe(true);
+      expect(messages.some((m) => m.includes("Step 4"))).toBe(true);
+      expect(messages.some((m) => m.includes("Step 5"))).toBe(true);
+    });
+  });
+
+  describe("Checkpoint 7: Error resilience", () => {
+    it("should never throw regardless of input", () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      expect(() => registerGlasstrace()).not.toThrow();
+    });
+
+    it("should silently no-op on second registration call", () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "info").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      const stepMessages = infoSpy.mock.calls.filter(
+        (c) => typeof c[0] === "string" && c[0].includes("Step"),
+      );
+      expect(stepMessages).toHaveLength(0);
+    });
+  });
+
+  describe("Discovery endpoint integration", () => {
+    it("should not expose discovery endpoint when using a developer API key", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY_ALT;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      _resetRegistrationForTesting();
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).toBeNull();
+    });
+  });
+
+  describe("Anonymous + production with force-enable", () => {
+    it("should not expose discovery endpoint in production even with force-enable", async () => {
+      process.env.NODE_ENV = "production";
+      process.env.GLASSTRACE_FORCE_ENABLE = "true";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "info").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).toBeNull();
+    });
+  });
+
+  describe("Error handling in background work", () => {
+    it("should accept any options shape without throwing", () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "info").mockImplementation(() => {});
+
+      expect(() => registerGlasstrace(undefined)).not.toThrow();
+      _resetRegistrationForTesting();
+      expect(() => registerGlasstrace({})).not.toThrow();
+    });
+  });
+
+  describe("Dev-key background init error handling", () => {
+    it("should log a warning and continue when background init network request fails", async () => {
+      process.env.GLASSTRACE_API_KEY = "gt_dev_" + "c".repeat(48);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      // Verify the error was caught and logged, not swallowed silently
+      const networkWarning = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("network down"),
+      );
+      expect(networkWarning).toBeDefined();
+    });
+  });
+
+  describe("Coverage map verbose logging", () => {
+    it("should log import graph skip message when coverage map is enabled in verbose mode", () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      process.env.GLASSTRACE_COVERAGE_MAP = "true";
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      const messages = infoSpy.mock.calls
+        .map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("Step 9"))).toBe(true);
+    });
+  });
+
+  describe("Discovery endpoint environment guard", () => {
+    it("should not expose discovery endpoint when NODE_ENV is staging", async () => {
+      process.env.NODE_ENV = "staging";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).toBeNull();
+    });
+
+    it("should not expose discovery endpoint when NODE_ENV is test", async () => {
+      process.env.NODE_ENV = "test";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).toBeNull();
+    });
+
+    it("should expose discovery endpoint when NODE_ENV is development", async () => {
+      process.env.NODE_ENV = "development";
+      vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).not.toBeNull();
+    });
+
+    it("should expose discovery endpoint when NODE_ENV is unset", async () => {
+      delete process.env.NODE_ENV;
+      vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).not.toBeNull();
+    });
+
+    it("should respect GLASSTRACE_DISCOVERY_ENABLED=true over NODE_ENV=staging", async () => {
+      process.env.NODE_ENV = "staging";
+      process.env.GLASSTRACE_DISCOVERY_ENABLED = "true";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).not.toBeNull();
+    });
+
+    it("should respect GLASSTRACE_DISCOVERY_ENABLED=false over NODE_ENV=development", async () => {
+      process.env.NODE_ENV = "development";
+      process.env.GLASSTRACE_DISCOVERY_ENABLED = "false";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork();
+
+      const handler = getDiscoveryHandler();
+      expect(handler).toBeNull();
+    });
+  });
+
+  describe("OTel configured immediately with lazy auth", () => {
+    it("should configure OTel asynchronously while allowing synchronous return", async () => {
+      // OTel is registered immediately in all modes.
+      // GlasstraceExporter buffers spans and defers auth to export time.
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      // Step 6 is async (fire-and-forget), so it should not appear synchronously
+      const syncMessages = infoSpy.mock.calls
+        .map((c) => String(c[0]));
+      expect(syncMessages.some((m) => m.includes("Step 6"))).toBe(false);
+
+      // After the async configureOtel resolves, Step 6 should appear
+      await waitForBackgroundWork(300);
+
+      const allMessages = infoSpy.mock.calls
+        .map((c) => String(c[0]));
+      expect(allMessages.some((m) => m.includes("Step 6"))).toBe(true);
+    });
+
+    it("should run performInit independently of OTel configuration", async () => {
+      // configureOtel and performInit run in separate fire-and-forget chains.
+      // An OTel failure must not prevent the init request.
+      process.env.NODE_ENV = "development";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "info").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      await waitForBackgroundWork(300);
+
+      const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+      expect(fetchMock).toHaveBeenCalled();
+    });
+  });
+});

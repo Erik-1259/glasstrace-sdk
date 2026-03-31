@@ -9,7 +9,16 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "default": "./dist/index.js"
+    },
+    "./drizzle": {
+      "types": "./dist/adapters/drizzle.d.ts",
+      "import": "./dist/adapters/drizzle.js",
+      "require": "./dist/adapters/drizzle.cjs",
+      "default": "./dist/adapters/drizzle.js"
     }
+  },
+  "bin": {
+    "glasstrace": "dist/cli/init.js"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
