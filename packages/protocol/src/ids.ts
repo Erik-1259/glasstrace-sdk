@@ -49,7 +49,7 @@ export const BuildHashSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[a-zA-Z0-9._+\-]+$/)
+  .regex(/^[a-zA-Z0-9._+-]+$/)
   // Prevent path traversal — build hashes are used in storage paths
   .refine((value) => value !== "." && value !== ".." && !value.includes(".."), {
     message: "Build hash must not be '.' or '..' and must not contain '..'",
