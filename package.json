@@ -1,0 +1,31 @@
+{
+  "private": true,
+  "description": "Glasstrace SDK monorepo — server-side debugging for AI coding agents",
+  "author": "Glasstrace <hello@glasstrace.dev>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Erik-1259/glasstrace-sdk"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "npm@10.8.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "test": "vitest run",
+    "typecheck": "tsc -b --noEmit",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "eslint": "^9.0.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

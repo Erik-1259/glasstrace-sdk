@@ -1,0 +1,57 @@
+{
+  "name": "@glasstrace/protocol",
+  "version": "0.1.0",
+  "description": "Glasstrace shared types and wire format schemas",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "peerDependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "zod": "^3.23.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Erik-1259/glasstrace-sdk",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://glasstrace.dev",
+  "bugs": {
+    "url": "https://github.com/Erik-1259/glasstrace-sdk/issues"
+  },
+  "keywords": [
+    "glasstrace",
+    "protocol",
+    "types",
+    "schemas",
+    "opentelemetry"
+  ]
+}

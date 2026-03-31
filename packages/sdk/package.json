@@ -1,0 +1,86 @@
+{
+  "name": "@glasstrace/sdk",
+  "version": "0.1.0",
+  "description": "Glasstrace server-side debugging SDK for AI coding agents",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "dependencies": {
+    "@glasstrace/protocol": "*"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.0.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.39.0",
+    "@opentelemetry/sdk-trace-base": "^1.0.0",
+    "@prisma/instrumentation": "^4.0.0 || ^5.0.0 || ^6.0.0",
+    "@vercel/otel": "^1.0.0",
+    "drizzle-orm": "^0.29.0 || ^0.30.0 || ^0.31.0 || ^0.32.0 || ^0.33.0 || ^0.34.0 || ^0.35.0 || ^0.36.0 || ^0.37.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/exporter-trace-otlp-http": {
+      "optional": true
+    },
+    "@opentelemetry/sdk-trace-base": {
+      "optional": true
+    },
+    "@prisma/instrumentation": {
+      "optional": true
+    },
+    "@vercel/otel": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
+    "@opentelemetry/sdk-trace-base": "^1.30.0",
+    "tsup": "^8.5.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Erik-1259/glasstrace-sdk",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://glasstrace.dev",
+  "bugs": {
+    "url": "https://github.com/Erik-1259/glasstrace-sdk/issues"
+  },
+  "keywords": [
+    "glasstrace",
+    "sdk",
+    "debugging",
+    "opentelemetry",
+    "tracing",
+    "ai-agents",
+    "mcp"
+  ]
+}
