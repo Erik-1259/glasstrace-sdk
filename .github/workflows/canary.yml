@@ -1,0 +1,37 @@
+name: Canary Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  canary:
+    name: Publish Canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write  # npm provenance
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm run test
+
+      - name: Snapshot version
+        run: npx changeset version --snapshot canary
+
+      - name: Publish canary
+        run: npx changeset publish --tag canary
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
