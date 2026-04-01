@@ -8,6 +8,7 @@ export default defineConfig({
     "adapters/drizzle": "src/adapters/drizzle.ts",
   },
   format: ["esm", "cjs"],
+  tsconfig: "tsconfig.build.json",
   dts: true,
   sourcemap: true,
   clean: true,
