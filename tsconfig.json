@@ -1,13 +1,7 @@
 {
-  "extends": "./tsconfig.base.json",
-  "compilerOptions": {
-    "noEmit": true,
-    "paths": {
-      "@glasstrace/protocol": ["./packages/protocol/src/index.ts"]
-    }
-  },
-  "include": [
-    "packages/protocol/src",
-    "packages/sdk/src"
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/sdk" }
   ]
 }

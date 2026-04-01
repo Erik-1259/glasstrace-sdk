@@ -1,11 +1,8 @@
 import { defineConfig } from "vitest/config";
-import path from "node:path";
 
 export default defineConfig({
   resolve: {
-    alias: {
-      "@glasstrace/protocol": path.resolve(__dirname, "packages/protocol/src/index.ts"),
-    },
+    conditions: ["development"],
   },
   define: {
     __SDK_VERSION__: JSON.stringify("0.0.0-test"),
