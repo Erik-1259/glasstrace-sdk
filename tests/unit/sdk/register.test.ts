@@ -247,10 +247,12 @@ describe("registerGlasstrace() Orchestrator", () => {
     it("should silently no-op on second registration call", () => {
       process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      vi.spyOn(console, "info").mockImplementation(() => {});
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
 
       registerGlasstrace({ verbose: true });
-      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+      // Clear call history so we only see calls from the second registration
+      infoSpy.mockClear();
 
       registerGlasstrace({ verbose: true });
 
