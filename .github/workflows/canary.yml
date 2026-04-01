@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      id-token: write  # npm provenance
+      id-token: write  # OIDC for npm trusted publishing
     steps:
       - uses: actions/checkout@v6
 
@@ -33,5 +33,3 @@ jobs:
 
       - name: Publish canary
         run: npx changeset publish --tag canary
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
