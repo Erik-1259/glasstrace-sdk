@@ -64,7 +64,7 @@ jobs:
           cache: npm
 
       - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
+        run: npm install -g npm@^11.5.1
 
       - run: npm ci
 
@@ -87,6 +87,7 @@ jobs:
         run: npx changeset publish --tag canary
 
       # Stable: publish current versions (after Version Packages PR was merged)
+      # Only allowed from main branch to prevent accidental releases
       - name: Publish stable
-        if: ${{ inputs.mode == 'stable' }}
+        if: ${{ inputs.mode == 'stable' && github.ref == 'refs/heads/main' }}
         run: npx changeset publish
