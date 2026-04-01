@@ -5,7 +5,7 @@ the development setup and workflow for the glasstrace-sdk monorepo.
 
 ## Prerequisites
 
-- Node.js >= 18 (22 recommended)
+- Node.js >= 20 (22 recommended)
 - npm 10+
 
 ## Getting Started
