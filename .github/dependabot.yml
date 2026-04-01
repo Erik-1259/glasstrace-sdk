@@ -5,10 +5,22 @@ updates:
     schedule:
       interval: weekly
     groups:
-      production:
+      # Minor and patch updates are grouped together. These are
+      # usually non-breaking for stable (>=1.0) dependencies.
+      # Review 0.x minor bumps carefully — semver treats those as
+      # potentially breaking.
+      production-minor-patch:
         dependency-type: production
-      development:
+        update-types: ["minor", "patch"]
+      development-minor-patch:
         dependency-type: development
+        update-types: ["minor", "patch"]
+      # Major version bumps get individual PRs so each can be
+      # reviewed and migrated independently. Grouping majors
+      # caused cascading failures (TS6 + Zod4 + Vitest4 in one PR).
+      # Major bumps are not grouped — Dependabot creates one PR per
+      # major bump by default when excluded from all groups.
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
