@@ -21,7 +21,7 @@ export type CaptureConfig = z.infer<typeof CaptureConfigSchema>;
  * Consumers should cast via SdkInitResponseSchema.parse() when reading.
  */
 export const SdkCachedConfigSchema = z.object({
-  response: z.record(z.unknown()),
+  response: z.record(z.string(), z.unknown()),
   cachedAt: z.number().int().nonnegative(),
 });
 export type SdkCachedConfig = z.infer<typeof SdkCachedConfigSchema>;
