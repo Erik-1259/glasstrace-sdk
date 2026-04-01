@@ -18,7 +18,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          registry-url: https://registry.npmjs.org
+          # Do NOT set registry-url — it forces token-based auth
+          # which conflicts with OIDC trusted publishing
 
       - run: npm ci
 
