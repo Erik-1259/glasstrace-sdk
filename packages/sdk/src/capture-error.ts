@@ -52,18 +52,20 @@ export async function _preloadOtelApi(): Promise<void> {
  * ```
  */
 export function captureError(error: unknown): void {
-  // Fast path: OTel already loaded
+  // Fast path: OTel already loaded and available
   if (otelApi) {
     recordError(otelApi, error);
     return;
   }
 
-  // If OTel hasn't been loaded yet, attempt lazy load.
-  // The span context may be lost by the time the import resolves,
-  // but this is the best-effort fallback for early calls before
-  // registerGlasstrace() has completed.
+  // OTel not yet available — either not attempted or still loading.
+  // Queue the error to be recorded once the import resolves.
+  // The span context may be lost across the async boundary, but this
+  // is best-effort for calls that arrive before OTel is ready.
   if (!otelLoadAttempted) {
     otelLoadPromise ??= _preloadOtelApi();
+  }
+  if (otelLoadPromise) {
     void otelLoadPromise.then(() => {
       if (otelApi) {
         recordError(otelApi, error);

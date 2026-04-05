@@ -27,7 +27,8 @@ let otelApi: typeof import("@opentelemetry/api") | null = null;
 
 /**
  * Formats console arguments into a single string for span event attributes.
- * Mirrors the behavior of `console.log` argument concatenation.
+ * Uses best-effort serialization: strings pass through, Errors preserve their
+ * stack trace, and other values are JSON-stringified with a String() fallback.
  */
 function formatArgs(args: unknown[]): string {
   return args

@@ -4,6 +4,18 @@ import type { SessionId } from "@glasstrace/protocol";
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
 
+/** Cached at module load to avoid reading process.env on every span. */
+let cachedGlasstraceEnv: string | undefined = process.env.GLASSTRACE_ENV;
+let cachedPort: string = process.env.PORT ?? "3000";
+
+/**
+ * Re-reads cached environment variables. For testing only.
+ */
+export function _resetEnvCacheForTesting(): void {
+  cachedGlasstraceEnv = process.env.GLASSTRACE_ENV;
+  cachedPort = process.env.PORT ?? "3000";
+}
+
 /**
  * Derives a deterministic session ID from the given inputs using SHA-256.
  * The hash is truncated to 16 hex characters and parsed through SessionIdSchema.
@@ -33,11 +45,10 @@ export function deriveSessionId(
  * @returns The origin string used as a session derivation input.
  */
 export function getOrigin(): string {
-  if (process.env.GLASSTRACE_ENV) {
-    return process.env.GLASSTRACE_ENV;
+  if (cachedGlasstraceEnv) {
+    return cachedGlasstraceEnv;
   }
-  const port = process.env.PORT ?? "3000";
-  return `localhost:${port}`;
+  return `localhost:${cachedPort}`;
 }
 
 /**

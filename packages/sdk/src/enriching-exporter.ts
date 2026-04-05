@@ -131,86 +131,65 @@ export class GlasstraceExporter implements SpanExporter {
   /**
    * Enriches a ReadableSpan with all glasstrace.* attributes.
    * Returns a new ReadableSpan wrapper; the original span is not mutated.
-   * Each attribute derivation is wrapped in its own try-catch for partial
-   * enrichment resilience.
+   * On total failure, returns the original span unchanged so the export
+   * pipeline is never blocked by an enrichment bug.
    */
   private enrichSpan(span: ReadableSpan): ReadableSpan {
-    const attrs = span.attributes ?? {};
-    const name = span.name ?? "";
-    const extra: Record<string, string | number> = {};
-
-    // glasstrace.trace.type
     try {
+      const attrs = span.attributes ?? {};
+      const name = span.name ?? "";
+      const extra: Record<string, string | number> = {};
+
+      // glasstrace.trace.type
       extra[ATTR.TRACE_TYPE] = "server";
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.session.id — computed at export time with the current API key
-    try {
-      const sessionId = this.sessionManager.getSessionId(this.getApiKey());
-      extra[ATTR.SESSION_ID] = sessionId;
-    } catch {
-      // Session ID omitted for this span
-    }
+      // glasstrace.session.id — computed at export time with the current API key.
+      // Isolated in its own try-catch because getSessionId calls external code
+      // (crypto, schema validation) that may throw. A session ID failure should
+      // not prevent the rest of the span from being enriched.
+      try {
+        const sessionId = this.sessionManager.getSessionId(this.getApiKey());
+        extra[ATTR.SESSION_ID] = sessionId;
+      } catch {
+        // Session ID omitted for this span
+      }
 
-    // glasstrace.environment
-    try {
+      // glasstrace.environment
       const env = this.environment ?? process.env.GLASSTRACE_ENV;
       if (env) {
         extra[ATTR.ENVIRONMENT] = env;
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.correlation.id
-    try {
+      // glasstrace.correlation.id
       const existingCid = attrs["glasstrace.correlation.id"];
       if (typeof existingCid === "string") {
         extra[ATTR.CORRELATION_ID] = existingCid;
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.route
-    try {
+      // glasstrace.route
       const route =
         (attrs["http.route"] as string | undefined) ?? name;
       if (route) {
         extra[ATTR.ROUTE] = route;
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.http.method
-    try {
+      // glasstrace.http.method
       const method =
         (attrs["http.method"] as string | undefined) ??
         (attrs["http.request.method"] as string | undefined);
       if (method) {
         extra[ATTR.HTTP_METHOD] = method;
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.http.status_code
-    try {
+      // glasstrace.http.status_code
       const statusCode =
         (attrs["http.status_code"] as number | undefined) ??
         (attrs["http.response.status_code"] as number | undefined);
       if (statusCode !== undefined) {
         extra[ATTR.HTTP_STATUS_CODE] = statusCode;
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.http.duration_ms
-    try {
+      // glasstrace.http.duration_ms
       if (span.startTime && span.endTime) {
         const [startSec, startNano] = span.startTime;
         const [endSec, endNano] = span.endTime;
@@ -220,43 +199,27 @@ export class GlasstraceExporter implements SpanExporter {
           extra[ATTR.HTTP_DURATION_MS] = durationMs;
         }
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.error.message
-    try {
+      // glasstrace.error.message
       const errorMessage = attrs["exception.message"] as string | undefined;
       if (errorMessage) {
         extra[ATTR.ERROR_MESSAGE] = errorMessage;
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.error.code + glasstrace.error.category
-    try {
+      // glasstrace.error.code + glasstrace.error.category
       const errorType = attrs["exception.type"] as string | undefined;
       if (errorType) {
         extra[ATTR.ERROR_CODE] = errorType;
         extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(errorType);
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.error.field
-    try {
+      // glasstrace.error.field
       const errorField = attrs["error.field"] as string | undefined;
       if (errorField) {
         extra[ATTR.ERROR_FIELD] = errorField;
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.orm.*
-    try {
+      // glasstrace.orm.*
       // Support both OTel >=1.9 (instrumentationScope) and <1.9 (instrumentationLibrary)
       const spanAny = span as unknown as Record<string, { name?: string } | undefined>;
       const instrumentationName =
@@ -277,23 +240,20 @@ export class GlasstraceExporter implements SpanExporter {
           extra[ATTR.ORM_OPERATION] = operation;
         }
       }
-    } catch {
-      // omitted
-    }
 
-    // glasstrace.fetch.target
-    try {
+      // glasstrace.fetch.target
       const url =
         (attrs["http.url"] as string | undefined) ??
         (attrs["url.full"] as string | undefined);
       if (url && span.kind === SpanKind.CLIENT) {
         extra[ATTR.FETCH_TARGET] = classifyFetchTarget(url);
       }
-    } catch {
-      // omitted
-    }
 
-    return createEnrichedSpan(span, extra);
+      return createEnrichedSpan(span, extra);
+    } catch {
+      // Return original span unchanged so the export pipeline is never blocked
+      return span;
+    }
   }
 
   /**

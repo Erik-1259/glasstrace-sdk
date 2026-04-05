@@ -11,6 +11,9 @@ import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolv
 import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
 import { _preloadOtelApi } from "./capture-error.js";
 
+/** Whether console capture has been installed in this registration cycle. */
+let consoleCaptureInstalled = false;
+
 /** Module-level state tracking for the registered discovery handler. */
 let discoveryHandler: ((request: Request) => Promise<Response | null>) | null = null;
 
@@ -43,13 +46,13 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       return;
     }
 
-    // Step 1: Resolve config
+    // Resolve config
     const config = resolveConfig(options);
     if (config.verbose) {
-      console.info("[glasstrace] Step 1: Config resolved.");
+      console.info("[glasstrace] Config resolved.");
     }
 
-    // Step 2: Production check
+    // Production check
     if (isProductionDisabled(config)) {
       console.warn(
         "[glasstrace] Disabled in production. Set GLASSTRACE_FORCE_ENABLE=true to override.",
@@ -57,10 +60,10 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       return;
     }
     if (config.verbose) {
-      console.info("[glasstrace] Step 2: Not production-disabled.");
+      console.info("[glasstrace] Not production-disabled.");
     }
 
-    // Step 3: Determine auth mode
+    // Determine auth mode
     const anonymous = isAnonymousMode(config);
     let effectiveKey: string | undefined = config.apiKey;
 
@@ -70,31 +73,31 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     if (config.verbose) {
       console.info(
-        `[glasstrace] Step 3: Auth mode = ${anonymous ? "anonymous" : "dev-key"}.`,
+        `[glasstrace] Auth mode = ${anonymous ? "anonymous" : "dev-key"}.`,
       );
     }
 
-    // Step 4: Load cached config and apply to in-memory store
+    // Load cached config and apply to in-memory store
     const cachedInitResponse = loadCachedConfig();
     if (cachedInitResponse) {
       _setCurrentConfig(cachedInitResponse);
     }
     if (config.verbose) {
       console.info(
-        `[glasstrace] Step 4: Cached config ${cachedInitResponse ? "loaded and applied" : "not found"}.`,
+        `[glasstrace] Cached config ${cachedInitResponse ? "loaded and applied" : "not found"}.`,
       );
     }
 
-    // Step 5: Create SessionManager
+    // Create SessionManager
     const sessionManager = new SessionManager();
     if (config.verbose) {
-      console.info("[glasstrace] Step 5: SessionManager created.");
+      console.info("[glasstrace] SessionManager created.");
     }
 
     isRegistered = true;
     const currentGeneration = registrationGeneration;
 
-    // Step 6: Configure OTel IMMEDIATELY in all modes.
+    // Configure OTel IMMEDIATELY in all modes.
     // OTel is registered before the anon key resolves so that
     // spans are captured from cold start. GlasstraceExporter buffers spans
     // while the key is "pending" and flushes them once notifyApiKeyResolved()
@@ -105,12 +108,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
         // Preload OTel API for captureError() so it can resolve spans synchronously
         void _preloadOtelApi();
 
-        // Install console capture after OTel is ready so span context is available
-        if (getActiveConfig().consoleErrors) {
-          void installConsoleCapture();
-        }
+        // Check cached config for consoleErrors (may be stale or absent).
+        // Re-checked after performInit completes with the authoritative config.
+        maybeInstallConsoleCapture();
+
         if (config.verbose) {
-          console.info("[glasstrace] Step 6: OTel configured.");
+          console.info("[glasstrace] OTel configured.");
         }
       },
       (err: unknown) => {
@@ -120,9 +123,9 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       },
     );
 
-    // Step 7 + 8 + anonymous key resolution -- all in background
+    // Background work: anonymous key resolution, discovery endpoint, init
     if (anonymous) {
-      // Step 8: Register discovery endpoint IMMEDIATELY with async key resolution
+      // Register discovery endpoint IMMEDIATELY with async key resolution
       if (isDiscoveryEnabled(config)) {
         let resolvedAnonKey: AnonApiKey | null = null;
         const anonKeyPromise = getOrCreateAnonKey();
@@ -135,7 +138,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
         );
 
         if (config.verbose) {
-          console.info("[glasstrace] Step 8: Discovery endpoint registered (key pending).");
+          console.info("[glasstrace] Discovery endpoint registered (key pending).");
         }
 
         // Background: resolve key, update API key, then init
@@ -159,10 +162,13 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             );
 
             if (config.verbose) {
-              console.info("[glasstrace] Step 7: Background init firing.");
+              console.info("[glasstrace] Background init firing.");
             }
 
             await performInit(config, anonKey, __SDK_VERSION__);
+
+            // Re-check consoleErrors with the authoritative init response config
+            maybeInstallConsoleCapture();
           } catch (err) {
             console.warn(
               `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -183,10 +189,13 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             if (currentGeneration !== registrationGeneration) return;
 
             if (config.verbose) {
-              console.info("[glasstrace] Step 7: Background init firing.");
+              console.info("[glasstrace] Background init firing.");
             }
 
             await performInit(config, anonKey, __SDK_VERSION__);
+
+            // Re-check consoleErrors with the authoritative init response config
+            maybeInstallConsoleCapture();
           } catch (err) {
             console.warn(
               `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -210,9 +219,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
           if (currentGeneration !== registrationGeneration) return;
 
           if (config.verbose) {
-            console.info("[glasstrace] Step 7: Background init firing.");
+            console.info("[glasstrace] Background init firing.");
           }
           await performInit(config, anonKeyForInit, __SDK_VERSION__);
+
+          // Re-check consoleErrors with the authoritative init response config
+          maybeInstallConsoleCapture();
         } catch (err) {
           console.warn(
             `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -221,9 +233,9 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       })();
     }
 
-    // Step 9: Import graph (coverageMapEnabled) -- placeholder
+    // Import graph (coverageMapEnabled) -- placeholder
     if (config.coverageMapEnabled && config.verbose) {
-      console.info("[glasstrace] Step 9: Import graph building skipped.");
+      console.info("[glasstrace] Import graph building skipped.");
     }
   } catch (err) {
     console.warn(
@@ -237,6 +249,20 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
  */
 export function getDiscoveryHandler(): ((request: Request) => Promise<Response | null>) | null {
   return discoveryHandler;
+}
+
+/**
+ * Checks the active config and installs console capture if enabled.
+ * Idempotent — safe to call multiple times (after OTel config, after init).
+ * This ensures console capture is installed whenever authoritative config
+ * becomes available, whether from the file cache or the init response.
+ */
+function maybeInstallConsoleCapture(): void {
+  if (consoleCaptureInstalled) return;
+  if (getActiveConfig().consoleErrors) {
+    consoleCaptureInstalled = true;
+    void installConsoleCapture();
+  }
 }
 
 /**
@@ -274,6 +300,7 @@ function isDiscoveryEnabled(config: ResolvedConfig): boolean {
 export function _resetRegistrationForTesting(): void {
   isRegistered = false;
   discoveryHandler = null;
+  consoleCaptureInstalled = false;
   registrationGeneration++;
   uninstallConsoleCapture();
   resetOtelConfigForTesting();
