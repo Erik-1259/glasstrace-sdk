@@ -19,6 +19,7 @@ export const API_KEY_PENDING = "pending" as const;
  */
 const MAX_PENDING_SPANS = 1024;
 
+
 /**
  * Options for constructing a {@link GlasstraceExporter}.
  */
@@ -57,6 +58,7 @@ export class GlasstraceExporter implements SpanExporter {
   private readonly createDelegateFn: ((url: string, headers: Record<string, string>) => SpanExporter) | null;
 
   private delegate: SpanExporter | null = null;
+  private delegateKey: string | null = null;
   private pendingBatches: PendingBatch[] = [];
   private pendingSpanCount = 0;
   private overflowLogged = false;
@@ -71,16 +73,16 @@ export class GlasstraceExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    const enrichedSpans = spans.map((span) => this.enrichSpan(span));
-
     const currentKey = this.getApiKey();
     if (currentKey === API_KEY_PENDING) {
-      // Buffer spans until key resolves
-      this.bufferSpans(enrichedSpans, resultCallback);
+      // Buffer raw (unenriched) spans — enrichment deferred to flush time
+      // so session IDs are computed with the resolved key, not "pending".
+      this.bufferSpans(spans, resultCallback);
       return;
     }
 
-    // Key is available — ensure delegate exists and export
+    // Key is available — enrich and export
+    const enrichedSpans = spans.map((span) => this.enrichSpan(span));
     const exporter = this.ensureDelegate();
     if (exporter) {
       exporter.export(enrichedSpans, resultCallback);
@@ -296,23 +298,38 @@ export class GlasstraceExporter implements SpanExporter {
 
   /**
    * Lazily creates the delegate OTLP exporter once the API key is resolved.
+   * Recreates the delegate if the key has changed (e.g., after key rotation)
+   * so the Authorization header stays current.
    */
   private ensureDelegate(): SpanExporter | null {
     if (!this.createDelegateFn) return null;
-    if (this.delegate) return this.delegate;
 
     const currentKey = this.getApiKey();
     if (currentKey === API_KEY_PENDING) return null;
 
+    // Recreate delegate if the key has changed since last creation
+    if (this.delegate && this.delegateKey === currentKey) {
+      return this.delegate;
+    }
+
+    // Shut down old delegate if key rotated. Catch errors to prevent
+    // unhandled rejections from crashing the process during rotation.
+    if (this.delegate) {
+      void this.delegate.shutdown?.().catch(() => {});
+    }
+
     this.delegate = this.createDelegateFn(this.endpointUrl, {
       Authorization: `Bearer ${currentKey}`,
     });
+    this.delegateKey = currentKey;
     return this.delegate;
   }
 
   /**
-   * Buffers enriched spans while the API key is pending.
+   * Buffers raw (unenriched) spans while the API key is pending.
    * Evicts oldest batches if the buffer exceeds MAX_PENDING_SPANS.
+   * Re-checks the key after buffering to close the race window where
+   * the key resolves between the caller's check and this buffer call.
    */
   private bufferSpans(
     spans: ReadableSpan[],
@@ -336,11 +353,18 @@ export class GlasstraceExporter implements SpanExporter {
         );
       }
     }
+
+    // Re-check: if the key resolved between the caller's check and now,
+    // flush immediately to avoid spans stuck in the buffer.
+    if (this.getApiKey() !== API_KEY_PENDING) {
+      this.flushPending();
+    }
   }
 
   /**
    * Flushes all buffered spans through the delegate exporter.
-   * Called when the API key resolves.
+   * Enriches spans at flush time (not buffer time) so that session IDs
+   * are computed with the resolved API key instead of the "pending" sentinel.
    */
   private flushPending(): void {
     if (this.pendingBatches.length === 0) return;
@@ -361,9 +385,12 @@ export class GlasstraceExporter implements SpanExporter {
     this.pendingSpanCount = 0;
 
     for (const batch of batches) {
-      exporter.export(batch.spans, batch.resultCallback);
+      // Enrich at flush time with the now-resolved key
+      const enriched = batch.spans.map((span) => this.enrichSpan(span));
+      exporter.export(enriched, batch.resultCallback);
     }
   }
+
 }
 
 /**
