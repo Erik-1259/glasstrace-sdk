@@ -188,7 +188,7 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       const messages = infoSpy.mock.calls
         .map((c) => String(c[0]));
-      expect(messages.some((m) => m.includes("Step 6"))).toBe(true);
+      expect(messages.some((m) => m.includes("OTel configured"))).toBe(true);
     });
   });
 
@@ -229,11 +229,11 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       const messages = infoSpy.mock.calls
         .map((c) => String(c[0]));
-      expect(messages.some((m) => m.includes("Step 1"))).toBe(true);
-      expect(messages.some((m) => m.includes("Step 2"))).toBe(true);
-      expect(messages.some((m) => m.includes("Step 3"))).toBe(true);
-      expect(messages.some((m) => m.includes("Step 4"))).toBe(true);
-      expect(messages.some((m) => m.includes("Step 5"))).toBe(true);
+      expect(messages.some((m) => m.includes("Config resolved"))).toBe(true);
+      expect(messages.some((m) => m.includes("Not production-disabled"))).toBe(true);
+      expect(messages.some((m) => m.includes("Auth mode"))).toBe(true);
+      expect(messages.some((m) => m.includes("Cached config"))).toBe(true);
+      expect(messages.some((m) => m.includes("SessionManager created"))).toBe(true);
     });
   });
 
@@ -256,10 +256,8 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       registerGlasstrace({ verbose: true });
 
-      const stepMessages = infoSpy.mock.calls.filter(
-        (c) => typeof c[0] === "string" && c[0].includes("Step"),
-      );
-      expect(stepMessages).toHaveLength(0);
+      // Second registration should produce no log messages at all
+      expect(infoSpy.mock.calls).toHaveLength(0);
     });
   });
 
@@ -335,7 +333,7 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       const messages = infoSpy.mock.calls
         .map((c) => String(c[0]));
-      expect(messages.some((m) => m.includes("Step 9"))).toBe(true);
+      expect(messages.some((m) => m.includes("Import graph building skipped"))).toBe(true);
     });
   });
 
@@ -426,17 +424,17 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       registerGlasstrace({ verbose: true });
 
-      // Step 6 is async (fire-and-forget), so it should not appear synchronously
+      // OTel config is async (fire-and-forget), so it should not appear synchronously
       const syncMessages = infoSpy.mock.calls
         .map((c) => String(c[0]));
-      expect(syncMessages.some((m) => m.includes("Step 6"))).toBe(false);
+      expect(syncMessages.some((m) => m.includes("OTel configured"))).toBe(false);
 
-      // After the async configureOtel resolves, Step 6 should appear
+      // After the async configureOtel resolves, the message should appear
       await waitForBackgroundWork(300);
 
       const allMessages = infoSpy.mock.calls
         .map((c) => String(c[0]));
-      expect(allMessages.some((m) => m.includes("Step 6"))).toBe(true);
+      expect(allMessages.some((m) => m.includes("OTel configured"))).toBe(true);
     });
 
     it("should run performInit independently of OTel configuration", async () => {

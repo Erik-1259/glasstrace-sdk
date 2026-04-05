@@ -3,6 +3,16 @@
  */
 export type FetchTarget = "supabase" | "stripe" | "internal" | "unknown";
 
+/** Cached at module load to avoid reading process.env on every span. */
+let cachedPort: string = process.env.PORT ?? "3000";
+
+/**
+ * Re-reads cached environment variables. For testing only.
+ */
+export function _resetEnvCacheForTesting(): void {
+  cachedPort = process.env.PORT ?? "3000";
+}
+
 /**
  * Classifies an outbound fetch target URL into a known category.
  * Classification is case-insensitive and based on the URL hostname.
@@ -33,8 +43,7 @@ export function classifyFetchTarget(url: string): FetchTarget {
     return "stripe";
   }
 
-  const port = process.env.PORT ?? "3000";
-  const internalOrigin = `localhost:${port}`;
+  const internalOrigin = `localhost:${cachedPort}`;
   const parsedPort = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
   const urlOrigin = `${hostname}:${parsedPort}`;
 
