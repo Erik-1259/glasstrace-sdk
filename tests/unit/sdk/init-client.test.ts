@@ -207,12 +207,28 @@ describe("Init Client + Config Cache", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
-        json: () => Promise.resolve({}),
+        text: () => Promise.resolve("Internal Server Error"),
       }));
 
       await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow(
         "Init request failed with status 500",
       );
+    });
+
+    it("consumes response body on error to prevent connection pool leaks", async () => {
+      const config = makeResolvedConfig();
+      const textMock = vi.fn().mockResolvedValue("error body");
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: textMock,
+      }));
+
+      await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow(
+        "Init request failed with status 502",
+      );
+      expect(textMock).toHaveBeenCalledOnce();
     });
 
     it("throws when response fails schema validation", async () => {
@@ -270,7 +286,7 @@ describe("Init Client + Config Cache", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: false,
         status: 401,
-        json: () => Promise.resolve({}),
+        text: () => Promise.resolve("Unauthorized"),
       }));
 
       await performInit(config, null, "0.1.0");
@@ -286,7 +302,7 @@ describe("Init Client + Config Cache", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: false,
         status: 429,
-        json: () => Promise.resolve({}),
+        text: () => Promise.resolve("Too Many Requests"),
       }));
 
       await performInit(config, null, "0.1.0");
@@ -304,7 +320,7 @@ describe("Init Client + Config Cache", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: false,
         status: 429,
-        json: () => Promise.resolve({}),
+        text: () => Promise.resolve("Too Many Requests"),
       }));
       await performInit(config, null, "0.1.0");
       expect(_isRateLimitBackoff()).toBe(true);
@@ -351,7 +367,7 @@ describe("Init Client + Config Cache", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
-        json: () => Promise.resolve({}),
+        text: () => Promise.resolve("Internal Server Error"),
       }));
 
       await performInit(config, null, "0.1.0");

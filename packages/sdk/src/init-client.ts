@@ -144,6 +144,10 @@ export async function sendInitRequest(
   });
 
   if (!response.ok) {
+    // Consume the response body to release the connection back to the pool.
+    // Without this, the underlying TCP socket stays allocated until GC, which
+    // causes connection pool exhaustion under sustained error conditions.
+    await response.text();
     const error = new Error(`Init request failed with status ${response.status}`);
     (error as unknown as Record<string, unknown>).status = response.status;
     throw error;
