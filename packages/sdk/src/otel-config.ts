@@ -10,6 +10,9 @@ let _resolvedApiKey: string = API_KEY_PENDING;
 /** Module-level reference to the active exporter for key-resolution notification. */
 let _activeExporter: GlasstraceExporter | null = null;
 
+/** Registered shutdown handler, tracked so it can be removed on reset. */
+let _shutdownHandler: ((signal: NodeJS.Signals) => void) | null = null;
+
 /**
  * Sets the resolved API key for OTel export authentication.
  * Called once the anonymous key or dev key is available.
@@ -41,6 +44,11 @@ export function notifyApiKeyResolved(): void {
 export function resetOtelConfigForTesting(): void {
   _resolvedApiKey = API_KEY_PENDING;
   _activeExporter = null;
+  if (_shutdownHandler && typeof process !== "undefined") {
+    process.removeListener("SIGTERM", _shutdownHandler);
+    process.removeListener("SIGINT", _shutdownHandler);
+    _shutdownHandler = null;
+  }
 }
 
 /**
@@ -52,6 +60,13 @@ export function resetOtelConfigForTesting(): void {
  * optional, and static analysis would cause missing-module build errors for
  * users who have not installed them.
  *
+ * **CSP note:** The `Function()` constructor is semantically equivalent to
+ * `eval()` and will trigger Content Security Policy violations in environments
+ * that disallow `unsafe-eval`. If your CSP blocks this, install the OTel peer
+ * dependencies explicitly so they resolve via normal `import` statements, or
+ * use the `@vercel/otel` path which does not rely on `tryImport` for its own
+ * module.
+ *
  * @param moduleId - The npm package name to import (e.g. "@vercel/otel").
  * @returns The module namespace object, or `null` if the module is not installed.
  */
@@ -61,6 +76,49 @@ async function tryImport(moduleId: string): Promise<Record<string, unknown> | nu
   } catch {
     return null;
   }
+}
+
+/**
+ * Registers process shutdown hooks that flush and shut down the OTel provider.
+ * Uses `process.once()` to avoid stacking handlers on repeated calls.
+ * Guarded for non-Node environments where `process` may not exist.
+ */
+function registerShutdownHooks(provider: { shutdown: () => Promise<void> }): void {
+  if (typeof process === "undefined" || typeof process.once !== "function") {
+    return;
+  }
+
+  // Remove any previously registered handler before adding a new one
+  if (_shutdownHandler) {
+    process.removeListener("SIGTERM", _shutdownHandler);
+    process.removeListener("SIGINT", _shutdownHandler);
+  }
+
+  let shutdownCalled = false;
+
+  const shutdown = (signal: string) => {
+    if (shutdownCalled) return;
+    shutdownCalled = true;
+
+    void provider.shutdown()
+      .catch((err: unknown) => {
+        console.warn(
+          `[glasstrace] Error during OTel shutdown: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      })
+      .finally(() => {
+        // Re-raise the signal so Node's default termination behavior proceeds.
+        // Remove our listeners first to avoid re-entering this handler.
+        process.removeListener("SIGTERM", _shutdownHandler!);
+        process.removeListener("SIGINT", _shutdownHandler!);
+        process.kill(process.pid, signal);
+      });
+  };
+
+  const handler = (signal: NodeJS.Signals) => shutdown(signal);
+  _shutdownHandler = handler;
+  process.once("SIGTERM", handler);
+  process.once("SIGINT", handler);
 }
 
 /**
@@ -137,6 +195,25 @@ export async function configureOtel(
     const otelSdk = await import("@opentelemetry/sdk-trace-base");
     const otelApi = await import("@opentelemetry/api");
 
+    // Check for an existing OTel provider before registering.
+    // If another tool (Datadog, Sentry, New Relic) already registered a provider,
+    // skip Glasstrace registration to avoid silently breaking their tracing.
+    // OTel wraps the global provider in a ProxyTracerProvider, so we probe for a
+    // real provider by requesting a tracer and checking if it's a "ProxyTracer"
+    // (the no-op default) or a real Tracer from a registered provider.
+    const existingProvider = otelApi.trace.getTracerProvider();
+    const probeTracer = existingProvider.getTracer("glasstrace-probe");
+    if (probeTracer.constructor.name !== "ProxyTracer") {
+      console.warn(
+        "[glasstrace] An existing OpenTelemetry TracerProvider is already registered. " +
+        "Glasstrace will not overwrite it. To use Glasstrace alongside another " +
+        "tracing tool, add GlasstraceExporter as an additional span processor " +
+        "on your existing provider.",
+      );
+      _activeExporter = null;
+      return;
+    }
+
     if (!createOtlpExporter) {
       // No OTLP exporter available -- rebuild GlasstraceExporter with a
       // ConsoleSpanExporter delegate so spans still get glasstrace.* enrichment.
@@ -155,30 +232,26 @@ export async function configureOtel(
         "[glasstrace] @opentelemetry/exporter-trace-otlp-http not found. Using ConsoleSpanExporter.",
       );
 
+      // ConsoleSpanExporter uses SimpleSpanProcessor — synchronous export is
+      // acceptable for debug-only console output.
       const processor = new otelSdk.SimpleSpanProcessor(consoleGlasstraceExporter);
       const provider = new otelSdk.BasicTracerProvider({
         spanProcessors: [processor],
       });
       otelApi.trace.setGlobalTracerProvider(provider);
+      registerShutdownHooks(provider);
       return;
     }
 
-    const processor = new otelSdk.SimpleSpanProcessor(glasstraceExporter);
+    // Use BatchSpanProcessor for production OTLP exports to avoid blocking
+    // the event loop on every span.end() call.
+    const processor = new otelSdk.BatchSpanProcessor(glasstraceExporter);
     const provider = new otelSdk.BasicTracerProvider({
       spanProcessors: [processor],
     });
 
-    // Warn if another OTel provider is already registered to avoid
-    // silently overwriting existing tracing (e.g., Datadog, New Relic).
-    const existingProvider = otelApi.trace.getTracerProvider();
-    if (existingProvider && existingProvider.constructor.name !== "ProxyTracerProvider") {
-      console.warn(
-        "[glasstrace] An existing OpenTelemetry TracerProvider was detected and will be replaced. " +
-        "If you use another tracing tool, configure Glasstrace as an additional exporter instead.",
-      );
-    }
-
     otelApi.trace.setGlobalTracerProvider(provider);
+    registerShutdownHooks(provider);
   } catch {
     console.warn(
       "[glasstrace] Neither @vercel/otel nor @opentelemetry/sdk-trace-base available. Tracing disabled.",

@@ -244,4 +244,25 @@ describe("uploadSourceMaps", () => {
     ).rejects.toThrow("Source map upload failed: 503 Service Unavailable");
     expect(textMock).toHaveBeenCalledOnce();
   });
+
+  it("preserves upload failure error when response body consumption fails", async () => {
+    const textMock = vi.fn().mockRejectedValue(new Error("stream error"));
+    const mockResponse = {
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      text: textMock,
+    };
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
+
+    await expect(
+      uploadSourceMaps(
+        "gt_dev_" + "a".repeat(48),
+        "https://api.glasstrace.dev",
+        "abc123",
+        [{ filePath: "main.js.map", content: '{"version":3}' }],
+      ),
+    ).rejects.toThrow("Source map upload failed: 503 Service Unavailable");
+    expect(textMock).toHaveBeenCalledOnce();
+  });
 });
