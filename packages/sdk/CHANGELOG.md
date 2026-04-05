@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.2.1
+
+### Patch Changes
+
+- 243e2c1: Bundle @glasstrace/protocol and zod into the SDK so the package has zero mandatory dependencies. Consumers only need `npm install @glasstrace/sdk` plus their chosen OTel packages (all optional peer dependencies). Works with npm, pnpm, yarn, and Bun out of the box.
+
 ## 0.2.0
 
 ### Minor Changes
