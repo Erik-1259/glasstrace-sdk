@@ -244,14 +244,16 @@ describe("registerGlasstrace() Orchestrator", () => {
       expect(() => registerGlasstrace()).not.toThrow();
     });
 
-    it("should silently no-op on second registration call", () => {
+    it("should silently no-op on second registration call", async () => {
       process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
       vi.spyOn(console, "warn").mockImplementation(() => {});
       const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
 
       registerGlasstrace({ verbose: true });
 
-      // Clear call history so we only see calls from the second registration
+      // Wait for async OTel config to settle before clearing,
+      // so its log doesn't leak into the second registration window.
+      await waitForBackgroundWork(300);
       infoSpy.mockClear();
 
       registerGlasstrace({ verbose: true });
