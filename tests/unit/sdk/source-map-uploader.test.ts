@@ -209,6 +209,7 @@ describe("uploadSourceMaps", () => {
       ok: false,
       status: 401,
       statusText: "Unauthorized",
+      text: vi.fn().mockResolvedValue("Unauthorized"),
     };
     // Partial Response mock — only fields used by the function under test
     vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
@@ -221,5 +222,47 @@ describe("uploadSourceMaps", () => {
         [{ filePath: "main.js.map", content: '{"version":3}' }],
       ),
     ).rejects.toThrow();
+  });
+
+  it("consumes response body on error to prevent connection pool leaks", async () => {
+    const textMock = vi.fn().mockResolvedValue("error body");
+    const mockResponse = {
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      text: textMock,
+    };
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
+
+    await expect(
+      uploadSourceMaps(
+        "gt_dev_" + "a".repeat(48),
+        "https://api.glasstrace.dev",
+        "abc123",
+        [{ filePath: "main.js.map", content: '{"version":3}' }],
+      ),
+    ).rejects.toThrow("Source map upload failed: 503 Service Unavailable");
+    expect(textMock).toHaveBeenCalledOnce();
+  });
+
+  it("preserves upload failure error when response body consumption fails", async () => {
+    const textMock = vi.fn().mockRejectedValue(new Error("stream error"));
+    const mockResponse = {
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      text: textMock,
+    };
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
+
+    await expect(
+      uploadSourceMaps(
+        "gt_dev_" + "a".repeat(48),
+        "https://api.glasstrace.dev",
+        "abc123",
+        [{ filePath: "main.js.map", content: '{"version":3}' }],
+      ),
+    ).rejects.toThrow("Source map upload failed: 503 Service Unavailable");
+    expect(textMock).toHaveBeenCalledOnce();
   });
 });

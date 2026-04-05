@@ -130,6 +130,11 @@ export async function uploadSourceMaps(
   });
 
   if (!response.ok) {
+    // Consume the response body to release the connection back to the pool.
+    // Without this, the underlying TCP socket stays allocated until GC, which
+    // causes connection pool exhaustion under sustained error conditions.
+    // Wrapped in try-catch so a stream error doesn't mask the HTTP status error.
+    try { await response.text(); } catch { /* body drain is best-effort */ }
     throw new Error(
       `Source map upload failed: ${String(response.status)} ${response.statusText}`,
     );
