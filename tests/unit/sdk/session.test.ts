@@ -5,6 +5,7 @@ import {
   getOrigin,
   getDateString,
   SessionManager,
+  _resetEnvCacheForTesting,
 } from "../../../packages/sdk/src/session.js";
 
 describe("deriveSessionId", () => {
@@ -76,10 +77,12 @@ describe("getOrigin", () => {
     originalEnv = { ...process.env };
     delete process.env.PORT;
     delete process.env.GLASSTRACE_ENV;
+    _resetEnvCacheForTesting();
   });
 
   afterEach(() => {
     process.env = originalEnv;
+    _resetEnvCacheForTesting();
   });
 
   it("returns localhost:3000 by default", () => {
@@ -88,17 +91,20 @@ describe("getOrigin", () => {
 
   it("reads PORT from process.env", () => {
     process.env.PORT = "8080";
+    _resetEnvCacheForTesting();
     expect(getOrigin()).toBe("localhost:8080");
   });
 
   it("returns GLASSTRACE_ENV if set instead of hostname:port", () => {
     process.env.GLASSTRACE_ENV = "staging";
+    _resetEnvCacheForTesting();
     expect(getOrigin()).toBe("staging");
   });
 
   it("GLASSTRACE_ENV takes precedence over PORT", () => {
     process.env.PORT = "8080";
     process.env.GLASSTRACE_ENV = "production";
+    _resetEnvCacheForTesting();
     expect(getOrigin()).toBe("production");
   });
 });
@@ -133,11 +139,13 @@ describe("SessionManager", () => {
     originalEnv = { ...process.env };
     delete process.env.PORT;
     delete process.env.GLASSTRACE_ENV;
+    _resetEnvCacheForTesting();
   });
 
   afterEach(() => {
     vi.useRealTimers();
     process.env = originalEnv;
+    _resetEnvCacheForTesting();
   });
 
   it("starts with windowIndex 0", () => {

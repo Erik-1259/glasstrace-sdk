@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { classifyFetchTarget } from "../../../packages/sdk/src/fetch-classifier.js";
+import { classifyFetchTarget, _resetEnvCacheForTesting } from "../../../packages/sdk/src/fetch-classifier.js";
 
 describe("classifyFetchTarget", () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -8,10 +8,12 @@ describe("classifyFetchTarget", () => {
     originalEnv = { ...process.env };
     delete process.env.PORT;
     delete process.env.GLASSTRACE_ENV;
+    _resetEnvCacheForTesting();
   });
 
   afterEach(() => {
     process.env = originalEnv;
+    _resetEnvCacheForTesting();
   });
 
   it("classifies supabase.co URLs as supabase", () => {
@@ -56,6 +58,7 @@ describe("classifyFetchTarget", () => {
 
   it("internal detection uses PORT from env", () => {
     process.env.PORT = "8080";
+    _resetEnvCacheForTesting();
     expect(classifyFetchTarget("http://localhost:8080/api/data")).toBe("internal");
   });
 
