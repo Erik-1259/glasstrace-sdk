@@ -415,7 +415,7 @@ describe("GlasstraceExporter", () => {
   });
 
   describe("Session ID uses resolved key", () => {
-    it("computes session ID with resolved key, not pending placeholder", () => {
+    it("computes session ID with resolved key for both buffered and direct spans", () => {
       const delegate = createMockDelegate();
       let currentKey = API_KEY_PENDING;
       const sessionManager = new SessionManager();
@@ -438,22 +438,12 @@ describe("GlasstraceExporter", () => {
       currentKey = TEST_API_KEY;
       exporter.notifyKeyResolved();
 
-      // The flushed span should have a session ID computed with the resolved key
+      // Buffered spans are enriched at flush time with the resolved key
       const flushedSpan = delegate.exportedSpans[0][0];
       const sessionIdFromResolvedKey = sessionManager.getSessionId(TEST_API_KEY);
-      // Note: the enrichment already happened at buffer time, but session ID
-      // uses getApiKey() which returns the current key at enrichment time.
-      // Since we buffer at pending time, session ID was computed with pending.
-      // However, the enrichment happens in export(), and at that point the key
-      // was still pending. The spans are enriched at export() call time.
-      // The key benefit is that the exporter's enrichSpan() calls getApiKey()
-      // which could return "pending" at buffer time. The session ID on flushed
-      // spans may still use the pending key since enrichment happens at the
-      // initial export() call. The real fix is that spans arriving after key
-      // resolution will get the correct session ID.
-      expect(flushedSpan.attributes[ATTR.SESSION_ID]).toBeTruthy();
+      expect(flushedSpan.attributes[ATTR.SESSION_ID]).toBe(sessionIdFromResolvedKey);
 
-      // New spans after key resolution should use the resolved key
+      // New spans after key resolution should also use the resolved key
       const span2 = createMockSpan();
       const callback2 = vi.fn();
       exporter.export([span2], callback2);
@@ -714,6 +704,110 @@ describe("GlasstraceExporter", () => {
       });
 
       await expect(exporter.forceFlush()).resolves.toBeUndefined();
+    });
+  });
+
+  describe("Deferred enrichment", () => {
+    it("enriches buffered spans at flush time with the resolved key", () => {
+      const delegate = createMockDelegate();
+      let currentKey = API_KEY_PENDING;
+      const sessionManager = new SessionManager();
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager,
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+      });
+
+      // Buffer a span while key is pending
+      const span = createMockSpan();
+      const callback = vi.fn();
+      exporter.export([span], callback);
+
+      // Resolve key and flush
+      currentKey = TEST_API_KEY;
+      exporter.notifyKeyResolved();
+
+      // The flushed span should have a session ID from the resolved key
+      const flushedSpan = delegate.exportedSpans[0][0];
+      const expectedSessionId = sessionManager.getSessionId(TEST_API_KEY);
+      expect(flushedSpan.attributes[ATTR.SESSION_ID]).toBe(expectedSessionId);
+    });
+  });
+
+  describe("Buffer race condition fix", () => {
+    it("flushes immediately when key resolves between check and buffer", () => {
+      const delegate = createMockDelegate();
+      let callCount = 0;
+
+      // Simulate the race: getApiKey returns "pending" on the first call
+      // (the check in export()) but returns the real key on the second call
+      // (the re-check in bufferSpans). This models the key resolving between
+      // the two calls.
+      const getApiKey = () => {
+        callCount++;
+        return callCount <= 1 ? API_KEY_PENDING : TEST_API_KEY;
+      };
+
+      const exporter = new GlasstraceExporter({
+        getApiKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+      });
+
+      const span = createMockSpan();
+      const callback = vi.fn();
+
+      exporter.export([span], callback);
+
+      // The re-check in bufferSpans should have detected the resolved key
+      // and flushed immediately — no need for notifyKeyResolved.
+      expect(delegate.exportedSpans).toHaveLength(1);
+      expect(callback).toHaveBeenCalled();
+    });
+  });
+
+  describe("Key rotation", () => {
+    it("recreates delegate when API key changes", () => {
+      let currentKey = "gt_dev_" + "a".repeat(48);
+
+      const createDelegate = vi.fn(() => createMockDelegate());
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate,
+      });
+
+      // First export — creates delegate with key A
+      exporter.export([createMockSpan()], vi.fn());
+      expect(createDelegate).toHaveBeenCalledTimes(1);
+
+      // Second export with same key — reuses delegate
+      exporter.export([createMockSpan()], vi.fn());
+      expect(createDelegate).toHaveBeenCalledTimes(1);
+
+      // Rotate key
+      currentKey = "gt_dev_" + "b".repeat(48);
+
+      // Third export — should create new delegate with key B
+      exporter.export([createMockSpan()], vi.fn());
+      expect(createDelegate).toHaveBeenCalledTimes(2);
+
+      // Verify the new delegate was called with the new key in headers
+      const lastCallArgs = createDelegate.mock.calls[1];
+      expect(lastCallArgs[1]).toEqual({
+        Authorization: `Bearer ${currentKey}`,
+      });
     });
   });
 
