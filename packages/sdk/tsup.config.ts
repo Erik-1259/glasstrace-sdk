@@ -9,7 +9,11 @@ export default defineConfig({
   },
   format: ["esm", "cjs"],
   tsconfig: "tsconfig.build.json",
-  dts: true,
+  // Inline @glasstrace/protocol and zod into the SDK bundle so consumers
+  // have zero runtime dependencies. This ensures the SDK works with npm,
+  // pnpm, yarn, and Bun without any transitive dependency issues.
+  noExternal: ["@glasstrace/protocol", "zod"],
+  dts: { resolve: ["@glasstrace/protocol", "zod"] },
   sourcemap: true,
   clean: true,
   define: {
