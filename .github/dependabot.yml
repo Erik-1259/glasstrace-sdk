@@ -4,6 +4,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
     groups:
       # Minor and patch updates are grouped together. These are
       # usually non-breaking for stable (>=1.0) dependencies.
@@ -25,3 +26,4 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
