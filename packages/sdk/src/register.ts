@@ -5,9 +5,11 @@ import { resolveConfig, isProductionDisabled, isAnonymousMode } from "./env-dete
 import type { ResolvedConfig } from "./env-detection.js";
 import { SessionManager } from "./session.js";
 import { getOrCreateAnonKey, readAnonKey } from "./anon-key.js";
-import { loadCachedConfig, performInit, _setCurrentConfig } from "./init-client.js";
+import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig } from "./init-client.js";
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
+import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
+import { _preloadOtelApi } from "./capture-error.js";
 
 /** Module-level state tracking for the registered discovery handler. */
 let discoveryHandler: ((request: Request) => Promise<Response | null>) | null = null;
@@ -100,6 +102,13 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // This is fire-and-forget -- OTel failure must not block init.
     void configureOtel(config, sessionManager).then(
       () => {
+        // Preload OTel API for captureError() so it can resolve spans synchronously
+        void _preloadOtelApi();
+
+        // Install console capture after OTel is ready so span context is available
+        if (getActiveConfig().consoleErrors) {
+          void installConsoleCapture();
+        }
         if (config.verbose) {
           console.info("[glasstrace] Step 6: OTel configured.");
         }
@@ -266,5 +275,6 @@ export function _resetRegistrationForTesting(): void {
   isRegistered = false;
   discoveryHandler = null;
   registrationGeneration++;
+  uninstallConsoleCapture();
   resetOtelConfigForTesting();
 }

@@ -49,4 +49,5 @@ export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
   envVarValues: false,
   fullConsoleOutput: false,
   importGraph: false,
+  consoleErrors: false,
 };

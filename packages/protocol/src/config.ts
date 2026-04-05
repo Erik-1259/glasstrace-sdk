@@ -11,6 +11,7 @@ export const CaptureConfigSchema = z.object({
   envVarValues: z.boolean(),
   fullConsoleOutput: z.boolean(),
   importGraph: z.boolean(),
+  consoleErrors: z.boolean().optional().default(false),
 });
 export type CaptureConfig = z.infer<typeof CaptureConfigSchema>;
 
