@@ -25,6 +25,7 @@ function makeInitResponse(overrides?: Partial<SdkInitResponse>): SdkInitResponse
       envVarValues: false,
       fullConsoleOutput: false,
       importGraph: false,
+      consoleErrors: false,
     },
     subscriptionStatus: "anonymous",
     minimumSdkVersion: "0.0.0",

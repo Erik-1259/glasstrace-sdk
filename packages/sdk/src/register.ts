@@ -5,9 +5,14 @@ import { resolveConfig, isProductionDisabled, isAnonymousMode } from "./env-dete
 import type { ResolvedConfig } from "./env-detection.js";
 import { SessionManager } from "./session.js";
 import { getOrCreateAnonKey, readAnonKey } from "./anon-key.js";
-import { loadCachedConfig, performInit, _setCurrentConfig } from "./init-client.js";
+import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig } from "./init-client.js";
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
+import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
+import { _preloadOtelApi } from "./capture-error.js";
+
+/** Whether console capture has been installed in this registration cycle. */
+let consoleCaptureInstalled = false;
 
 /** Module-level state tracking for the registered discovery handler. */
 let discoveryHandler: ((request: Request) => Promise<Response | null>) | null = null;
@@ -100,6 +105,13 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // This is fire-and-forget -- OTel failure must not block init.
     void configureOtel(config, sessionManager).then(
       () => {
+        // Preload OTel API for captureError() so it can resolve spans synchronously
+        void _preloadOtelApi();
+
+        // Check cached config for consoleErrors (may be stale or absent).
+        // Re-checked after performInit completes with the authoritative config.
+        maybeInstallConsoleCapture();
+
         if (config.verbose) {
           console.info("[glasstrace] OTel configured.");
         }
@@ -154,6 +166,9 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             }
 
             await performInit(config, anonKey, __SDK_VERSION__);
+
+            // Re-check consoleErrors with the authoritative init response config
+            maybeInstallConsoleCapture();
           } catch (err) {
             console.warn(
               `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -178,6 +193,9 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             }
 
             await performInit(config, anonKey, __SDK_VERSION__);
+
+            // Re-check consoleErrors with the authoritative init response config
+            maybeInstallConsoleCapture();
           } catch (err) {
             console.warn(
               `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -204,6 +222,9 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             console.info("[glasstrace] Background init firing.");
           }
           await performInit(config, anonKeyForInit, __SDK_VERSION__);
+
+          // Re-check consoleErrors with the authoritative init response config
+          maybeInstallConsoleCapture();
         } catch (err) {
           console.warn(
             `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -228,6 +249,20 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
  */
 export function getDiscoveryHandler(): ((request: Request) => Promise<Response | null>) | null {
   return discoveryHandler;
+}
+
+/**
+ * Checks the active config and installs console capture if enabled.
+ * Idempotent — safe to call multiple times (after OTel config, after init).
+ * This ensures console capture is installed whenever authoritative config
+ * becomes available, whether from the file cache or the init response.
+ */
+function maybeInstallConsoleCapture(): void {
+  if (consoleCaptureInstalled) return;
+  if (getActiveConfig().consoleErrors) {
+    consoleCaptureInstalled = true;
+    void installConsoleCapture();
+  }
 }
 
 /**
@@ -265,6 +300,8 @@ function isDiscoveryEnabled(config: ResolvedConfig): boolean {
 export function _resetRegistrationForTesting(): void {
   isRegistered = false;
   discoveryHandler = null;
+  consoleCaptureInstalled = false;
   registrationGeneration++;
+  uninstallConsoleCapture();
   resetOtelConfigForTesting();
 }
