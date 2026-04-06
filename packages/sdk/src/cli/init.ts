@@ -123,9 +123,9 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   try {
     const envCreated = await scaffoldEnvLocal(projectRoot);
     if (envCreated) {
-      summary.push("Updated .env.local with GLASSTRACE_API_KEY placeholder");
+      summary.push("Updated .env.local with Glasstrace configuration");
     } else {
-      summary.push("Skipped .env.local (GLASSTRACE_API_KEY already present)");
+      summary.push("Skipped .env.local (GLASSTRACE_API_KEY already configured)");
     }
   } catch (err) {
     errors.push(`Failed to update .env.local: ${err instanceof Error ? err.message : String(err)}`);
@@ -244,9 +244,9 @@ if (isDirectExecution) {
           process.stderr.write(`  - ${line}\n`);
         }
         process.stderr.write("\nNext steps:\n");
-        process.stderr.write("  1. Set your GLASSTRACE_API_KEY in .env.local\n");
-        process.stderr.write("  2. Start your Next.js dev server\n");
-        process.stderr.write("  3. Glasstrace will begin capturing traces automatically\n\n");
+        process.stderr.write("  1. Start your Next.js dev server\n");
+        process.stderr.write("  2. Glasstrace works immediately in anonymous mode\n");
+        process.stderr.write("  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n");
       }
       process.exit(result.exitCode);
     })

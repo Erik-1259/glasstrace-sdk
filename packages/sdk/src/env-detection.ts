@@ -22,7 +22,7 @@ const DEFAULT_ENDPOINT = "https://api.glasstrace.dev";
  */
 export function readEnvVars(): GlasstraceEnvVars {
   return {
-    GLASSTRACE_API_KEY: process.env.GLASSTRACE_API_KEY,
+    GLASSTRACE_API_KEY: process.env.GLASSTRACE_API_KEY?.trim() || undefined,
     GLASSTRACE_FORCE_ENABLE: process.env.GLASSTRACE_FORCE_ENABLE,
     GLASSTRACE_ENV: process.env.GLASSTRACE_ENV,
     GLASSTRACE_COVERAGE_MAP: process.env.GLASSTRACE_COVERAGE_MAP,

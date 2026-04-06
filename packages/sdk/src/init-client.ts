@@ -101,8 +101,9 @@ export async function sendInitRequest(
   diagnostics?: Array<{ code: SdkDiagnosticCode; message: string; timestamp: number }>,
   signal?: AbortSignal,
 ): Promise<SdkInitResponse> {
-  // Determine the API key for auth
-  const effectiveKey = config.apiKey ?? anonKey;
+  // Determine the API key for auth. Use || (not ??) so empty strings
+  // fall through to the anonymous key — defense in depth for DISC-467.
+  const effectiveKey = config.apiKey || anonKey;
   if (!effectiveKey) {
     throw new Error("No API key available for init request");
   }
@@ -174,7 +175,7 @@ export async function performInit(
   }
 
   try {
-    const effectiveKey = config.apiKey ?? anonKey;
+    const effectiveKey = config.apiKey || anonKey;
     if (!effectiveKey) {
       console.warn("[glasstrace] No API key available for init request.");
       return;
