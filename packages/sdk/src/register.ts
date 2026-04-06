@@ -9,7 +9,6 @@ import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig } fro
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
 import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
-import { _preloadOtelApi } from "./capture-error.js";
 
 /** Whether console capture has been installed in this registration cycle. */
 let consoleCaptureInstalled = false;
@@ -105,9 +104,6 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // This is fire-and-forget -- OTel failure must not block init.
     void configureOtel(config, sessionManager).then(
       () => {
-        // Preload OTel API for captureError() so it can resolve spans synchronously
-        void _preloadOtelApi();
-
         // Check cached config for consoleErrors (may be stale or absent).
         // Re-checked after performInit completes with the authoritative config.
         maybeInstallConsoleCapture();

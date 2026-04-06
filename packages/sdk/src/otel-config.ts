@@ -1,6 +1,8 @@
 import type { ResolvedConfig } from "./env-detection.js";
 import type { SessionManager } from "./session.js";
-import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { BasicTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 
@@ -139,17 +141,9 @@ export async function configureOtel(
   // Build OTLP exporter configuration
   const exporterUrl = `${config.endpoint}/v1/traces`;
 
-  // Build the exporter factory from the optional OTLP peer dependency
-  let createOtlpExporter: ((url: string, headers: Record<string, string>) => SpanExporter) | null = null;
-  const otlpModule = await tryImport("@opentelemetry/exporter-trace-otlp-http");
-  if (otlpModule && typeof otlpModule.OTLPTraceExporter === "function") {
-    const OTLPTraceExporter = otlpModule.OTLPTraceExporter as new (opts: {
-      url: string;
-      headers: Record<string, string>;
-    }) => SpanExporter;
-    createOtlpExporter = (url: string, headers: Record<string, string>) =>
-      new OTLPTraceExporter({ url, headers });
-  }
+  // OTLP exporter factory — always available since OTel is bundled.
+  const createOtlpExporter = (url: string, headers: Record<string, string>) =>
+    new OTLPTraceExporter({ url, headers });
 
   // Create the GlasstraceExporter that enriches + buffers + delegates
   const glasstraceExporter = new GlasstraceExporter({
@@ -165,12 +159,6 @@ export async function configureOtel(
   // Try @vercel/otel first
   const vercelOtel = await tryImport("@vercel/otel");
   if (vercelOtel && typeof vercelOtel.registerOTel === "function") {
-    if (!createOtlpExporter) {
-      console.warn(
-        "[glasstrace] @opentelemetry/exporter-trace-otlp-http not found for @vercel/otel path. Trace export disabled.",
-      );
-    }
-
     const otelConfig: Record<string, unknown> = {
       serviceName: "glasstrace-sdk",
       traceExporter: glasstraceExporter,
@@ -191,70 +179,32 @@ export async function configureOtel(
   }
 
   // Fallback: bare OTel SDK with BasicTracerProvider
-  try {
-    const otelSdk = await import("@opentelemetry/sdk-trace-base");
-    const otelApi = await import("@opentelemetry/api");
-
-    // Check for an existing OTel provider before registering.
-    // If another tool (Datadog, Sentry, New Relic) already registered a provider,
-    // skip Glasstrace registration to avoid silently breaking their tracing.
-    // OTel wraps the global provider in a ProxyTracerProvider, so we probe for a
-    // real provider by requesting a tracer and checking if it's a "ProxyTracer"
-    // (the no-op default) or a real Tracer from a registered provider.
-    const existingProvider = otelApi.trace.getTracerProvider();
-    const probeTracer = existingProvider.getTracer("glasstrace-probe");
-    if (probeTracer.constructor.name !== "ProxyTracer") {
-      console.warn(
-        "[glasstrace] An existing OpenTelemetry TracerProvider is already registered. " +
-        "Glasstrace will not overwrite it. To use Glasstrace alongside another " +
-        "tracing tool, add GlasstraceExporter as an additional span processor " +
-        "on your existing provider.",
-      );
-      _activeExporter = null;
-      return;
-    }
-
-    if (!createOtlpExporter) {
-      // No OTLP exporter available -- rebuild GlasstraceExporter with a
-      // ConsoleSpanExporter delegate so spans still get glasstrace.* enrichment.
-      const consoleExporter = new otelSdk.ConsoleSpanExporter();
-      const consoleGlasstraceExporter = new GlasstraceExporter({
-        getApiKey: getResolvedApiKey,
-        sessionManager,
-        getConfig: () => getActiveConfig(),
-        environment: config.environment,
-        endpointUrl: exporterUrl,
-        createDelegate: () => consoleExporter,
-      });
-      _activeExporter = consoleGlasstraceExporter;
-
-      console.warn(
-        "[glasstrace] @opentelemetry/exporter-trace-otlp-http not found. Using ConsoleSpanExporter.",
-      );
-
-      // ConsoleSpanExporter uses SimpleSpanProcessor — synchronous export is
-      // acceptable for debug-only console output.
-      const processor = new otelSdk.SimpleSpanProcessor(consoleGlasstraceExporter);
-      const provider = new otelSdk.BasicTracerProvider({
-        spanProcessors: [processor],
-      });
-      otelApi.trace.setGlobalTracerProvider(provider);
-      registerShutdownHooks(provider);
-      return;
-    }
-
-    // Use BatchSpanProcessor for production OTLP exports to avoid blocking
-    // the event loop on every span.end() call.
-    const processor = new otelSdk.BatchSpanProcessor(glasstraceExporter);
-    const provider = new otelSdk.BasicTracerProvider({
-      spanProcessors: [processor],
-    });
-
-    otelApi.trace.setGlobalTracerProvider(provider);
-    registerShutdownHooks(provider);
-  } catch {
+  // Check for an existing OTel provider before registering.
+  // If another tool (Datadog, Sentry, New Relic) already registered a provider,
+  // skip Glasstrace registration to avoid silently breaking their tracing.
+  // OTel wraps the global provider in a ProxyTracerProvider, so we probe for a
+  // real provider by requesting a tracer and checking if it's a "ProxyTracer"
+  // (the no-op default) or a real Tracer from a registered provider.
+  const existingProvider = otelApi.trace.getTracerProvider();
+  const probeTracer = existingProvider.getTracer("glasstrace-probe");
+  if (probeTracer.constructor.name !== "ProxyTracer") {
     console.warn(
-      "[glasstrace] Neither @vercel/otel nor @opentelemetry/sdk-trace-base available. Tracing disabled.",
+      "[glasstrace] An existing OpenTelemetry TracerProvider is already registered. " +
+      "Glasstrace will not overwrite it. To use Glasstrace alongside another " +
+      "tracing tool, add GlasstraceExporter as an additional span processor " +
+      "on your existing provider.",
     );
+    _activeExporter = null;
+    return;
   }
+
+  // Use BatchSpanProcessor for production OTLP exports to avoid blocking
+  // the event loop on every span.end() call.
+  const processor = new BatchSpanProcessor(glasstraceExporter);
+  const provider = new BasicTracerProvider({
+    spanProcessors: [processor],
+  });
+
+  otelApi.trace.setGlobalTracerProvider(provider);
+  registerShutdownHooks(provider);
 }

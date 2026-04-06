@@ -9,11 +9,26 @@ export default defineConfig({
   },
   format: ["esm", "cjs"],
   tsconfig: "tsconfig.build.json",
-  // Inline @glasstrace/protocol and zod into the SDK bundle so consumers
-  // have zero runtime dependencies. This ensures the SDK works with npm,
-  // pnpm, yarn, and Bun without any transitive dependency issues.
-  noExternal: ["@glasstrace/protocol", "zod"],
-  dts: { resolve: ["@glasstrace/protocol", "zod"] },
+  // Inline all runtime dependencies into the SDK bundle so consumers have
+  // zero required dependencies. OTel's API uses Symbol.for on globalThis for
+  // singleton coordination, making bundled and user-installed copies safe to
+  // coexist. @vercel/otel and @prisma/instrumentation remain external (optional).
+  noExternal: [
+    "@glasstrace/protocol",
+    "zod",
+    "@opentelemetry/api",
+    "@opentelemetry/sdk-trace-base",
+    "@opentelemetry/exporter-trace-otlp-http",
+    "@opentelemetry/core",
+  ],
+  dts: { resolve: [
+    "@glasstrace/protocol",
+    "zod",
+    "@opentelemetry/api",
+    "@opentelemetry/sdk-trace-base",
+    "@opentelemetry/exporter-trace-otlp-http",
+    "@opentelemetry/core",
+  ] },
   sourcemap: true,
   clean: true,
   define: {

@@ -63,8 +63,9 @@ function isSdkMessage(args: unknown[]): boolean {
 export async function installConsoleCapture(): Promise<void> {
   if (installed) return;
 
-  // Resolve OTel API once at install time. If unavailable, the wrappers
-  // will simply call through to the original console methods.
+  // Resolve OTel API at install time via dynamic import so that:
+  // 1. tsup inlines @opentelemetry/api into the bundle (it's in noExternal)
+  // 2. vitest's vi.doMock can intercept this import for testing
   try {
     otelApi = await import("@opentelemetry/api");
   } catch {
