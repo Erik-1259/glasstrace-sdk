@@ -1,4 +1,3 @@
-import type { Context } from "@opentelemetry/api";
 import type { SpanProcessor, ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import type { CaptureConfig } from "@glasstrace/protocol";
@@ -33,7 +32,7 @@ export class GlasstraceSpanProcessor implements SpanProcessor {
     this.wrappedProcessor = wrappedProcessor;
   }
 
-  onStart(span: Span, parentContext: Context): void {
+  onStart(span: Span, parentContext: Parameters<SpanProcessor["onStart"]>[1]): void {
     this.wrappedProcessor.onStart(span, parentContext);
   }
 
