@@ -187,16 +187,16 @@ export async function scaffoldEnvLocal(projectRoot: string): Promise<boolean> {
 
   if (fs.existsSync(filePath)) {
     const existing = fs.readFileSync(filePath, "utf-8");
-    if (/^\s*GLASSTRACE_API_KEY\s*=/m.test(existing)) {
+    if (/^\s*#?\s*GLASSTRACE_API_KEY\s*=/m.test(existing)) {
       return false;
     }
     // Append with a newline separator if needed
     const separator = existing.endsWith("\n") ? "" : "\n";
-    fs.writeFileSync(filePath, existing + separator + "GLASSTRACE_API_KEY=\n", "utf-8");
+    fs.writeFileSync(filePath, existing + separator + "# GLASSTRACE_API_KEY=your_key_here\n", "utf-8");
     return true;
   }
 
-  fs.writeFileSync(filePath, "GLASSTRACE_API_KEY=\n", "utf-8");
+  fs.writeFileSync(filePath, "# GLASSTRACE_API_KEY=your_key_here\n", "utf-8");
   return true;
 }
 

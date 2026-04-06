@@ -24,6 +24,18 @@ describe("readEnvVars", () => {
     expect(vars.GLASSTRACE_API_KEY).toBe("gt_dev_test123");
   });
 
+  it("normalizes empty-string GLASSTRACE_API_KEY to undefined", () => {
+    process.env.GLASSTRACE_API_KEY = "";
+    const vars = readEnvVars();
+    expect(vars.GLASSTRACE_API_KEY).toBeUndefined();
+  });
+
+  it("normalizes whitespace-only GLASSTRACE_API_KEY to undefined", () => {
+    process.env.GLASSTRACE_API_KEY = "   ";
+    const vars = readEnvVars();
+    expect(vars.GLASSTRACE_API_KEY).toBeUndefined();
+  });
+
   it("reads GLASSTRACE_FORCE_ENABLE from process.env", () => {
     process.env.GLASSTRACE_FORCE_ENABLE = "true";
     const vars = readEnvVars();

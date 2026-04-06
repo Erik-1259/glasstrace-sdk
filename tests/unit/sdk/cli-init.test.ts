@@ -320,11 +320,11 @@ module.exports = nextConfig;
 });
 
 describe("scaffoldEnvLocal", () => {
-  it("creates .env.local with GLASSTRACE_API_KEY placeholder", async () => {
+  it("creates .env.local with commented GLASSTRACE_API_KEY", async () => {
     const result = await scaffoldEnvLocal(tmpDir);
     expect(result).toBe(true);
     const content = fs.readFileSync(path.join(tmpDir, ".env.local"), "utf-8");
-    expect(content).toContain("GLASSTRACE_API_KEY=");
+    expect(content).toContain("# GLASSTRACE_API_KEY=your_key_here");
   });
 
   it("appends to existing .env.local if key not present", async () => {
@@ -333,7 +333,7 @@ describe("scaffoldEnvLocal", () => {
     expect(result).toBe(true);
     const content = fs.readFileSync(path.join(tmpDir, ".env.local"), "utf-8");
     expect(content).toContain("OTHER_KEY=value");
-    expect(content).toContain("GLASSTRACE_API_KEY=");
+    expect(content).toContain("# GLASSTRACE_API_KEY=your_key_here");
   });
 
   it("does not false-positive on similarly named keys", async () => {
@@ -341,8 +341,14 @@ describe("scaffoldEnvLocal", () => {
     const result = await scaffoldEnvLocal(tmpDir);
     expect(result).toBe(true);
     const content = fs.readFileSync(path.join(tmpDir, ".env.local"), "utf-8");
-    expect(content).toContain("GLASSTRACE_API_KEY=");
+    expect(content).toContain("# GLASSTRACE_API_KEY=your_key_here");
     expect(content).toContain("GLASSTRACE_API_KEY_OLD=abc");
+  });
+
+  it("does not duplicate when commented key already exists", async () => {
+    fs.writeFileSync(path.join(tmpDir, ".env.local"), "# GLASSTRACE_API_KEY=your_key_here\n");
+    const result = await scaffoldEnvLocal(tmpDir);
+    expect(result).toBe(false);
   });
 
   it("does not add duplicate GLASSTRACE_API_KEY", async () => {
