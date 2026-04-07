@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.3.0
+
+### Minor Changes
+
+- eba313a: Add MCP auto-configuration to `glasstrace init` — automatically detects AI coding agents and writes native MCP config files
+
 ## 0.2.3
 
 ### Patch Changes
