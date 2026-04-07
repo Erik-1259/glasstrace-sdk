@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.4.0
+
+### Minor Changes
+
+- 1ab7ba3: Add `glasstrace mcp add` command for explicit MCP server registration with AI coding agents
+
 ## 0.3.0
 
 ### Minor Changes
