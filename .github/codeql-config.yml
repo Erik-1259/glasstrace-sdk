@@ -1,0 +1,9 @@
+name: "Glasstrace SDK CodeQL Config"
+
+# The SDK uses SHA-256 to compute identity fingerprints for marker file
+# deduplication. CodeQL's js/insufficient-password-hash rule flags this
+# as weak password hashing, but the input is an opaque API token used
+# as a deduplication key, not a user credential.
+query-filters:
+  - exclude:
+      id: js/insufficient-password-hash

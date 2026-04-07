@@ -1,5 +1,15 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+/**
+ * Computes a stable identity fingerprint for deduplication purposes.
+ * This is NOT password hashing — the input is an opaque token used
+ * as a marker identity, not a credential stored for authentication.
+ */
+function identityFingerprint(token: string): string {
+  return `sha256:${createHash("sha256").update(token).digest("hex")}`;
+}
 
 /** Next.js config file names in priority order */
 const NEXT_CONFIG_NAMES = ["next.config.ts", "next.config.js", "next.config.mjs"] as const;
@@ -260,5 +270,61 @@ export async function scaffoldGitignore(projectRoot: string): Promise<boolean> {
   }
 
   fs.writeFileSync(filePath, ".glasstrace/\n", "utf-8");
+  return true;
+}
+
+/**
+ * Creates the `.glasstrace/mcp-connected` marker file, or overwrites it
+ * if the key has changed (key rotation).
+ *
+ * The marker file records a SHA-256 fingerprint of the anonymous key and
+ * the ISO 8601 timestamp when it was written. It is used by the nudge
+ * system to suppress "MCP not configured" prompts.
+ *
+ * If the marker already exists with the same key fingerprint, this is a
+ * no-op (the timestamp is NOT refreshed).
+ *
+ * @param projectRoot - Absolute path to the project root directory.
+ * @param anonKey - The anonymous API key to fingerprint.
+ * @returns True if the marker was created or updated, false if it already
+ *   exists with the same key fingerprint.
+ */
+export async function scaffoldMcpMarker(
+  projectRoot: string,
+  anonKey: string,
+): Promise<boolean> {
+  const dirPath = path.join(projectRoot, ".glasstrace");
+  const markerPath = path.join(dirPath, "mcp-connected");
+  const keyHash = identityFingerprint(anonKey);
+
+  // Check if marker already exists with the same key hash
+  if (fs.existsSync(markerPath)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as {
+        keyHash?: string;
+      };
+      if (existing.keyHash === keyHash) {
+        return false;
+      }
+    } catch {
+      // Corrupted marker — overwrite
+    }
+  }
+
+  // Create directory with restricted permissions
+  fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+
+  const marker = JSON.stringify(
+    { keyHash, configuredAt: new Date().toISOString() },
+    null,
+    2,
+  );
+
+  fs.writeFileSync(markerPath, marker, { mode: 0o600 });
+
+  // Ensure permissions even if file pre-existed (writeFile mode only
+  // applies on creation on some platforms)
+  fs.chmodSync(markerPath, 0o600);
+
   return true;
 }
