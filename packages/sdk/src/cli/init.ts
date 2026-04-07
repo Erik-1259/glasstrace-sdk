@@ -7,9 +7,31 @@ import {
   scaffoldNextConfig,
   scaffoldEnvLocal,
   scaffoldGitignore,
+  scaffoldMcpMarker,
   addCoverageMapEnv,
 } from "./scaffolder.js";
 import { buildImportGraph } from "../import-graph.js";
+import { readAnonKey } from "../anon-key.js";
+import { detectAgents } from "../agent-detection/detect.js";
+import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
+import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
+import type { DetectedAgent } from "../agent-detection/detect.js";
+
+/** Glasstrace MCP endpoint for agent configuration. */
+const MCP_ENDPOINT = "https://api.glasstrace.dev/mcp";
+
+/** Maps internal agent name to a human-readable display name. */
+function formatAgentName(name: DetectedAgent["name"]): string {
+  const displayNames: Record<DetectedAgent["name"], string> = {
+    claude: "Claude Code",
+    codex: "Codex",
+    gemini: "Gemini",
+    cursor: "Cursor",
+    windsurf: "Windsurf",
+    generic: "Generic",
+  };
+  return displayNames[name];
+}
 
 /** Options for the init command (parsed from CLI args or passed programmatically). */
 export interface InitOptions {
@@ -145,7 +167,129 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     return { exitCode: 1, summary, warnings, errors };
   }
 
-  // Step 7: Coverage map opt-in
+  // Step 7: MCP auto-configuration
+  // Use CI env vars (not TTY check) to distinguish automated builds from
+  // manual CLI usage. TTY state is unreliable — piped output, test runners,
+  // and IDE terminals all report isTTY=false despite being user-initiated.
+  // Accept any truthy CI value (GitHub Actions, GitLab, CircleCI, Travis,
+  // etc.) and also check GITHUB_ACTIONS specifically.
+  const ciEnv = process.env["CI"];
+  const isCI =
+    (typeof ciEnv === "string" &&
+      ciEnv.trim() !== "" &&
+      ciEnv.toLowerCase() !== "false" &&
+      ciEnv.trim() !== "0") ||
+    process.env["GITHUB_ACTIONS"] === "true";
+
+  try {
+    const anonKey = await readAnonKey(projectRoot);
+
+    if (anonKey !== null) {
+      let anyConfigWritten = false;
+
+      if (isCI) {
+        // Non-interactive: write only the generic .glasstrace/mcp.json
+        const genericAgent: DetectedAgent = {
+          name: "generic",
+          mcpConfigPath: path.join(projectRoot, ".glasstrace", "mcp.json"),
+          infoFilePath: null,
+          cliAvailable: false,
+          registrationCommand: null,
+        };
+        const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, anonKey);
+        await writeMcpConfig(genericAgent, genericConfig, projectRoot);
+        if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
+          anyConfigWritten = true;
+          summary.push("Created .glasstrace/mcp.json (CI mode)");
+        }
+      } else {
+        // Interactive: detect agents and configure each
+        let agents: DetectedAgent[];
+        try {
+          agents = await detectAgents(projectRoot);
+        } catch (detectErr) {
+          warnings.push(
+            `Agent detection failed: ${detectErr instanceof Error ? detectErr.message : String(detectErr)}. Writing generic config only.`,
+          );
+          // Fall back to generic-only config
+          const genericAgent: DetectedAgent = {
+            name: "generic",
+            mcpConfigPath: path.join(projectRoot, ".glasstrace", "mcp.json"),
+            infoFilePath: null,
+            cliAvailable: false,
+            registrationCommand: null,
+          };
+          const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, anonKey);
+          await writeMcpConfig(genericAgent, genericConfig, projectRoot);
+          if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
+            anyConfigWritten = true;
+          }
+          agents = [];
+        }
+
+        const configuredNames: string[] = [];
+
+        for (const agent of agents) {
+          try {
+            const configContent = generateMcpConfig(agent, MCP_ENDPOINT, anonKey);
+            await writeMcpConfig(agent, configContent, projectRoot);
+
+            // Verify the config file was actually written (writeMcpConfig
+            // swallows permission errors and returns void)
+            const configExists = agent.mcpConfigPath !== null && fs.existsSync(agent.mcpConfigPath);
+            if (!configExists) {
+              continue;
+            }
+
+            anyConfigWritten = true;
+
+            const infoContent = generateInfoSection(agent, MCP_ENDPOINT);
+            if (infoContent !== "") {
+              await injectInfoSection(agent, infoContent, projectRoot);
+            }
+
+            if (agent.name !== "generic") {
+              configuredNames.push(formatAgentName(agent.name));
+            }
+          } catch (agentErr) {
+            warnings.push(
+              `Failed to configure MCP for ${agent.name}: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`,
+            );
+          }
+        }
+
+        if (configuredNames.length > 0) {
+          summary.push(`Configured MCP for: ${configuredNames.join(", ")}`);
+        } else if (anyConfigWritten) {
+          summary.push("Created .glasstrace/mcp.json (generic config)");
+        }
+      }
+
+      // Add MCP config files to .gitignore
+      await updateGitignore(
+        [".mcp.json", ".cursor/mcp.json", ".gemini/settings.json", ".codex/config.toml"],
+        projectRoot,
+      );
+
+      // Create marker file only if at least one config was successfully written.
+      // Without this gate, a failed MCP setup would suppress future nudges,
+      // leaving users stuck without MCP configuration.
+      if (anyConfigWritten) {
+        const markerCreated = await scaffoldMcpMarker(projectRoot, anonKey);
+        if (markerCreated) {
+          summary.push("Created .glasstrace/mcp-connected marker");
+        }
+      }
+    } else {
+      warnings.push("No anonymous key found. Skipping MCP auto-configuration. Run init again after the SDK has generated a key.");
+    }
+  } catch (mcpErr) {
+    warnings.push(
+      `MCP auto-configuration failed: ${mcpErr instanceof Error ? mcpErr.message : String(mcpErr)}`,
+    );
+  }
+
+  // Step 8: Coverage map opt-in
   let enableCoverageMap = coverageMap;
   if (!yes && !coverageMap) {
     if (process.stdin.isTTY) {
@@ -166,7 +310,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       warnings.push(`Failed to add coverage map env: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Step 8: Run initial import graph scan
+    // Step 9: Run initial import graph scan
     try {
       await buildImportGraph(projectRoot);
       summary.push("Completed initial import graph scan");

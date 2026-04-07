@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -7,6 +8,7 @@ import {
   scaffoldNextConfig,
   scaffoldEnvLocal,
   scaffoldGitignore,
+  scaffoldMcpMarker,
   addCoverageMapEnv,
 } from "../../../packages/sdk/src/cli/scaffolder.js";
 import { runInit } from "../../../packages/sdk/src/cli/init.js";
@@ -536,5 +538,318 @@ describe("runInit — CLI flow", () => {
       coverageMap: true,
     });
     expect(result.exitCode).toBe(0);
+  });
+});
+
+// --- MCP auto-configuration tests ---
+
+/** A valid anonymous key matching `gt_anon_` + 48 hex chars. */
+const TEST_ANON_KEY = "gt_anon_" + "a".repeat(48);
+
+/** Provisions an anon key file in the .glasstrace directory. */
+function provisionAnonKey(projectRoot: string, key: string = TEST_ANON_KEY): void {
+  const dir = path.join(projectRoot, ".glasstrace");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "anon_key"), key, "utf-8");
+}
+
+/** Creates a Claude agent marker in the project. */
+function createClaudeMarker(projectRoot: string): void {
+  fs.mkdirSync(path.join(projectRoot, ".claude"), { recursive: true });
+}
+
+/** Creates a Cursor agent marker in the project. */
+function createCursorMarker(projectRoot: string): void {
+  fs.mkdirSync(path.join(projectRoot, ".cursor"), { recursive: true });
+}
+
+describe("scaffoldMcpMarker", () => {
+  it("creates marker file with key hash and timestamp", async () => {
+    const result = await scaffoldMcpMarker(tmpDir, TEST_ANON_KEY);
+    expect(result).toBe(true);
+
+    const markerPath = path.join(tmpDir, ".glasstrace", "mcp-connected");
+    expect(fs.existsSync(markerPath)).toBe(true);
+
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as {
+      keyHash: string;
+      configuredAt: string;
+    };
+    const expectedHash = `sha256:${crypto.createHash("sha256").update(TEST_ANON_KEY).digest("hex")}`;
+    expect(marker.keyHash).toBe(expectedHash);
+    expect(marker.configuredAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("returns false when marker exists with same key hash", async () => {
+    await scaffoldMcpMarker(tmpDir, TEST_ANON_KEY);
+    const result = await scaffoldMcpMarker(tmpDir, TEST_ANON_KEY);
+    expect(result).toBe(false);
+  });
+
+  it("returns true when key changes", async () => {
+    await scaffoldMcpMarker(tmpDir, TEST_ANON_KEY);
+    const differentKey = "gt_anon_" + "b".repeat(48);
+    const result = await scaffoldMcpMarker(tmpDir, differentKey);
+    expect(result).toBe(true);
+  });
+
+  it("sets file permissions to 0o600", async () => {
+    await scaffoldMcpMarker(tmpDir, TEST_ANON_KEY);
+    const markerPath = path.join(tmpDir, ".glasstrace", "mcp-connected");
+    const stats = fs.statSync(markerPath);
+    // Check that only owner has read/write (0o600 = 0o100600 with file type bits)
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("runInit — MCP auto-configuration", () => {
+  // Tests that exercise the interactive (non-CI) agent detection path need
+  // to ensure CI is not set, since GitHub Actions sets CI=true by default.
+  let savedCI: string | undefined;
+  let savedGHA: string | undefined;
+
+  function enterNonCI(): void {
+    savedCI = process.env["CI"];
+    savedGHA = process.env["GITHUB_ACTIONS"];
+    delete process.env["CI"];
+    delete process.env["GITHUB_ACTIONS"];
+  }
+
+  function restoreCI(): void {
+    if (savedCI === undefined) {
+      delete process.env["CI"];
+    } else {
+      process.env["CI"] = savedCI;
+    }
+    if (savedGHA === undefined) {
+      delete process.env["GITHUB_ACTIONS"];
+    } else {
+      process.env["GITHUB_ACTIONS"] = savedGHA;
+    }
+  }
+
+  it("creates MCP config files when agent markers are present", async () => {
+    provisionAnonKey(tmpDir);
+    createClaudeMarker(tmpDir);
+
+    enterNonCI();
+    try {
+      const result = await runInit({
+        projectRoot: tmpDir,
+        yes: true,
+        coverageMap: false,
+      });
+
+      expect(result.exitCode).toBe(0);
+      // Claude's MCP config should be written to .mcp.json
+      const mcpConfigPath = path.join(tmpDir, ".mcp.json");
+      expect(fs.existsSync(mcpConfigPath)).toBe(true);
+      const mcpConfig = fs.readFileSync(mcpConfigPath, "utf-8");
+      expect(mcpConfig).toContain("glasstrace");
+      expect(mcpConfig).toContain("api.glasstrace.dev/mcp");
+
+      // Summary should mention the configured agent
+      expect(result.summary.some((s: string) => s.includes("Claude Code"))).toBe(true);
+    } finally {
+      restoreCI();
+    }
+  });
+
+  it("skips MCP config when anon key does not exist", async () => {
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(0);
+    // Should have a warning about missing key
+    expect(result.warnings.some((w: string) => w.includes("anonymous key"))).toBe(true);
+    // No MCP config files should exist
+    expect(fs.existsSync(path.join(tmpDir, ".mcp.json"))).toBe(false);
+    // Marker should not exist
+    expect(fs.existsSync(path.join(tmpDir, ".glasstrace", "mcp-connected"))).toBe(false);
+  });
+
+  it("creates only generic config in CI mode", async () => {
+    provisionAnonKey(tmpDir);
+    createClaudeMarker(tmpDir);
+
+    // Simulate CI by setting env var
+    const originalCI = process.env["CI"];
+    process.env["CI"] = "true";
+    try {
+      const result = await runInit({
+        projectRoot: tmpDir,
+        yes: true,
+        coverageMap: false,
+      });
+
+      expect(result.exitCode).toBe(0);
+      // Generic config should exist
+      const genericPath = path.join(tmpDir, ".glasstrace", "mcp.json");
+      expect(fs.existsSync(genericPath)).toBe(true);
+      // Summary should indicate CI mode
+      expect(result.summary.some((s: string) => s.includes("CI mode"))).toBe(true);
+      // Agent-specific config should NOT be written (Claude's .mcp.json)
+      expect(fs.existsSync(path.join(tmpDir, ".mcp.json"))).toBe(false);
+    } finally {
+      if (originalCI === undefined) {
+        delete process.env["CI"];
+      } else {
+        process.env["CI"] = originalCI;
+      }
+    }
+  });
+
+  it("treats CI=1 as CI mode", async () => {
+    provisionAnonKey(tmpDir);
+
+    const originalCI = process.env["CI"];
+    process.env["CI"] = "1";
+    try {
+      const result = await runInit({
+        projectRoot: tmpDir,
+        yes: true,
+        coverageMap: false,
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.summary.some((s: string) => s.includes("CI mode"))).toBe(true);
+    } finally {
+      if (originalCI === undefined) {
+        delete process.env["CI"];
+      } else {
+        process.env["CI"] = originalCI;
+      }
+    }
+  });
+
+  it("creates MCP marker file with correct key hash", async () => {
+    provisionAnonKey(tmpDir);
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(0);
+    const markerPath = path.join(tmpDir, ".glasstrace", "mcp-connected");
+    expect(fs.existsSync(markerPath)).toBe(true);
+
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as {
+      keyHash: string;
+    };
+    const expectedHash = `sha256:${crypto.createHash("sha256").update(TEST_ANON_KEY).digest("hex")}`;
+    expect(marker.keyHash).toBe(expectedHash);
+  });
+
+  it("is idempotent — running twice does not duplicate MCP config", async () => {
+    provisionAnonKey(tmpDir);
+    createClaudeMarker(tmpDir);
+
+    enterNonCI();
+    try {
+      await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
+      const firstContent = fs.readFileSync(path.join(tmpDir, ".mcp.json"), "utf-8");
+
+      await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
+      const secondContent = fs.readFileSync(path.join(tmpDir, ".mcp.json"), "utf-8");
+
+      // Config content should be identical (not doubled/corrupted)
+      expect(secondContent).toBe(firstContent);
+
+      // Gitignore should not have duplicate .mcp.json entries
+      const gitignore = fs.readFileSync(path.join(tmpDir, ".gitignore"), "utf-8");
+      const mcpMatches = gitignore.match(/\.mcp\.json/g);
+      expect(mcpMatches?.length).toBe(1);
+    } finally {
+      restoreCI();
+    }
+  });
+
+  it("adds MCP config paths to .gitignore", async () => {
+    provisionAnonKey(tmpDir);
+
+    await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
+
+    const gitignore = fs.readFileSync(path.join(tmpDir, ".gitignore"), "utf-8");
+    expect(gitignore).toContain(".mcp.json");
+    expect(gitignore).toContain(".cursor/mcp.json");
+    expect(gitignore).toContain(".gemini/settings.json");
+  });
+
+  it("handles multiple agents simultaneously", async () => {
+    provisionAnonKey(tmpDir);
+    createClaudeMarker(tmpDir);
+    createCursorMarker(tmpDir);
+
+    enterNonCI();
+    try {
+      const result = await runInit({
+        projectRoot: tmpDir,
+        yes: true,
+        coverageMap: false,
+      });
+
+      expect(result.exitCode).toBe(0);
+      // Both agent configs should exist
+      expect(fs.existsSync(path.join(tmpDir, ".mcp.json"))).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, ".cursor", "mcp.json"))).toBe(true);
+      // Summary should list both
+      const configuredLine = result.summary.find((s: string) => s.includes("Configured MCP"));
+      expect(configuredLine).toBeDefined();
+      expect(configuredLine).toContain("Claude Code");
+      expect(configuredLine).toContain("Cursor");
+    } finally {
+      restoreCI();
+    }
+  });
+
+  it("does not leak anon key in summary output", async () => {
+    provisionAnonKey(tmpDir);
+
+    enterNonCI();
+    try {
+      const result = await runInit({
+        projectRoot: tmpDir,
+        yes: true,
+        coverageMap: false,
+      });
+
+      // The key itself should never appear in any output arrays
+      const allOutput = [...result.summary, ...result.warnings, ...result.errors].join(" ");
+      expect(allOutput).not.toContain(TEST_ANON_KEY);
+    } finally {
+      restoreCI();
+    }
+  });
+
+  it("init still succeeds when MCP config write fails for an agent", async () => {
+    provisionAnonKey(tmpDir);
+    createClaudeMarker(tmpDir);
+
+    // Create .mcp.json as a directory so the file write throws EISDIR
+    fs.mkdirSync(path.join(tmpDir, ".mcp.json"));
+
+    enterNonCI();
+    try {
+      const result = await runInit({
+        projectRoot: tmpDir,
+        yes: true,
+        coverageMap: false,
+      });
+
+      // Init should succeed regardless of individual agent write failures
+      expect(result.exitCode).toBe(0);
+      // The agent name should NOT appear in the configured list since the write failed
+      const configuredLine = result.summary.find((s: string) => s.includes("Configured MCP for"));
+      if (configuredLine) {
+        expect(configuredLine).not.toContain("Claude Code");
+      }
+    } finally {
+      restoreCI();
+    }
   });
 });

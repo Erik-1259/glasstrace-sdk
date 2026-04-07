@@ -76,7 +76,13 @@ import { GlasstraceDrizzleLogger } from "@glasstrace/sdk/drizzle";
 npx glasstrace init
 ```
 
-Scaffolds instrumentation files for your project.
+Scaffolds instrumentation files for your project and auto-configures
+MCP for any detected AI coding agents (Claude Code, Cursor, Codex,
+Gemini, Windsurf). Agent detection scans for marker files and writes
+native MCP configuration so agents can query traces immediately.
+
+In CI environments (`CI=true`), only a generic
+`.glasstrace/mcp.json` is written.
 
 ## Configuration
 
