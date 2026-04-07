@@ -84,6 +84,21 @@ native MCP configuration so agents can query traces immediately.
 In CI environments (`CI=true`), only a generic
 `.glasstrace/mcp.json` is written.
 
+### MCP Registration
+
+```bash
+npx glasstrace mcp add
+```
+
+Explicitly registers the Glasstrace MCP server with detected AI coding
+agents. While `glasstrace init` writes file-based MCP configs, this
+command also attempts native CLI registration for agents that support
+it. Re-run after key rotation or to add newly installed agents.
+
+Flags:
+- `--dry-run` -- Preview what would be configured without making changes
+- `--force` -- Reconfigure even if already set up (useful after key rotation)
+
 ## Configuration
 
 | Environment Variable | Required | Description |

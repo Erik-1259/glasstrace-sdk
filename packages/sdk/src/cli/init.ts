@@ -368,34 +368,81 @@ const isDirectExecution =
     scriptBasename === "glasstrace");
 
 if (isDirectExecution) {
-  const options = parseArgs(process.argv);
+  const subcommand = process.argv[2];
 
-  runInit(options)
-    .then((result) => {
-      if (result.errors.length > 0) {
-        for (const err of result.errors) {
-          process.stderr.write(`Error: ${err}\n`);
-        }
-      }
-      if (result.warnings.length > 0) {
-        for (const warn of result.warnings) {
-          process.stderr.write(`Warning: ${warn}\n`);
-        }
-      }
-      if (result.summary.length > 0) {
-        process.stderr.write("\nGlasstrace initialized successfully!\n\n");
-        for (const line of result.summary) {
-          process.stderr.write(`  - ${line}\n`);
-        }
-        process.stderr.write("\nNext steps:\n");
-        process.stderr.write("  1. Start your Next.js dev server\n");
-        process.stderr.write("  2. Glasstrace works immediately in anonymous mode\n");
-        process.stderr.write("  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n");
-      }
-      process.exit(result.exitCode);
-    })
-    .catch((err: unknown) => {
-      process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\n`);
+  if (subcommand === "mcp") {
+    if (process.argv[3] === "add") {
+      // Parse --force and --dry-run from remaining args
+      const remainingArgs = process.argv.slice(4);
+      const force = remainingArgs.includes("--force");
+      const dryRun = remainingArgs.includes("--dry-run");
+
+      import("./mcp-add.js")
+        .then(({ mcpAdd }) => mcpAdd({ force, dryRun }))
+        .then((result) => {
+          for (const msg of result.messages) {
+            process.stderr.write(msg + "\n");
+          }
+          process.exit(result.exitCode);
+        })
+        .catch((err: unknown) => {
+          process.stderr.write(
+            `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+          process.exit(1);
+        });
+    } else {
+      process.stderr.write(
+        `Unknown mcp subcommand: ${process.argv[3] ?? "(none)"}\n\n` +
+          "Usage: glasstrace mcp add [--force] [--dry-run]\n",
+      );
       process.exit(1);
-    });
+    }
+  } else if (subcommand === undefined || subcommand === "init" || subcommand.startsWith("-")) {
+    // Default: run init (handles `glasstrace`, `glasstrace init`, `glasstrace --yes`)
+    const options = parseArgs(process.argv);
+
+    runInit(options)
+      .then((result) => {
+        if (result.errors.length > 0) {
+          for (const err of result.errors) {
+            process.stderr.write(`Error: ${err}\n`);
+          }
+        }
+        if (result.warnings.length > 0) {
+          for (const warn of result.warnings) {
+            process.stderr.write(`Warning: ${warn}\n`);
+          }
+        }
+        if (result.summary.length > 0) {
+          process.stderr.write("\nGlasstrace initialized successfully!\n\n");
+          for (const line of result.summary) {
+            process.stderr.write(`  - ${line}\n`);
+          }
+          process.stderr.write("\nNext steps:\n");
+          process.stderr.write("  1. Start your Next.js dev server\n");
+          process.stderr.write(
+            "  2. Glasstrace works immediately in anonymous mode\n",
+          );
+          process.stderr.write(
+            "  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n",
+          );
+        }
+        process.exit(result.exitCode);
+      })
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        process.exit(1);
+      });
+  } else {
+    process.stderr.write(
+      `Unknown command: ${subcommand}\n\n` +
+        "Usage:\n" +
+        "  glasstrace init [--yes] [--coverage-map]\n" +
+        "  glasstrace mcp add [--force] [--dry-run]\n",
+    );
+    process.exit(1);
+  }
 }
