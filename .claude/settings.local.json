@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(gh pr:*)",
+      "Bash(npm run:*)",
+      "Bash(node:*)",
+      "Bash(gh api:*)",
+      "Bash(python3 -c ':*)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'Alert {d[\\\\\"number\\\\\"]}: {d[\\\\\"state\\\\\"]}'\\)\")",
+      "Bash(gh run:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm install:*)",
+      "Bash(python3 -c \"import sys,json;print\\(json.load\\(sys.stdin\\)['version']\\)\")",
+      "Bash(python3 -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\(d.get\\('devDependencies',{}\\).get\\('typescript','N/A'\\)\\)\")",
+      "Bash(npm ls:*)",
+      "Bash(find . -name \"*.tsbuildinfo\" -delete)",
+      "Bash(ls:*)",
+      "Bash(npm view:*)",
+      "Bash(python3 -c \"import json,sys; vs = json.load\\(sys.stdin\\); print\\([v for v in vs if v.startswith\\('10.'\\)][-3:]\\)\")",
+      "WebSearch",
+      "WebFetch(domain:docs.npmjs.com)",
+      "WebFetch(domain:github.blog)",
+      "WebFetch(domain:github.com)",
+      "Bash(sort -t- -k2 -n)",
+      "Bash(python3 -c \"import json,sys; vs=json.load\\(sys.stdin\\); print\\(vs[-1] if isinstance\\(vs,list\\) else vs\\)\")",
+      "Bash(grep -rn \"from ['\\\\\"]@glasstrace/protocol['\\\\\"]\" packages/sdk/dist/*.d.ts packages/sdk/dist/*.d.cts)",
+      "Bash(grep -rn \"from ['\\\\\"]zod['\\\\\"]\" packages/sdk/dist/*.d.ts packages/sdk/dist/*.d.cts)",
+      "Bash(grep -rn \"from ['\\\\\"]@glasstrace/protocol['\\\\\"]\" packages/sdk/dist/*.js)",
+      "Bash(grep -rn \"require.*@glasstrace/protocol\" packages/sdk/dist/*.cjs)",
+      "Bash(grep -rn \"from ['\\\\\"]zod['\\\\\"]\" packages/sdk/dist/*.js)",
+      "Bash(npx glasstrace:*)",
+      "Bash(npm --version)",
+      "Bash(npx -y npm@10 install)",
+      "Bash(npx -y npm@10 ci)",
+      "Bash(npx vitest:*)",
+      "Bash(find:*)",
+      "Bash(grep -E \"\\\\.\\(md|txt\\)$\")",
+      "Bash(grep -l \"Affects: glasstrace-sdk\" /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/*.md)"
+    ]
+  }
+}
