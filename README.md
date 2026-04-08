@@ -99,6 +99,12 @@ Flags:
 - `--dry-run` -- Preview what would be configured without making changes
 - `--force` -- Reconfigure even if already set up (useful after key rotation)
 
+### Account Claim Transition
+
+When an anonymous key is linked to a Glasstrace account, the SDK
+automatically detects this during initialization and logs migration
+instructions to stderr with the new API key.
+
 ## Configuration
 
 | Environment Variable | Required | Description |

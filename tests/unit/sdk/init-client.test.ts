@@ -427,6 +427,98 @@ describe("Init Client + Config Cache", () => {
     });
   });
 
+  describe("Requirement 7: performInit claim handling", () => {
+    const devKey = "gt_dev_" + "c".repeat(48);
+    const claimResult = {
+      newApiKey: devKey,
+      accountId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      graceExpiresAt: Math.floor(Date.now() / 1000) + 3600,
+    };
+
+    it("returns claimResult when present in response", async () => {
+      const config = makeResolvedConfig();
+      const responseBody = makeInitResponse({ claimResult });
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(responseBody),
+      }));
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const result = await performInit(config, null, "0.1.0");
+
+      expect(result).not.toBeNull();
+      expect(result!.claimResult.newApiKey).toBe(devKey);
+      expect(result!.claimResult.accountId).toBe(claimResult.accountId);
+      expect(result!.claimResult.graceExpiresAt).toBe(claimResult.graceExpiresAt);
+      stderrSpy.mockRestore();
+    });
+
+    it("returns null when no claimResult in response", async () => {
+      const config = makeResolvedConfig();
+      const responseBody = makeInitResponse();
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(responseBody),
+      }));
+
+      const result = await performInit(config, null, "0.1.0");
+      expect(result).toBeNull();
+    });
+
+    it("does not throw and still returns claimResult when stderr.write fails", async () => {
+      const config = makeResolvedConfig();
+      const responseBody = makeInitResponse({ claimResult });
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(responseBody),
+      }));
+
+      // Force stderr.write to throw — claim log is guarded by its own try/catch
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+        throw new Error("stderr broken");
+      });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        // performInit must not throw and must still return the claim result
+        const result = await performInit(config, null, "0.1.0");
+        expect(result).not.toBeNull();
+        expect(result!.claimResult.newApiKey).toBe(devKey);
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("Failed to write claim migration message"),
+        );
+      } finally {
+        stderrSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("migration log contains the dev key", async () => {
+      const config = makeResolvedConfig();
+      const responseBody = makeInitResponse({ claimResult });
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(responseBody),
+      }));
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      await performInit(config, null, "0.1.0");
+
+      expect(stderrSpy).toHaveBeenCalledWith(
+        `[glasstrace] Account claimed! Update GLASSTRACE_API_KEY=${devKey} in your .env file.\n`,
+      );
+      stderrSpy.mockRestore();
+    });
+  });
+
   describe("Requirement 5: getActiveConfig", () => {
     it("returns in-memory config when available (tier 1)", () => {
       const response = makeInitResponse({

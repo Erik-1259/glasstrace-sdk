@@ -161,7 +161,14 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
               console.info("[glasstrace] Background init firing.");
             }
 
-            await performInit(config, anonKey, __SDK_VERSION__);
+            const initResult = await performInit(config, anonKey, __SDK_VERSION__);
+
+            // If the backend reported an account claim, update the exporter
+            // key so subsequent span exports authenticate with the dev key.
+            if (initResult?.claimResult) {
+              setResolvedApiKey(initResult.claimResult.newApiKey);
+              notifyApiKeyResolved();
+            }
 
             // Re-check consoleErrors with the authoritative init response config
             maybeInstallConsoleCapture();
@@ -188,7 +195,14 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
               console.info("[glasstrace] Background init firing.");
             }
 
-            await performInit(config, anonKey, __SDK_VERSION__);
+            const initResult = await performInit(config, anonKey, __SDK_VERSION__);
+
+            // If the backend reported an account claim, update the exporter
+            // key so subsequent span exports authenticate with the dev key.
+            if (initResult?.claimResult) {
+              setResolvedApiKey(initResult.claimResult.newApiKey);
+              notifyApiKeyResolved();
+            }
 
             // Re-check consoleErrors with the authoritative init response config
             maybeInstallConsoleCapture();
