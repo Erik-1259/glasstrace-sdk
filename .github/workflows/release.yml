@@ -62,12 +62,18 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Pin to avoid Node 22.22.2 which ships with broken npm
+          # (missing promise-retry). See DISC-443.
+          node-version: 22.15
           cache: npm
 
-      # Corepack enforces the npm version declared in package.json
-      # (npm 11.6.1+), which supports OIDC trusted publishing.
-      - run: corepack enable
+      # npm 11.5.1+ required for OIDC trusted publishing (tokenless).
+      # Node 22 bundles npm 10.x which does not support it.
+      # Corepack's npm support is unreliable in GitHub Actions — it
+      # does not always override the bundled npm version. Use explicit
+      # global install instead.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@11.6.1
 
       - run: npm ci
 
