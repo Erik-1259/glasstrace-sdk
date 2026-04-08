@@ -24,6 +24,8 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
+      - run: corepack enable
+
       - run: npm ci
 
       - name: Audit dependencies
