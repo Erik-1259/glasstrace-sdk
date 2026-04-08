@@ -48,8 +48,15 @@ export {
   collectSourceMaps,
   computeBuildHash,
   uploadSourceMaps,
+  PRESIGNED_THRESHOLD_BYTES,
+  requestPresignedTokens,
+  uploadToBlob,
+  submitManifest,
+  uploadSourceMapsPresigned,
+  isBlobClientAvailable,
+  uploadSourceMapsAuto,
 } from "./source-map-uploader.js";
-export type { SourceMapEntry } from "./source-map-uploader.js";
+export type { SourceMapEntry, BlobUploader, UploadSourceMapsAutoOptions } from "./source-map-uploader.js";
 
 // Manual error capture
 export { captureError } from "./capture-error.js";
