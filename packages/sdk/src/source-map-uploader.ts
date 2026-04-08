@@ -119,7 +119,11 @@ export async function uploadSourceMaps(
     })),
   };
 
-  const baseUrl = endpoint.replace(/\/+$/, "");
+  // Strip trailing slashes iteratively to avoid regex (CodeQL js/polynomial-redos).
+  let baseUrl = endpoint;
+  while (baseUrl.endsWith("/")) {
+    baseUrl = baseUrl.slice(0, -1);
+  }
   const response = await fetch(`${baseUrl}/v1/source-maps`, {
     method: "POST",
     headers: {

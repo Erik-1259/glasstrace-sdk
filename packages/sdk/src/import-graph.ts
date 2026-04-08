@@ -206,14 +206,31 @@ export function extractImports(fileContent: string): string[] {
     }
   };
 
-  // ES module: import ... from 'path' or import 'path'
-  const esImportRegex = /import\s+(?:(?:[\w*{}\s,]+)\s+from\s+)?['"]([^'"]+)['"]/g;
+  // ES module imports — split into two simple patterns to avoid
+  // catastrophic backtracking (CodeQL ReDoS). The original single regex
+  // used [\w*{}\s,]+ which overlapped with the surrounding \s+, causing
+  // polynomial backtracking. These replacements use [^'"]+ which has
+  // only one quantifier before the anchor, ensuring linear-time matching.
+  // The [^'"]+ class supports multiline destructured imports (e.g.,
+  // import {\n  foo,\n  bar\n} from 'path') since it does not exclude \n.
+  //
+  // 1. Named/default/namespace: import { x } from 'path'
+  const esFromImportRegex = /\bimport\b[^'"]+\bfrom\s+['"]([^'"]+)['"]/g;
+  // 2. Side-effect: import 'path'
+  const esSideEffectRegex = /\bimport\s+['"]([^'"]+)['"]/g;
+
   let match: RegExpExecArray | null;
 
-  match = esImportRegex.exec(fileContent);
+  match = esFromImportRegex.exec(fileContent);
   while (match !== null) {
     addUnique(match[1]);
-    match = esImportRegex.exec(fileContent);
+    match = esFromImportRegex.exec(fileContent);
+  }
+
+  match = esSideEffectRegex.exec(fileContent);
+  while (match !== null) {
+    addUnique(match[1]);
+    match = esSideEffectRegex.exec(fileContent);
   }
 
   // CommonJS: require('path')

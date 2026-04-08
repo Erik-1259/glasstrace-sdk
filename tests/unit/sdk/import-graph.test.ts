@@ -235,6 +235,25 @@ const baz = require('baz');
     const imports = extractImports(content);
     expect(imports).toContain("./dynamic");
   });
+
+  it("extracts multiline destructured imports", () => {
+    const content = `import {\n  foo,\n  bar,\n  baz\n} from './multiline';`;
+    const imports = extractImports(content);
+    expect(imports).toContain("./multiline");
+  });
+
+  it("handles pathological input without excessive backtracking", () => {
+    // Regression test for CodeQL js/polynomial-redos. The original regex
+    // used [\w*{}\s,]+ which caused polynomial backtracking on inputs
+    // with many whitespace/word characters before a non-matching suffix.
+    const content = "import " + "{ ".repeat(200) + "x";
+    const start = Date.now();
+    extractImports(content);
+    const elapsed = Date.now() - start;
+    // Should complete in well under 1 second (linear time). The old
+    // vulnerable regex could take minutes on this input.
+    expect(elapsed).toBeLessThan(1000);
+  });
 });
 
 describe("buildImportGraph", () => {
