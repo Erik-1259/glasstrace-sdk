@@ -49,6 +49,14 @@ export {
   type DiscoveryResponse,
   SourceMapUploadResponseSchema,
   type SourceMapUploadResponse,
+  PresignedUploadRequestSchema,
+  type PresignedUploadRequest,
+  PresignedUploadResponseSchema,
+  type PresignedUploadResponse,
+  SourceMapManifestRequestSchema,
+  type SourceMapManifestRequest,
+  SourceMapManifestResponseSchema,
+  type SourceMapManifestResponse,
 } from "./wire.js";
 
 // --- Constants ---

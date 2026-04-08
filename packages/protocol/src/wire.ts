@@ -6,10 +6,16 @@
  * - SDK health diagnostics (embedded in init requests)
  * - Discovery endpoint (GET /__glasstrace/config)
  * - Source map upload (POST /v1/source-maps)
+ * - Presigned source map upload (POST /v1/source-maps/presign, POST /v1/source-maps/manifest)
  */
 
 import { z } from "zod";
-import { AnonApiKeySchema, BuildHashSchema, SessionIdSchema } from "./ids.js";
+import {
+  AnonApiKeySchema,
+  BuildHashSchema,
+  DevApiKeySchema,
+  SessionIdSchema,
+} from "./ids.js";
 import { CaptureConfigSchema } from "./config.js";
 
 // --- ImportGraphPayload ---
@@ -62,6 +68,13 @@ export const SdkInitResponseSchema = z.object({
   minimumSdkVersion: z.string(),
   apiVersion: z.string(),
   tierLimits: TierLimitsSchema,
+  claimResult: z
+    .object({
+      newApiKey: DevApiKeySchema,
+      accountId: z.string().uuid(),
+      graceExpiresAt: z.number().int().positive(),
+    })
+    .optional(),
 });
 export type SdkInitResponse = z.infer<typeof SdkInitResponseSchema>;
 
@@ -84,3 +97,65 @@ export const SourceMapUploadResponseSchema = z.object({
   totalSizeBytes: z.number().int().nonnegative(),
 });
 export type SourceMapUploadResponse = z.infer<typeof SourceMapUploadResponseSchema>;
+
+// --- Presigned Source Map Upload ---
+
+/** Request to obtain presigned upload URLs for source map files. */
+export const PresignedUploadRequestSchema = z.object({
+  buildHash: BuildHashSchema,
+  files: z
+    .array(
+      z.object({
+        filePath: z.string().min(1),
+        sizeBytes: z.number().int().positive(),
+      }),
+    )
+    .min(1)
+    .max(100),
+});
+export type PresignedUploadRequest = z.infer<typeof PresignedUploadRequestSchema>;
+
+/** Response containing presigned upload tokens and storage pathnames. */
+export const PresignedUploadResponseSchema = z.object({
+  uploadId: z.string().uuid(),
+  expiresAt: z.number().int().positive(),
+  files: z
+    .array(
+      z.object({
+        filePath: z.string().min(1),
+        clientToken: z.string().min(1),
+        pathname: z.string().min(1),
+        maxBytes: z.number().int().positive(),
+      }),
+    )
+    .min(1)
+    .max(100),
+});
+export type PresignedUploadResponse = z.infer<typeof PresignedUploadResponseSchema>;
+
+/** Request to finalize a presigned upload by registering the manifest. */
+export const SourceMapManifestRequestSchema = z.object({
+  uploadId: z.string().uuid(),
+  buildHash: BuildHashSchema,
+  files: z
+    .array(
+      z.object({
+        filePath: z.string().min(1),
+        sizeBytes: z.number().int().positive(),
+        blobUrl: z.string().url(),
+      }),
+    )
+    .min(1)
+    .max(100),
+});
+export type SourceMapManifestRequest = z.infer<typeof SourceMapManifestRequestSchema>;
+
+/** Response confirming source map manifest activation. */
+export const SourceMapManifestResponseSchema = z.object({
+  success: z.literal(true),
+  buildHash: BuildHashSchema,
+  fileCount: z.number().int().nonnegative(),
+  totalSizeBytes: z.number().int().nonnegative(),
+  activatedAt: z.number().int().positive(),
+});
+export type SourceMapManifestResponse = z.infer<typeof SourceMapManifestResponseSchema>;
