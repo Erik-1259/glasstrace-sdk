@@ -99,6 +99,25 @@ describe("getOrCreateAnonKey", () => {
     await chmod(join(tempDir, ".glasstrace"), 0o755);
   });
 
+  it("concurrent calls return the same key", async () => {
+    const [key1, key2] = await Promise.all([
+      getOrCreateAnonKey(tempDir),
+      getOrCreateAnonKey(tempDir),
+    ]);
+    expect(key1).toBe(key2);
+  });
+
+  it("reads existing valid key instead of generating a new one", async () => {
+    // Pre-create a valid key file — getOrCreateAnonKey should return it
+    // without attempting to write (exercises the early-return read path)
+    const preExistingKey = "gt_anon_" + "b".repeat(48);
+    await mkdir(join(tempDir, ".glasstrace"), { recursive: true });
+    await writeFile(join(tempDir, ".glasstrace", "anon_key"), preExistingKey);
+
+    const key = await getOrCreateAnonKey(tempDir);
+    expect(key).toBe(preExistingKey);
+  });
+
   it("defaults projectRoot to process.cwd()", async () => {
     const originalCwd = process.cwd();
     process.chdir(tempDir);

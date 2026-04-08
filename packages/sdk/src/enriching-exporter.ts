@@ -132,9 +132,13 @@ export class GlasstraceExporter implements SpanExporter {
    * Enriches a ReadableSpan with all glasstrace.* attributes.
    * Returns a new ReadableSpan wrapper; the original span is not mutated.
    *
-   * External function calls (getSessionId, deriveErrorCategory,
-   * deriveOrmProvider, classifyFetchTarget) are individually guarded so a
-   * failure in one does not prevent the remaining attributes from being set.
+   * Only {@link SessionManager.getSessionId} is individually guarded because
+   * it calls into crypto and schema validation — a session ID failure should
+   * not prevent the rest of enrichment. The other helper calls
+   * ({@link deriveErrorCategory}, {@link deriveOrmProvider},
+   * {@link classifyFetchTarget}) are pure functions on typed string inputs
+   * and rely on the outer catch for any unexpected failure.
+   *
    * On total failure, returns the original span unchanged.
    */
   private enrichSpan(span: ReadableSpan): ReadableSpan {
@@ -199,58 +203,58 @@ export class GlasstraceExporter implements SpanExporter {
       }
 
       // glasstrace.error.message
-      const errorMessage = attrs["exception.message"] as string | undefined;
-      if (errorMessage) {
+      const errorMessage = attrs["exception.message"];
+      if (typeof errorMessage === "string") {
         extra[ATTR.ERROR_MESSAGE] = errorMessage;
       }
 
-      // glasstrace.error.code + glasstrace.error.category — calls deriveErrorCategory
-      try {
-        const errorType = attrs["exception.type"] as string | undefined;
-        if (errorType) {
-          extra[ATTR.ERROR_CODE] = errorType;
-          extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(errorType);
-        }
-      } catch { /* error category omitted */ }
+      // glasstrace.error.code + glasstrace.error.category
+      // Guard against non-string attribute values (OTel attributes can be
+      // string | number | boolean | Array) to prevent toLowerCase() throws.
+      const errorType = attrs["exception.type"];
+      if (typeof errorType === "string") {
+        extra[ATTR.ERROR_CODE] = errorType;
+        extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(errorType);
+      }
 
       // glasstrace.error.field
-      const errorField = attrs["error.field"] as string | undefined;
-      if (errorField) {
+      const errorField = attrs["error.field"];
+      if (typeof errorField === "string") {
         extra[ATTR.ERROR_FIELD] = errorField;
       }
 
-      // glasstrace.orm.* — calls deriveOrmProvider
-      try {
-        const spanAny = span as unknown as Record<string, { name?: string } | undefined>;
-        const instrumentationName =
-          (spanAny.instrumentationScope?.name ?? spanAny.instrumentationLibrary?.name) ?? "";
-        const ormProvider = deriveOrmProvider(instrumentationName);
-        if (ormProvider) {
-          extra[ATTR.ORM_PROVIDER] = ormProvider;
+      // glasstrace.orm.*
+      const spanAny = span as unknown as Record<string, { name?: string } | undefined>;
+      const instrumentationName =
+        (spanAny.instrumentationScope?.name ?? spanAny.instrumentationLibrary?.name) ?? "";
+      const ormProvider = deriveOrmProvider(instrumentationName);
+      if (ormProvider) {
+        extra[ATTR.ORM_PROVIDER] = ormProvider;
 
-          const model =
-            (attrs["db.sql.table"] as string | undefined) ??
-            (attrs["db.prisma.model"] as string | undefined);
-          if (model) {
-            extra[ATTR.ORM_MODEL] = model;
-          }
-
-          const operation = attrs["db.operation"] as string | undefined;
-          if (operation) {
-            extra[ATTR.ORM_OPERATION] = operation;
-          }
+        const table = attrs["db.sql.table"];
+        const prismaModel = attrs["db.prisma.model"];
+        const model = typeof table === "string" ? table
+          : typeof prismaModel === "string" ? prismaModel
+          : undefined;
+        if (model) {
+          extra[ATTR.ORM_MODEL] = model;
         }
-      } catch { /* ORM attributes omitted */ }
 
-      // glasstrace.fetch.target — calls classifyFetchTarget
-      try {
-        const url =
-          (attrs["http.url"] as string | undefined) ??
-          (attrs["url.full"] as string | undefined);
-        if (url && span.kind === SpanKind.CLIENT) {
-          extra[ATTR.FETCH_TARGET] = classifyFetchTarget(url);
+        const operation = attrs["db.operation"];
+        if (typeof operation === "string") {
+          extra[ATTR.ORM_OPERATION] = operation;
         }
-      } catch { /* fetch target omitted */ }
+      }
+
+      // glasstrace.fetch.target
+      const httpUrl = attrs["http.url"];
+      const fullUrl = attrs["url.full"];
+      const url = typeof httpUrl === "string" ? httpUrl
+        : typeof fullUrl === "string" ? fullUrl
+        : undefined;
+      if (url && span.kind === SpanKind.CLIENT) {
+        extra[ATTR.FETCH_TARGET] = classifyFetchTarget(url);
+      }
 
       return createEnrichedSpan(span, extra);
     } catch {
