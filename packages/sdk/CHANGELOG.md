@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.6.0
+
+### Minor Changes
+
+- 6329f5c: Handle account claim transitions in SDK init — automatically logs migration instructions when an anonymous key is linked to an account
+
 ## 0.4.2
 
 ### Patch Changes
