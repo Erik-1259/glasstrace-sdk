@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.4.1
+
+### Patch Changes
+
+- 57586c6: Fix CodeQL ReDoS patterns in source-map-uploader and import-graph; wire first-error MCP nudge into captureError
+
 ## 0.4.0
 
 ### Minor Changes
