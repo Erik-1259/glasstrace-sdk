@@ -36,6 +36,8 @@ jobs:
           node-version: 22
           cache: npm
 
+      - run: corepack enable
+
       - run: npm ci
 
       - name: Create or update Version Packages PR
@@ -60,16 +62,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Pin to 22.15 to avoid broken bundled npm in later patches
-          # (e.g., 22.22.2 ships with npm missing promise-retry).
-          # See DISC-443 for when to unpin.
-          node-version: 22.15
+          node-version: 22
           cache: npm
 
-      # npm 11.5.1+ required for OIDC trusted publishing (tokenless).
-      # Node 22 bundles npm 10.x which does not support it.
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@^11.5.1
+      # Corepack enforces the npm version declared in package.json
+      # (npm 11.6.1+), which supports OIDC trusted publishing.
+      - run: corepack enable
 
       - run: npm ci
 
