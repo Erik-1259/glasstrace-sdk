@@ -71,18 +71,41 @@ export async function getOrCreateAnonKey(projectRoot?: string): Promise<AnonApiK
   // Generate a new key
   const newKey = createAnonApiKey();
 
-  // Persist to filesystem
+  // Persist to filesystem using atomic create-or-fail (O_CREAT | O_EXCL)
+  // to prevent TOCTOU races where concurrent cold starts both generate keys.
   try {
     await mkdir(dirPath, { recursive: true, mode: 0o700 });
-    await writeFile(keyPath, newKey, "utf-8");
-    await chmod(keyPath, 0o600);
+    await writeFile(keyPath, newKey, { flag: "wx", mode: 0o600 });
+    return newKey;
   } catch (err) {
-    // Cache in memory so repeated calls get the same ephemeral key
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      // Another process won the race — read their key. The winner's
+      // writeFile is atomic at the filesystem level (single write syscall
+      // for small payloads like a 56-char key), so one immediate retry
+      // is sufficient.
+      const winnerKey = await readAnonKey(root);
+      if (winnerKey !== null) {
+        return winnerKey;
+      }
+      // File exists but content is invalid after retries — overwrite it.
+      // Use explicit chmod after overwrite since writeFile mode only
+      // applies on creation on some platforms.
+      try {
+        await writeFile(keyPath, newKey, { mode: 0o600 });
+        await chmod(keyPath, 0o600);
+        return newKey;
+      } catch {
+        // Overwrite failed — fall through to ephemeral cache
+      }
+    }
+
+    // Non-EEXIST error (EACCES, ENOTDIR, etc.) — cache in memory so
+    // repeated calls get the same ephemeral key within this process.
     ephemeralKeyCache.set(root, newKey);
     console.warn(
       `[glasstrace] Failed to persist anonymous key to ${keyPath}: ${err instanceof Error ? err.message : String(err)}. Using ephemeral key.`,
     );
+    return newKey;
   }
-
-  return newKey;
 }

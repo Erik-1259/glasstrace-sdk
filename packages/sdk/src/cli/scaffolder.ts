@@ -6,8 +6,10 @@ import * as path from "node:path";
  * Computes a stable identity fingerprint for deduplication purposes.
  * This is NOT password hashing — the input is an opaque token used
  * as a marker identity, not a credential stored for authentication.
+ *
+ * @internal Exported for unit testing only.
  */
-function identityFingerprint(token: string): string {
+export function identityFingerprint(token: string): string {
   return `sha256:${createHash("sha256").update(token).digest("hex")}`;
 }
 
@@ -110,7 +112,8 @@ export async function scaffoldNextConfig(
   return true;
 }
 
-interface WrapResult {
+/** @internal Exported for unit testing only. */
+export interface WrapResult {
   content: string;
   wrapped: boolean;
 }
@@ -125,8 +128,9 @@ interface WrapResult {
  * @param content - The full file content containing an ESM default export.
  * @returns `{ wrapped: true, content }` on success, or `{ wrapped: false }` if
  *   no recognizable export pattern was found (content returned unchanged).
+ * @internal Exported for unit testing only.
  */
-function wrapExport(content: string): WrapResult {
+export function wrapExport(content: string): WrapResult {
   // Find the last `export default` — use lastIndexOf for robustness
   const marker = "export default";
   const idx = content.lastIndexOf(marker);
@@ -158,8 +162,9 @@ function wrapExport(content: string): WrapResult {
  * @param content - The full CJS file content containing `module.exports = ...`.
  * @returns `{ wrapped: true, content }` on success, or `{ wrapped: false }` if
  *   no recognizable `module.exports` pattern was found (content returned unchanged).
+ * @internal Exported for unit testing only.
  */
-function wrapCJSExport(content: string): WrapResult {
+export function wrapCJSExport(content: string): WrapResult {
   const cjsMarker = "module.exports";
   const cjsIdx = content.lastIndexOf(cjsMarker);
   if (cjsIdx === -1) {
