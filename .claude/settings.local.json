@@ -37,7 +37,13 @@
       "Bash(find:*)",
       "Bash(grep -E \"\\\\.\\(md|txt\\)$\")",
       "Bash(grep -l \"Affects: glasstrace-sdk\" /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/*.md)",
-      "Bash(npm audit:*)"
+      "Bash(npm audit:*)",
+      "WebFetch(domain:philna.sh)",
+      "WebFetch(domain:dev.to)",
+      "WebFetch(domain:nickradford.dev)",
+      "WebFetch(domain:ankush.one)",
+      "WebFetch(domain:vercel.com)",
+      "Bash(xargs -I{} git push origin --delete {})"
     ]
   }
 }

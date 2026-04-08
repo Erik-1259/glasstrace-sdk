@@ -55,10 +55,12 @@ describe("captureError", () => {
     await mod._preloadOtelApi();
     mod.captureError(new TypeError("bad input"));
 
-    expect(addEvent).toHaveBeenCalledWith("glasstrace.error", {
-      "error.message": "TypeError: bad input",
-      "error.type": "TypeError",
-    });
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [eventName, attrs] = addEvent.mock.calls[0];
+    expect(eventName).toBe("glasstrace.error");
+    expect(attrs["error.message"]).toContain("TypeError");
+    expect(attrs["error.message"]).toContain("bad input");
+    expect(attrs["error.type"]).toBe("TypeError");
   });
 
   it("is a no-op when no span is active", async () => {

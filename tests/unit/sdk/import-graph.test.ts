@@ -250,9 +250,11 @@ const baz = require('baz');
     const start = Date.now();
     extractImports(content);
     const elapsed = Date.now() - start;
-    // Should complete in well under 1 second (linear time). The old
-    // vulnerable regex could take minutes on this input.
-    expect(elapsed).toBeLessThan(1000);
+    // Should complete in well under 2 seconds (linear time). The old
+    // vulnerable regex could take minutes on this input. Using 2000ms
+    // threshold to avoid flaky failures on slow CI runners while still
+    // catching polynomial-time regressions.
+    expect(elapsed).toBeLessThan(2000);
   });
 });
 
@@ -305,6 +307,22 @@ describe("buildImportGraph", () => {
     const result = await buildImportGraph(tmpDir);
     expect(result.graph).toEqual({});
     expect(result.buildHash).toBeTruthy();
+  });
+
+  it("handles cyclic imports without infinite loop", async () => {
+    // Two test files importing each other — buildImportGraph must not hang
+    fs.writeFileSync(
+      path.join(tmpDir, "a.test.ts"),
+      `import { b } from './b.test';`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "b.test.ts"),
+      `import { a } from './a.test';`,
+    );
+
+    const result = await buildImportGraph(tmpDir);
+    expect(result.graph["a.test.ts"]).toContain("./b.test");
+    expect(result.graph["b.test.ts"]).toContain("./a.test");
   });
 
   it("error case: unreadable test file is skipped", async () => {

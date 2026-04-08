@@ -41,9 +41,10 @@ describe("Discovery Endpoint (/__glasstrace/config)", () => {
       const response = await handler(makeRequest("/__glasstrace/config"));
 
       expect(response).not.toBeNull();
-      expect(response!.status).toBe(200);
+      const res = response!;
+      expect(res.status).toBe(200);
 
-      const body = await response!.json();
+      const body = await res.json();
       expect(body.key).toBe(MOCK_ANON_KEY);
       expect(body.sessionId).toBe(MOCK_SESSION_ID);
     });
@@ -53,8 +54,9 @@ describe("Discovery Endpoint (/__glasstrace/config)", () => {
       const response = await handler(makeRequest("/__glasstrace/config", "GET", CHROME_ORIGIN));
 
       expect(response).not.toBeNull();
-      expect(response!.status).toBe(200);
-      expect(response!.headers.get("Access-Control-Allow-Origin")).toBe(CHROME_ORIGIN);
+      const res = response!;
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe(CHROME_ORIGIN);
     });
   });
 
@@ -199,8 +201,21 @@ describe("Discovery Endpoint (/__glasstrace/config)", () => {
   });
 
   describe("Error case: Handler throws returns 500", () => {
-    it("returns 500 with internal_error when getAnonKey throws", async () => {
+    it("returns 500 with internal_error when getAnonKey throws an Error", async () => {
       const handler = makeHandler({ getAnonKeyThrows: true });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      expect(response).not.toBeNull();
+      expect(response!.status).toBe(500);
+
+      const body = await response!.json();
+      expect(body.error).toBe("internal_error");
+    });
+
+    it("returns 500 with internal_error when getAnonKey rejects with non-Error", async () => {
+      const getAnonKey = () => Promise.reject("string rejection");
+      const getSessionId = () => MOCK_SESSION_ID;
+      const handler = createDiscoveryHandler(getAnonKey, getSessionId);
       const response = await handler(makeRequest("/__glasstrace/config"));
 
       expect(response).not.toBeNull();

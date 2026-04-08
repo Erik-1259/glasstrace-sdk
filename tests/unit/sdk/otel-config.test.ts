@@ -40,8 +40,9 @@ describe("configureOtel()", () => {
   });
 
   afterEach(() => {
-    otelApi.trace.disable();
+    // Clean up signal listeners before disabling trace to prevent leaks
     resetOtelConfigForTesting();
+    otelApi.trace.disable();
   });
 
   describe("Provider coexistence", () => {
@@ -101,14 +102,16 @@ describe("configureOtel()", () => {
       // Prevent re-raise from actually killing the test process
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-      await configureOtel(createTestConfig(), sessionManager);
+      try {
+        await configureOtel(createTestConfig(), sessionManager);
 
-      process.emit("SIGTERM", "SIGTERM");
-      await flushMicrotasks();
+        process.emit("SIGTERM", "SIGTERM");
+        await flushMicrotasks();
 
-      expect(shutdownSpy).toHaveBeenCalled();
-
-      killSpy.mockRestore();
+        expect(shutdownSpy).toHaveBeenCalled();
+      } finally {
+        killSpy.mockRestore();
+      }
     });
 
     it("should log a warning when provider.shutdown() rejects", async () => {
@@ -121,19 +124,21 @@ describe("configureOtel()", () => {
       // Prevent re-raise from actually killing the test process
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-      await configureOtel(createTestConfig(), sessionManager);
+      try {
+        await configureOtel(createTestConfig(), sessionManager);
 
-      process.emit("SIGINT", "SIGINT");
-      await flushMicrotasks();
+        process.emit("SIGINT", "SIGINT");
+        await flushMicrotasks();
 
-      const shutdownWarning = warnSpy.mock.calls.find(
-        (call) =>
-          typeof call[0] === "string" &&
-          call[0].includes("Error during OTel shutdown"),
-      );
-      expect(shutdownWarning).toBeDefined();
-
-      killSpy.mockRestore();
+        const shutdownWarning = warnSpy.mock.calls.find(
+          (call) =>
+            typeof call[0] === "string" &&
+            call[0].includes("Error during OTel shutdown"),
+        );
+        expect(shutdownWarning).toBeDefined();
+      } finally {
+        killSpy.mockRestore();
+      }
     });
 
     it("should be idempotent when both SIGTERM and SIGINT fire", async () => {
@@ -145,16 +150,18 @@ describe("configureOtel()", () => {
 
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-      await configureOtel(createTestConfig(), sessionManager);
+      try {
+        await configureOtel(createTestConfig(), sessionManager);
 
-      process.emit("SIGTERM", "SIGTERM");
-      process.emit("SIGINT", "SIGINT");
-      await flushMicrotasks();
+        process.emit("SIGTERM", "SIGTERM");
+        process.emit("SIGINT", "SIGINT");
+        await flushMicrotasks();
 
-      // shutdown should only be called once despite both signals
-      expect(shutdownSpy).toHaveBeenCalledTimes(1);
-
-      killSpy.mockRestore();
+        // shutdown should only be called once despite both signals
+        expect(shutdownSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        killSpy.mockRestore();
+      }
     });
   });
 });

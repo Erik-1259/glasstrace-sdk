@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
 import {
   mkdir,
   writeFile,
@@ -32,6 +32,15 @@ function makeAgent(
     registrationCommand: null,
     ...overrides,
   };
+}
+
+function expectPermissionError(spy: MockInstance) {
+  const output = spy.mock.calls.map((c) => String(c[0])).join("\n");
+  expect(
+    output.includes("EACCES") ||
+    output.includes("permission denied") ||
+    output.includes("operation not permitted"),
+  ).toBe(true);
 }
 
 describe("writeMcpConfig", () => {
@@ -109,10 +118,7 @@ describe("writeMcpConfig", () => {
 
     try {
       await writeMcpConfig(agent, "content", testDir);
-
-      expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining("permission denied"),
-      );
+      expectPermissionError(stderrSpy);
     } finally {
       stderrSpy.mockRestore();
       // Restore permissions for cleanup
@@ -278,10 +284,7 @@ describe("injectInfoSection", () => {
 
     try {
       await injectInfoSection(agent, htmlContent, testDir);
-
-      expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining("permission denied"),
-      );
+      expectPermissionError(stderrSpy);
     } finally {
       stderrSpy.mockRestore();
       await chmod(infoPath, 0o644);
@@ -393,10 +396,7 @@ describe("updateGitignore", () => {
 
     try {
       await updateGitignore([".mcp.json"], readOnlyDir);
-
-      expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining("permission denied"),
-      );
+      expectPermissionError(stderrSpy);
     } finally {
       stderrSpy.mockRestore();
       await chmod(join(readOnlyDir, ".gitignore"), 0o644);

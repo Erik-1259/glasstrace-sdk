@@ -72,6 +72,58 @@ describe("GlasstraceSpanProcessor (pass-through)", () => {
     });
   });
 
+  describe("Enrichment pass-through", () => {
+    it("passes span attributes through to the inner processor", async () => {
+      const { tracer, exporter, provider } = createTestSetup({
+        environment: "staging",
+      });
+
+      const span = tracer.startSpan("enriched-op");
+      span.setAttribute("custom.attr", "value");
+      span.end();
+      await provider.forceFlush();
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      expect(spans[0].attributes["custom.attr"]).toBe("value");
+    });
+  });
+
+  describe("Error propagation", () => {
+    it("propagates inner processor errors (does not silently swallow)", () => {
+      // GlasstraceSpanProcessor is a thin pass-through. Inner processor
+      // errors should propagate naturally — the processor should not add
+      // its own error swallowing layer.
+      const brokenProcessor = {
+        onStart: () => {},
+        onEnd: () => {
+          throw new Error("inner processor exploded");
+        },
+        shutdown: () => Promise.resolve(),
+        forceFlush: () => Promise.resolve(),
+      };
+
+      const sessionManager = new SessionManager();
+      const processor = new GlasstraceSpanProcessor(
+        brokenProcessor,
+        sessionManager,
+        "gt_dev_" + "a".repeat(48),
+        () => DEFAULT_CONFIG,
+        "test",
+      );
+
+      // Call processor.onEnd directly to test the wrapper behavior without
+      // relying on BasicTracerProvider's exception propagation semantics.
+      const provider = new BasicTracerProvider();
+      const tracer = provider.getTracer("test");
+      const span = tracer.startSpan("safe-op");
+
+      expect(() => processor.onEnd(span as never)).toThrow(
+        "inner processor exploded",
+      );
+    });
+  });
+
   describe("Backward compatibility", () => {
     it("accepts the same constructor arguments as the original", () => {
       const sessionManager = new SessionManager();

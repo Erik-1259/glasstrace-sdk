@@ -70,6 +70,7 @@ describe("registerGlasstrace() Orchestrator", () => {
     process.env = { ...originalEnv };
     _resetRegistrationForTesting();
     _resetConfigForTesting();
+    vi.unstubAllGlobals();
   });
 
   describe("Checkpoint 1: Production detection", () => {
@@ -414,6 +415,46 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       const handler = getDiscoveryHandler();
       expect(handler).toBeNull();
+    });
+  });
+
+  describe("Log message ordering", () => {
+    it("logs initialization steps in expected order for a complete dev-key flow", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      registerGlasstrace({ verbose: true });
+
+      await waitForBackgroundWork(300);
+
+      const messages = infoSpy.mock.calls.map((c) => String(c[0]));
+      const configResolvedIdx = messages.findIndex((m) => m.includes("Config resolved"));
+      const authModeIdx = messages.findIndex((m) => m.includes("Auth mode"));
+      const otelIdx = messages.findIndex((m) => m.includes("OTel configured"));
+
+      // Guard: all messages must be present before asserting order
+      expect(configResolvedIdx).not.toBe(-1);
+      expect(authModeIdx).not.toBe(-1);
+      expect(otelIdx).not.toBe(-1);
+
+      // Config resolved must come before auth mode, which comes before OTel configured
+      expect(configResolvedIdx).toBeGreaterThanOrEqual(0);
+      expect(authModeIdx).toBeGreaterThan(configResolvedIdx);
+      expect(otelIdx).toBeGreaterThan(authModeIdx);
+    });
+  });
+
+  describe("Mock leak sentinel", () => {
+    it("beforeEach properly stubs fetch for each test", () => {
+      // This test verifies that the afterEach vi.unstubAllGlobals() call
+      // properly restores fetch. beforeEach re-stubs fetch, so we check
+      // that the stub is a mock (expected) — but if unstubAllGlobals
+      // failed in a previous afterEach, this test's beforeEach would
+      // layer a second stub. The real guard is that vi.isMockFunction
+      // returns true for the current stub, confirming the test harness
+      // is in control.
+      expect(vi.isMockFunction(globalThis.fetch)).toBe(true);
     });
   });
 

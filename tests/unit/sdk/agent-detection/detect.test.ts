@@ -222,6 +222,9 @@ describe("detectAgents", () => {
   });
 
   describe("symlinks", () => {
+    // Windows symlinks require elevated privileges (SeCreateSymbolicLinkPrivilege)
+    // which are not available in standard CI/CD environments, so these tests
+    // are skipped on win32.
     it.skipIf(process.platform === "win32")("follows symlinks for marker detection", async () => {
       // Create a real .claude dir elsewhere and symlink to it
       const realDir = join(testDir, "real-claude");
@@ -231,6 +234,18 @@ describe("detectAgents", () => {
       const agents = await detectAgents(testDir);
       const claude = agents.find((a) => a.name === "claude");
       expect(claude).toBeDefined();
+    });
+
+    it.skipIf(process.platform === "win32")("handles broken/dangling symlink gracefully", async () => {
+      // Create a symlink pointing to a non-existent target
+      const nonExistentTarget = join(testDir, "does-not-exist");
+      await symlink(nonExistentTarget, join(testDir, ".claude"));
+
+      // detectAgents should not throw on a dangling symlink
+      const agents = await detectAgents(testDir);
+      // Claude may or may not be detected depending on how stat vs lstat is used,
+      // but the function must not crash
+      expect(Array.isArray(agents)).toBe(true);
     });
   });
 

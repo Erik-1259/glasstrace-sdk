@@ -18,10 +18,12 @@ describe("withGlasstraceConfig", () => {
 
   afterEach(() => {
     process.env = originalEnv;
+    vi.unstubAllGlobals();
   });
 
   it("returns a config object", () => {
     const result = withGlasstraceConfig({});
+    expect(result).not.toBeNull();
     expect(result).toBeDefined();
     expect(typeof result).toBe("object");
   });

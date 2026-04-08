@@ -181,16 +181,31 @@ describe("SessionManager", () => {
   });
 
   it("boundary: exactly 4 hours of inactivity does not trigger new window", () => {
+    // This tests the exact boundary: the spec defines the gap as "more than
+    // 4 hours" (strictly greater), so exactly 4h (14_400_000ms) must remain
+    // in the same window.
     const manager = new SessionManager();
     manager.getSessionId("test-key");
 
-    // Advance exactly 4 hours
+    // Advance exactly 4 hours (14_400_000ms)
     vi.advanceTimersByTime(4 * 60 * 60 * 1000);
     const id2 = manager.getSessionId("test-key");
 
-    // Exactly 4 hours should NOT trigger — spec says "more than 4 hours" (strictly greater)
     const expectedSameWindow = deriveSessionId("test-key", "localhost:3000", "2026-03-22", 0);
     expect(id2).toBe(expectedSameWindow);
+  });
+
+  it("boundary: 4 hours + 1ms of inactivity triggers new window", () => {
+    // Companion to the exact boundary test: 1ms past the 4-hour threshold
+    // must trigger a window increment.
+    const manager = new SessionManager();
+    manager.getSessionId("test-key");
+
+    vi.advanceTimersByTime(4 * 60 * 60 * 1000 + 1);
+    const id2 = manager.getSessionId("test-key");
+
+    const expectedNewWindow = deriveSessionId("test-key", "localhost:3000", "2026-03-22", 1);
+    expect(id2).toBe(expectedNewWindow);
   });
 
   it("multiple window increments work correctly", () => {
@@ -246,6 +261,20 @@ describe("SessionManager", () => {
     const id = manager.getSessionId("new-key");
     const expected = deriveSessionId("new-key", "localhost:3000", "2026-03-22", 1);
     expect(id).toBe(expected);
+  });
+
+  it("handles large window index values from many 4h+ gaps", () => {
+    const manager = new SessionManager();
+    manager.getSessionId("test-key");
+
+    // Simulate 10 consecutive 5-hour gaps within the same day
+    for (let i = 1; i <= 10; i++) {
+      vi.advanceTimersByTime(5 * 60 * 60 * 1000);
+      const id = manager.getSessionId("test-key");
+      // The date may roll over due to advancing 50+ hours total,
+      // but the session ID should always be a valid 16-char hex string
+      expect(id).toMatch(/^[0-9a-f]{16}$/);
+    }
   });
 
   it("updates lastActivityTimestamp on each call", () => {

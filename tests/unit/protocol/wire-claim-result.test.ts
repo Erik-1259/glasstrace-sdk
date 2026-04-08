@@ -24,7 +24,9 @@ const validBaseResponse = {
 const validClaimResult = {
   newApiKey: "gt_dev_c1a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5",
   accountId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  graceExpiresAt: 1_775_001_600_000,
+  // Use a relative timestamp (1 hour from now) instead of a hardcoded value
+  // to prevent this test from failing after the hardcoded date passes.
+  graceExpiresAt: Date.now() + 3_600_000,
 };
 
 describe("SdkInitResponseSchema — claimResult", () => {

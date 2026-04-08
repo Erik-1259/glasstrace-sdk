@@ -35,26 +35,20 @@ function createTmpProject(opts: { withAnonKey?: boolean } = {}): string {
  * Returns a restore function that MUST be called in afterEach.
  */
 function saveEnv(): () => void {
-  const saved: Record<string, string | undefined> = {};
-  const keys = [
-    "NODE_ENV",
-    "VERCEL_ENV",
-    "CI",
-    "GITHUB_ACTIONS",
-    "HOME",
-    "USERPROFILE",
-    "GLASSTRACE_FORCE_ENABLE",
-  ];
-  for (const key of keys) {
-    saved[key] = process.env[key];
-  }
+  // Snapshot the entire env object for robust restoration.
+  // This ensures any env var mutated during a test is restored,
+  // not just the ones we anticipate.
+  const snapshot = { ...process.env };
   return () => {
-    for (const key of keys) {
-      if (saved[key] === undefined) {
+    // Remove any keys added during the test
+    for (const key of Object.keys(process.env)) {
+      if (!(key in snapshot)) {
         delete process.env[key];
-      } else {
-        process.env[key] = saved[key];
       }
+    }
+    // Restore original values
+    for (const [key, value] of Object.entries(snapshot)) {
+      process.env[key] = value;
     }
   };
 }
