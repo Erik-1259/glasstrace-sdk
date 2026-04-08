@@ -6,6 +6,7 @@
  */
 
 import * as otelApi from "@opentelemetry/api";
+import { maybeShowMcpNudge } from "./nudge/error-nudge.js";
 
 /**
  * Records an error as a span event on the currently active OTel span.
@@ -13,6 +14,9 @@ import * as otelApi from "@opentelemetry/api";
  * Works regardless of the `consoleErrors` configuration — this is an
  * explicit, opt-in API for manual error reporting. If no span is active
  * or OTel is not available, the call is silently ignored.
+ *
+ * On the first captured error, may display a one-time diagnostic nudge
+ * to stderr if the MCP connection marker is absent (dev environments only).
  *
  * @param error - The error to capture. Accepts `Error` objects, strings, or any value.
  *
@@ -42,6 +46,9 @@ export function captureError(error: unknown): void {
     }
 
     span.addEvent("glasstrace.error", attributes);
+
+    // Show one-time MCP connection nudge on first captured error
+    maybeShowMcpNudge(String(error));
   } catch {
     // Silently ignore failures
   }

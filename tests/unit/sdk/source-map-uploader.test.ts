@@ -191,6 +191,29 @@ describe("uploadSourceMaps", () => {
     expect(result.fileCount).toBe(1);
   });
 
+  it("strips trailing slashes from endpoint URL", async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        success: true,
+        buildHash: "abc123",
+        fileCount: 1,
+        totalSizeBytes: 100,
+      }),
+    };
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
+
+    await uploadSourceMaps(
+      "gt_dev_" + "a".repeat(48),
+      "https://api.glasstrace.dev///",
+      "abc123",
+      [{ filePath: "main.js.map", content: '{"version":3}' }],
+    );
+
+    const [url] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("https://api.glasstrace.dev/v1/source-maps");
+  });
+
   it("error case: upload fails with network error", async () => {
     vi.mocked(fetch).mockRejectedValue(new Error("network error"));
 
