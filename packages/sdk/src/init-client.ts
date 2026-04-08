@@ -160,25 +160,39 @@ export async function sendInitRequest(
 }
 
 /**
+ * Result returned by {@link performInit} when the backend reports an
+ * account claim transition. `null` means no claim was present.
+ */
+export interface InitClaimResult {
+  claimResult: NonNullable<SdkInitResponse["claimResult"]>;
+}
+
+/**
  * Orchestrates the full init flow: send request, update config, cache result.
  * This function MUST NOT throw.
+ *
+ * Returns the claim result when the backend reports an account claim
+ * transition, or `null` when no claim result is available (including
+ * when init is skipped due to rate-limit backoff, missing API key,
+ * or request failure). Callers that do not need claim information
+ * can safely ignore the return value.
  */
 export async function performInit(
   config: ResolvedConfig,
   anonKey: AnonApiKey | null,
   sdkVersion: string,
-): Promise<void> {
+): Promise<InitClaimResult | null> {
   // Skip if in rate-limit backoff
   if (rateLimitBackoff) {
     rateLimitBackoff = false; // Reset for next call
-    return;
+    return null;
   }
 
   try {
     const effectiveKey = config.apiKey || anonKey;
     if (!effectiveKey) {
       console.warn("[glasstrace] No API key available for init request.");
-      return;
+      return null;
     }
 
     const controller = new AbortController();
@@ -203,12 +217,28 @@ export async function performInit(
 
       // Persist to disk
       await saveCachedConfig(result);
+
+      // Handle account claim transition
+      if (result.claimResult) {
+        try {
+          process.stderr.write(
+            `[glasstrace] Account claimed! Update GLASSTRACE_API_KEY=${result.claimResult.newApiKey} in your .env file.\n`,
+          );
+        } catch (logErr) {
+          console.warn(
+            `[glasstrace] Failed to write claim migration message: ${logErr instanceof Error ? logErr.message : String(logErr)}`,
+          );
+        }
+        return { claimResult: result.claimResult };
+      }
+
+      return null;
     } catch (err) {
       clearTimeout(timeoutId);
 
       if (err instanceof DOMException && err.name === "AbortError") {
         console.warn("[glasstrace] ingestion_unreachable: Init request timed out.");
-        return;
+        return null;
       }
 
       // Check for HTTP status errors attached by sendInitRequest
@@ -217,20 +247,20 @@ export async function performInit(
         console.warn(
           "[glasstrace] ingestion_auth_failed: Check your GLASSTRACE_API_KEY.",
         );
-        return;
+        return null;
       }
 
       if (status === 429) {
         console.warn("[glasstrace] ingestion_rate_limited: Backing off.");
         rateLimitBackoff = true;
-        return;
+        return null;
       }
 
       if (typeof status === "number" && status >= 400) {
         console.warn(
           `[glasstrace] Init request failed with status ${status}. Using cached config.`,
         );
-        return;
+        return null;
       }
 
       // Schema validation failure from sendInitRequest.parse
@@ -238,13 +268,14 @@ export async function performInit(
         console.warn(
           "[glasstrace] Init response failed validation (schema version mismatch?). Using cached config.",
         );
-        return;
+        return null;
       }
 
       // Network error or other fetch failure
       console.warn(
         `[glasstrace] ingestion_unreachable: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return null;
     }
   } catch (err) {
     // Outermost catch -- should never reach here, but safety net
@@ -252,6 +283,8 @@ export async function performInit(
       `[glasstrace] Unexpected init error: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+
+  return null;
 }
 
 /**

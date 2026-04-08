@@ -25,6 +25,7 @@ export {
   performInit,
   getActiveConfig,
 } from "./init-client.js";
+export type { InitClaimResult } from "./init-client.js";
 
 // Custom span processor (deprecated — now a pass-through)
 export { GlasstraceSpanProcessor } from "./span-processor.js";
