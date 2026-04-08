@@ -39,7 +39,8 @@
     "@opentelemetry/api": "^1.0.0",
     "@prisma/instrumentation": "^4.0.0 || ^5.0.0 || ^6.0.0",
     "@vercel/otel": "^1.0.0",
-    "drizzle-orm": "^0.29.0 || ^0.30.0 || ^0.31.0 || ^0.32.0 || ^0.33.0 || ^0.34.0 || ^0.35.0 || ^0.36.0 || ^0.37.0"
+    "drizzle-orm": "^0.29.0 || ^0.30.0 || ^0.31.0 || ^0.32.0 || ^0.33.0 || ^0.34.0 || ^0.35.0 || ^0.36.0 || ^0.37.0",
+    "@vercel/blob": "^2.0.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
@@ -53,6 +54,9 @@
     },
     "drizzle-orm": {
       "optional": true
+    },
+    "@vercel/blob": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -61,6 +65,7 @@
     "@opentelemetry/core": "^2.6.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.214.0",
     "@opentelemetry/sdk-trace-base": "^2.6.1",
+    "@vercel/blob": "^2.3.3",
     "tsup": "^8.5.0"
   },
   "publishConfig": {

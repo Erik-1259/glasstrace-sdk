@@ -99,6 +99,18 @@ Flags:
 - `--dry-run` -- Preview what would be configured without making changes
 - `--force` -- Reconfigure even if already set up (useful after key rotation)
 
+### Large Build Support
+
+For builds at or above 4.5MB, the SDK automatically uses presigned uploads
+via Vercel Blob storage. Install the optional dependency:
+
+```bash
+npm install @vercel/blob
+```
+
+No configuration changes needed — the SDK detects build size and routes
+to the appropriate upload method automatically.
+
 ### Account Claim Transition
 
 When an anonymous key is linked to a Glasstrace account, the SDK
