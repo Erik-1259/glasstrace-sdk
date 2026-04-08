@@ -64,8 +64,12 @@ describe("Init Client + Config Cache", () => {
   });
 
   afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
-    _resetConfigForTesting();
+    try {
+      await rm(tempDir, { recursive: true, force: true });
+    } finally {
+      vi.unstubAllGlobals();
+      _resetConfigForTesting();
+    }
   });
 
   describe("Requirement 1: loadCachedConfig", () => {
@@ -156,7 +160,7 @@ describe("Init Client + Config Cache", () => {
 
       await saveCachedConfig(response, join(badPath, "subdir"));
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to cache config"),
+        expect.stringMatching(/Failed to cache config.*(ENOTDIR|ENOENT|EPERM|EACCES)/),
       );
     });
   });
@@ -251,7 +255,9 @@ describe("Init Client + Config Cache", () => {
 
       expect(textMock).toHaveBeenCalledOnce();
       expect(thrown).toBeInstanceOf(Error);
+      // The status error message must take precedence over the body-read failure
       expect((thrown as Error).message).toBe("Init request failed with status 503");
+      expect((thrown as Error).message).not.toContain("body read failed");
       expect(thrown).toMatchObject({ status: 503 });
     });
 
@@ -272,6 +278,20 @@ describe("Init Client + Config Cache", () => {
 
       await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow(
         "No API key available",
+      );
+    });
+
+    it("throws when response.json() returns malformed data", async () => {
+      const config = makeResolvedConfig();
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError("Unexpected token")),
+      }));
+
+      await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow(
+        expect.objectContaining({ name: "SyntaxError" }),
       );
     });
   });

@@ -75,13 +75,15 @@ describe("getOrCreateAnonKey", () => {
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const key = await getOrCreateAnonKey(tempDir);
-    expect(key).toMatch(/^gt_anon_[a-f0-9]{48}$/);
-    expect(warnSpy).toHaveBeenCalled();
-
-    warnSpy.mockRestore();
-    // Clean up: restore permissions so rm works
-    await chmod(join(tempDir, ".glasstrace"), 0o755);
+    try {
+      const key = await getOrCreateAnonKey(tempDir);
+      expect(key).toMatch(/^gt_anon_[a-f0-9]{48}$/);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      // Clean up: restore permissions so rm works
+      await chmod(join(tempDir, ".glasstrace"), 0o755);
+    }
   });
 
   it("ephemeral key is stable across repeated calls on write failure", async () => {
@@ -91,12 +93,24 @@ describe("getOrCreateAnonKey", () => {
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const key1 = await getOrCreateAnonKey(tempDir);
-    const key2 = await getOrCreateAnonKey(tempDir);
-    expect(key1).toBe(key2);
+    try {
+      const key1 = await getOrCreateAnonKey(tempDir);
+      const key2 = await getOrCreateAnonKey(tempDir);
+      expect(key1).toBe(key2);
+    } finally {
+      warnSpy.mockRestore();
+      await chmod(join(tempDir, ".glasstrace"), 0o755);
+    }
+  });
 
-    warnSpy.mockRestore();
-    await chmod(join(tempDir, ".glasstrace"), 0o755);
+  it("regenerates when key has valid prefix but truncated hex", async () => {
+    // A corrupted key with valid prefix but insufficient hex characters
+    await mkdir(join(tempDir, ".glasstrace"), { recursive: true });
+    await writeFile(join(tempDir, ".glasstrace", "anon_key"), "gt_anon_abc");
+
+    const key = await getOrCreateAnonKey(tempDir);
+    expect(key).toMatch(/^gt_anon_[a-f0-9]{48}$/);
+    expect(key).not.toBe("gt_anon_abc");
   });
 
   it("concurrent calls return the same key", async () => {

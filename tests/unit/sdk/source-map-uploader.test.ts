@@ -629,6 +629,43 @@ describe("uploadSourceMapsPresigned", () => {
     expect(mockUploader).not.toHaveBeenCalled();
   });
 
+  it("fails when first upload succeeds but second upload fails (partial failure)", async () => {
+    const maps = [
+      { filePath: "main.js", content: '{"version":3,"file":"main.js"}' },
+      { filePath: "vendor.js", content: '{"version":3,"file":"vendor.js"}' },
+    ];
+
+    const presignedResp = mockPresignedResponse(maps);
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => presignedResp,
+    } as unknown as Response);
+
+    let uploadCount = 0;
+    const mockUploader: BlobUploader = vi.fn().mockImplementation(
+      async (_token: string, _pathname: string, content: string) => {
+        uploadCount++;
+        if (uploadCount === 2) {
+          throw new Error("second upload failed");
+        }
+        return {
+          url: `https://blob.example.com/${_pathname}`,
+          size: Buffer.byteLength(content, "utf-8"),
+        };
+      },
+    );
+
+    await expect(
+      uploadSourceMapsPresigned(
+        TEST_API_KEY, TEST_ENDPOINT, TEST_BUILD_HASH, maps, mockUploader,
+      ),
+    ).rejects.toThrow("second upload failed");
+
+    // Only 1 fetch call (Phase 1) — Phase 3 should not be reached
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("does not call submitManifest when blob upload fails", async () => {
     const maps = [
       { filePath: "main.js", content: '{"version":3}' },

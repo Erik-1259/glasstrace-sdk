@@ -47,6 +47,12 @@ describe("generateMcpConfig", () => {
         generateMcpConfig(makeAgent("generic"), ENDPOINT, "   "),
       ).toThrow(/anonKey must not be empty/);
     });
+
+    it("throws when endpoint is valid but anonKey is empty (partial invalidity)", () => {
+      expect(() =>
+        generateMcpConfig(makeAgent("claude"), ENDPOINT, ""),
+      ).toThrow(/anonKey must not be empty/);
+    });
   });
 
   describe("Claude Code config", () => {

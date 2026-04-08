@@ -8,6 +8,9 @@ describe("classifyFetchTarget", () => {
     originalEnv = { ...process.env };
     delete process.env.PORT;
     delete process.env.GLASSTRACE_ENV;
+    // Reset the internal env cache so each test starts with a clean slate.
+    // This is required because the classifier caches PORT/GLASSTRACE_ENV at
+    // first call and would otherwise bleed state between tests.
     _resetEnvCacheForTesting();
   });
 

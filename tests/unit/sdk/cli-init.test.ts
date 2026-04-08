@@ -319,6 +319,16 @@ module.exports = nextConfig;
     const result = await scaffoldNextConfig(tmpDir);
     expect(result).toBe(false);
   });
+
+  it("handles ESM export with trailing whitespace", async () => {
+    // Verify the scaffolder handles trailing whitespace after the expression
+    const original = "const nextConfig = {};\nexport default nextConfig  ;  \n";
+    fs.writeFileSync(path.join(tmpDir, "next.config.ts"), original);
+    const result = await scaffoldNextConfig(tmpDir);
+    expect(result).toBe(true);
+    const content = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
+    expect(content).toContain("withGlasstraceConfig");
+  });
 });
 
 describe("scaffoldEnvLocal", () => {

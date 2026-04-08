@@ -217,6 +217,33 @@ describe("mcpAdd", () => {
     expect(output).toContain("Cursor");
   });
 
+  it("succeeds via CLI path when execFile mock returns success", async () => {
+    writeAnonKey(tmpDir);
+
+    // Create a Claude marker
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+
+    // Override the mock for two invocations — auto-reverts after both calls:
+    // 1st call: `which claude` (CLI availability check)
+    // 2nd call: `claude mcp add-json ...` (actual registration)
+    const { execFile } = await import("node:child_process");
+    const successImpl = ((_cmd: string, _args: string[], cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+      cb(null, "success", "");
+    }) as typeof execFile;
+    vi.mocked(execFile)
+      .mockImplementationOnce(successImpl)
+      .mockImplementationOnce(successImpl);
+
+    const { mcpAdd } = await loadMcpAdd();
+
+    const result = await mcpAdd({ force: true });
+
+    expect(result.exitCode).toBe(0);
+    // Verify at least one agent used the CLI method (not file fallback)
+    const cliResult = result.results.find((r) => r.method === "cli");
+    expect(cliResult).toBeDefined();
+  });
+
   it("falls back to generic config when no agents detected", async () => {
     writeAnonKey(tmpDir);
 

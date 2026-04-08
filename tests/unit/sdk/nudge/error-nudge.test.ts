@@ -29,10 +29,14 @@ describe("maybeShowMcpNudge", () => {
   });
 
   afterEach(() => {
-    process.env = originalEnv;
-    process.cwd = originalCwd;
-    stderrSpy.mockRestore();
-    rmSync(tempDir, { recursive: true, force: true });
+    try {
+      // Clean up filesystem first, then restore mocks
+      rmSync(tempDir, { recursive: true, force: true });
+    } finally {
+      process.env = originalEnv;
+      process.cwd = originalCwd;
+      stderrSpy.mockRestore();
+    }
   });
 
   async function loadModule() {

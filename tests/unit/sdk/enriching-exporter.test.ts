@@ -381,36 +381,44 @@ describe("GlasstraceExporter", () => {
   });
 
   describe("Buffer overflow", () => {
-    it("evicts oldest batches when buffer exceeds 1024 spans", () => {
+    it("evicts oldest batches when buffer exceeds 1024 spans (FIFO order)", () => {
       const delegate = createMockDelegate();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const exporter = new GlasstraceExporter({
-        getApiKey: () => API_KEY_PENDING,
-        sessionManager: new SessionManager(),
-        getConfig: () => DEFAULT_CONFIG,
-        environment: undefined,
-        endpointUrl: "https://api.glasstrace.dev/v1/traces",
-        createDelegate: () => delegate,
-      });
+      try {
+        const exporter = new GlasstraceExporter({
+          getApiKey: () => API_KEY_PENDING,
+          sessionManager: new SessionManager(),
+          getConfig: () => DEFAULT_CONFIG,
+          environment: undefined,
+          endpointUrl: "https://api.glasstrace.dev/v1/traces",
+          createDelegate: () => delegate,
+        });
 
-      const callbacks: ReturnType<typeof vi.fn>[] = [];
+        const callbacks: ReturnType<typeof vi.fn>[] = [];
 
-      // Buffer 1025 spans (individual batches of 1)
-      for (let i = 0; i < 1025; i++) {
-        const cb = vi.fn();
-        callbacks.push(cb);
-        exporter.export([createMockSpan({ name: `span-${i}` })], cb);
+        // Buffer 1025 spans (individual batches of 1)
+        for (let i = 0; i < 1025; i++) {
+          const cb = vi.fn();
+          callbacks.push(cb);
+          exporter.export([createMockSpan({ name: `span-${i}` })], cb);
+        }
+
+        // Only the first (oldest) callback should have been evicted to get
+        // back under the 1024-span limit
+        expect(callbacks[0]).toHaveBeenCalled();
+        // The next-oldest batch and the last span should still be buffered
+        expect(callbacks[1]).not.toHaveBeenCalled();
+        expect(callbacks[1024]).not.toHaveBeenCalled();
+
+        // Overflow warning should be logged exactly once
+        const overflowWarnings = warnSpy.mock.calls.filter(
+          (call) => typeof call[0] === "string" && call[0].includes("overflow"),
+        );
+        expect(overflowWarnings).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
       }
-
-      // The first callback should have been called (evicted)
-      expect(callbacks[0]).toHaveBeenCalled();
-
-      // Overflow warning should be logged exactly once
-      const overflowWarnings = warnSpy.mock.calls.filter(
-        (call) => typeof call[0] === "string" && call[0].includes("overflow"),
-      );
-      expect(overflowWarnings).toHaveLength(1);
     });
   });
 
@@ -456,38 +464,44 @@ describe("GlasstraceExporter", () => {
   describe("Partial enrichment resilience", () => {
     it("continues enrichment when SessionManager throws", () => {
       const delegate = createMockDelegate();
-      const brokenSessionManager = {
-        getSessionId: () => {
-          throw new Error("session broken");
-        },
-      } as unknown as SessionManager; // Intentionally broken — testing resilience when SessionManager throws
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const exporter = new GlasstraceExporter({
-        getApiKey: () => TEST_API_KEY,
-        sessionManager: brokenSessionManager,
-        getConfig: () => DEFAULT_CONFIG,
-        environment: "staging",
-        endpointUrl: "https://api.glasstrace.dev/v1/traces",
-        createDelegate: () => delegate,
-      });
+      try {
+        const brokenSessionManager = {
+          getSessionId: () => {
+            throw new Error("session broken");
+          },
+        } as unknown as SessionManager; // Intentionally broken — testing resilience when SessionManager throws
 
-      const span = createMockSpan({
-        attributes: {
-          "http.method": "GET",
-          "http.status_code": 200,
-        },
-      });
-      const callback = vi.fn();
+        const exporter = new GlasstraceExporter({
+          getApiKey: () => TEST_API_KEY,
+          sessionManager: brokenSessionManager,
+          getConfig: () => DEFAULT_CONFIG,
+          environment: "staging",
+          endpointUrl: "https://api.glasstrace.dev/v1/traces",
+          createDelegate: () => delegate,
+        });
 
-      exporter.export([span], callback);
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "GET",
+            "http.status_code": 200,
+          },
+        });
+        const callback = vi.fn();
 
-      const enriched = delegate.exportedSpans[0][0];
-      // Session ID should be absent due to error
-      expect(enriched.attributes[ATTR.SESSION_ID]).toBeUndefined();
-      // Other attributes should still be present
-      expect(enriched.attributes[ATTR.TRACE_TYPE]).toBe("server");
-      expect(enriched.attributes[ATTR.HTTP_METHOD]).toBe("GET");
-      expect(enriched.attributes[ATTR.ENVIRONMENT]).toBe("staging");
+        exporter.export([span], callback);
+
+        const enriched = delegate.exportedSpans[0][0];
+        // Session ID should be absent due to error
+        expect(enriched.attributes[ATTR.SESSION_ID]).toBeUndefined();
+        // Other attributes should still be present
+        expect(enriched.attributes[ATTR.TRACE_TYPE]).toBe("server");
+        expect(enriched.attributes[ATTR.HTTP_METHOD]).toBe("GET");
+        expect(enriched.attributes[ATTR.ENVIRONMENT]).toBe("staging");
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     it("enriches spans with missing/malformed attributes gracefully", () => {

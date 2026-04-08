@@ -41,6 +41,7 @@ describe("console-capture", () => {
   let originalWarn: typeof console.warn;
 
   beforeEach(() => {
+    vi.resetModules();
     originalError = console.error;
     originalWarn = console.warn;
   });
@@ -108,12 +109,19 @@ describe("console-capture", () => {
     it("skips capture for messages starting with '[glasstrace]'", async () => {
       const { addEvent } = mockOtelWithActiveSpan();
 
+      // Spy on the original console.error to verify the message is still printed
+      const originalSpy = vi.fn();
+      console.error = originalSpy;
+
       // Must re-import to pick up the mock
       const mod = await import("../../../packages/sdk/src/console-capture.js");
       await mod.installConsoleCapture();
       console.error("[glasstrace] internal SDK message");
 
+      // The message should NOT be captured as a span event
       expect(addEvent).not.toHaveBeenCalled();
+      // But it should still be passed through to the original console.error
+      expect(originalSpy).toHaveBeenCalledWith("[glasstrace] internal SDK message");
       mod.uninstallConsoleCapture();
     });
 
@@ -163,6 +171,17 @@ describe("console-capture", () => {
       await mod.installConsoleCapture();
 
       expect(() => console.error("no span context")).not.toThrow();
+      mod.uninstallConsoleCapture();
+    });
+
+    it("handles null and undefined arguments without crashing", async () => {
+      const { addEvent } = mockOtelWithActiveSpan();
+
+      const mod = await import("../../../packages/sdk/src/console-capture.js");
+      await mod.installConsoleCapture();
+
+      expect(() => console.error(null, undefined)).not.toThrow();
+      expect(addEvent).toHaveBeenCalled();
       mod.uninstallConsoleCapture();
     });
   });

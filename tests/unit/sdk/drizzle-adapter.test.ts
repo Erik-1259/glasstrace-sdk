@@ -271,5 +271,54 @@ describe("GlasstraceDrizzleLogger", () => {
       const span = spans[spans.length - 1];
       expect(span.attributes["db.operation"]).toBe("unknown");
     });
+
+    it("handles SQL with quoted identifiers", () => {
+      const logger = new GlasstraceDrizzleLogger();
+      expect(() => {
+        logger.logQuery('SELECT * FROM "user-accounts" WHERE "first-name" = $1', ["Alice"]);
+      }).not.toThrow();
+
+      const spans = exporter.getFinishedSpans();
+      const span = spans[spans.length - 1];
+      expect(span.attributes["db.operation"]).toBe("SELECT");
+    });
+
+    it("handles SQL with unicode characters", () => {
+      const logger = new GlasstraceDrizzleLogger();
+      expect(() => {
+        logger.logQuery("SELECT * FROM users WHERE name = $1", ["\u{1F600}"]);
+      }).not.toThrow();
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans.length).toBeGreaterThanOrEqual(1);
+      const span = spans[spans.length - 1];
+      expect(span.attributes["db.operation"]).toBe("SELECT");
+    });
+
+    it("handles very long queries", () => {
+      const logger = new GlasstraceDrizzleLogger();
+      const longQuery = "SELECT " + "col, ".repeat(500) + "id FROM very_wide_table";
+      expect(() => {
+        logger.logQuery(longQuery, []);
+      }).not.toThrow();
+
+      const spans = exporter.getFinishedSpans();
+      const span = spans[spans.length - 1];
+      expect(span.attributes["db.statement"]).toBe(longQuery);
+    });
+  });
+
+  describe("post-shutdown safety", () => {
+    it("logQuery does not throw after provider has been shut down", async () => {
+      const logger = new GlasstraceDrizzleLogger();
+
+      // Shut down the provider
+      await provider.shutdown();
+
+      // Logging after shutdown should be safe (no crash)
+      expect(() => {
+        logger.logQuery("SELECT 1", []);
+      }).not.toThrow();
+    });
   });
 });

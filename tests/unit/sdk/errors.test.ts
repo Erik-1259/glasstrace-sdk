@@ -45,9 +45,12 @@ describe("SdkError", () => {
     expect(err.name).toBe("SdkError");
   });
 
-  it("preserves stack trace", () => {
+  it("preserves stack trace pointing to construction site", () => {
     const err = new SdkError("source_map_upload_failed", "upload failed");
     expect(err.stack).toBeDefined();
+    // Stack should contain either the test file name or the SdkError constructor,
+    // confirming the stack trace points to the actual call site.
     expect(err.stack).toContain("SdkError");
+    expect(err.stack).toContain("errors.test");
   });
 });
