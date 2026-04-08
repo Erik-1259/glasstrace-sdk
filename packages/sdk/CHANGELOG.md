@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.4.2
+
+### Patch Changes
+
+- 945d2ad: Fix TOCTOU race in anonymous key generation and harden span attribute type guards
+
 ## 0.4.1
 
 ### Patch Changes
