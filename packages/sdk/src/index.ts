@@ -49,8 +49,15 @@ export {
   collectSourceMaps,
   computeBuildHash,
   uploadSourceMaps,
+  PRESIGNED_THRESHOLD_BYTES,
+  uploadSourceMapsPresigned,
+  uploadSourceMapsAuto,
 } from "./source-map-uploader.js";
-export type { SourceMapEntry } from "./source-map-uploader.js";
+export type {
+  SourceMapEntry,
+  BlobUploader,
+  AutoUploadOptions,
+} from "./source-map-uploader.js";
 
 // Manual error capture
 export { captureError } from "./capture-error.js";

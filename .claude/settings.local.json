@@ -36,7 +36,8 @@
       "Bash(npx vitest:*)",
       "Bash(find:*)",
       "Bash(grep -E \"\\\\.\\(md|txt\\)$\")",
-      "Bash(grep -l \"Affects: glasstrace-sdk\" /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/*.md)"
+      "Bash(grep -l \"Affects: glasstrace-sdk\" /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/*.md)",
+      "Bash(npm audit:*)"
     ]
   }
 }
