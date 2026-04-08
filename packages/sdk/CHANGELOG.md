@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.7.0
+
+### Minor Changes
+
+- d305b68: Add presigned source map upload for builds exceeding Vercel's 4.5MB serverless body limit
+
 ## 0.6.0
 
 ### Minor Changes
