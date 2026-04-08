@@ -1,5 +1,11 @@
 # @glasstrace/protocol
 
+## 0.5.0
+
+### Minor Changes
+
+- 16656dd: Add claim result field to SdkInitResponse and presigned source map upload types
+
 ## 0.2.0
 
 ### Minor Changes
