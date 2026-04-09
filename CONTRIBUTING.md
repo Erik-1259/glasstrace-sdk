@@ -78,6 +78,44 @@ tests/
     sdk/        SDK tests
 ```
 
+## Reviewing Dependabot PRs
+
+Dependabot automatically opens pull requests for dependency updates.
+Minor and patch bumps are grouped; major bumps get individual PRs.
+
+### Rules
+
+- **Never auto-merge major version bumps.** Major bumps often contain
+  breaking changes that require migration work.
+- **Always check the changelog** of the bumped package before merging.
+  Look for breaking changes, deprecated APIs, and new requirements.
+- **Run the full CI suite** — the compatibility test job (`compat`)
+  validates that the packages still work when installed with minimum
+  supported peer dependency versions.
+
+### Critical dependencies to watch
+
+These dependencies directly affect the SDK's public API or build
+output. Major bumps require extra scrutiny:
+
+| Dependency | Why it matters |
+|---|---|
+| `typescript` | Major bumps change type-checking behavior and can break consumer builds |
+| `zod` | Major bumps change schema API — the protocol package's entire surface is Zod schemas |
+| `@opentelemetry/api` | API changes affect the SDK's span processing and export pipeline |
+| `@opentelemetry/sdk-trace-base` | Internal SDK dependency for span processor/exporter |
+| `tsup` | Build output format changes can break consumers' bundlers |
+
+### Review checklist for major bumps
+
+1. Read the package's migration guide or changelog
+2. Check if our code uses any deprecated or removed APIs
+3. Verify peer dependency ranges still make sense (e.g., if Zod
+   releases v5, decide whether to support v4 + v5 or v5 only)
+4. Run `npm run typecheck && npm run test && npm run build` locally
+5. If CI passes, test a manual `npm pack` install in a scratch project
+6. Update peer dependency ranges in `packages/*/package.json` if needed
+
 ## Reporting Issues
 
 - **Bugs:** Open a GitHub issue with reproduction steps
