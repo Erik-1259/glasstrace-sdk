@@ -1,6 +1,6 @@
 {
   "name": "@glasstrace/sdk",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Glasstrace server-side debugging SDK for AI coding agents",
   "type": "module",
   "exports": {
