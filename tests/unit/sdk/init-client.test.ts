@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import {
   sendInitRequest,
   performInit,
   getActiveConfig,
+  writeClaimedKey,
   _resetConfigForTesting,
   _isRateLimitBackoff,
   _setCurrentConfig,
@@ -131,15 +132,20 @@ describe("Init Client + Config Cache", () => {
   });
 
   describe("Requirement 2: saveCachedConfig", () => {
-    it("writes valid SdkCachedConfig JSON to .glasstrace/config", async () => {
+    it("writes valid SdkCachedConfig JSON to .glasstrace/config with 0o600 permissions", async () => {
       const response = makeInitResponse();
       await saveCachedConfig(response, tempDir);
 
-      const content = await readFile(join(tempDir, ".glasstrace", "config"), "utf-8");
+      const configPath = join(tempDir, ".glasstrace", "config");
+      const content = await readFile(configPath, "utf-8");
       const parsed = JSON.parse(content);
       expect(parsed.response).toEqual(response);
       expect(typeof parsed.cachedAt).toBe("number");
       expect(parsed.cachedAt).toBeGreaterThan(0);
+
+      // Verify file permissions
+      const stats = statSync(configPath);
+      expect(stats.mode & 0o777).toBe(0o600);
     });
 
     it("creates .glasstrace directory if it does not exist", async () => {
@@ -465,6 +471,8 @@ describe("Init Client + Config Cache", () => {
         json: () => Promise.resolve(responseBody),
       }));
 
+      // Isolate file writes to tempDir so writeClaimedKey doesn't touch repo root
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
       const result = await performInit(config, null, "0.1.0");
 
@@ -472,6 +480,12 @@ describe("Init Client + Config Cache", () => {
       expect(result!.claimResult.newApiKey).toBe(devKey);
       expect(result!.claimResult.accountId).toBe(claimResult.accountId);
       expect(result!.claimResult.graceExpiresAt).toBe(claimResult.graceExpiresAt);
+
+      // stderr message must mention .env.local but NOT contain the key
+      const stderrCalls = stderrSpy.mock.calls.map(c => String(c[0]));
+      const claimMessage = stderrCalls.find(msg => msg.includes("Account claimed"));
+      expect(claimMessage).toBeDefined();
+      expect(claimMessage).not.toContain(devKey);
       stderrSpy.mockRestore();
     });
 
@@ -485,11 +499,12 @@ describe("Init Client + Config Cache", () => {
         json: () => Promise.resolve(responseBody),
       }));
 
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
       const result = await performInit(config, null, "0.1.0");
       expect(result).toBeNull();
     });
 
-    it("does not throw and still returns claimResult when stderr.write fails", async () => {
+    it("key NEVER appears in stderr output", async () => {
       const config = makeResolvedConfig();
       const responseBody = makeInitResponse({ claimResult });
 
@@ -499,42 +514,103 @@ describe("Init Client + Config Cache", () => {
         json: () => Promise.resolve(responseBody),
       }));
 
-      // Force stderr.write to throw — claim log is guarded by its own try/catch
-      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => {
-        throw new Error("stderr broken");
-      });
-
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        // performInit must not throw and must still return the claim result
-        const result = await performInit(config, null, "0.1.0");
-        expect(result).not.toBeNull();
-        expect(result!.claimResult.newApiKey).toBe(devKey);
-        expect(warnSpy).toHaveBeenCalledWith(
-          expect.stringContaining("Failed to write claim migration message"),
-        );
-      } finally {
-        stderrSpy.mockRestore();
-        warnSpy.mockRestore();
-      }
-    });
-
-    it("migration log contains the dev key", async () => {
-      const config = makeResolvedConfig();
-      const responseBody = makeInitResponse({ claimResult });
-
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
-
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
       await performInit(config, null, "0.1.0");
 
-      expect(stderrSpy).toHaveBeenCalledWith(
-        `[glasstrace] Account claimed! Update GLASSTRACE_API_KEY=${devKey} in your .env file.\n`,
-      );
+      for (const call of stderrSpy.mock.calls) {
+        const output = String(call[0]);
+        expect(output).not.toContain(devKey);
+        expect(output).not.toContain("gt_dev_");
+      }
+      stderrSpy.mockRestore();
+    });
+  });
+
+  describe("Requirement 8: writeClaimedKey fallback chain", () => {
+    const testKey = "gt_dev_" + "d".repeat(48);
+
+    it("writes claimed key to .env.local (existing file with key)", async () => {
+      const envLocalPath = join(tempDir, ".env.local");
+      writeFileSync(envLocalPath, "GLASSTRACE_API_KEY=old_key\nOTHER=value\n", "utf-8");
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      await writeClaimedKey(testKey, tempDir);
+
+      const content = await readFile(envLocalPath, "utf-8");
+      expect(content).toContain(`GLASSTRACE_API_KEY=${testKey}`);
+      expect(content).not.toContain("old_key");
+      expect(content).toContain("OTHER=value");
+
+      // Verify file permissions
+      const stats = statSync(envLocalPath);
+      expect(stats.mode & 0o777).toBe(0o600);
+
+      // Verify stderr message
+      const stderrCalls = stderrSpy.mock.calls.map(c => String(c[0]));
+      expect(stderrCalls.some(msg => msg.includes(".env.local"))).toBe(true);
+      expect(stderrCalls.every(msg => !msg.includes(testKey))).toBe(true);
+      stderrSpy.mockRestore();
+    });
+
+    it("creates .env.local if it does not exist", async () => {
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      await writeClaimedKey(testKey, tempDir);
+
+      const envLocalPath = join(tempDir, ".env.local");
+      const content = await readFile(envLocalPath, "utf-8");
+      expect(content).toBe(`GLASSTRACE_API_KEY=${testKey}\n`);
+
+      const stats = statSync(envLocalPath);
+      expect(stats.mode & 0o777).toBe(0o600);
+      stderrSpy.mockRestore();
+    });
+
+    it("appends key when .env.local exists without GLASSTRACE_API_KEY", async () => {
+      const envLocalPath = join(tempDir, ".env.local");
+      writeFileSync(envLocalPath, "OTHER=value", "utf-8");
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      await writeClaimedKey(testKey, tempDir);
+
+      const content = await readFile(envLocalPath, "utf-8");
+      expect(content).toContain("OTHER=value");
+      expect(content).toContain(`GLASSTRACE_API_KEY=${testKey}`);
+      stderrSpy.mockRestore();
+    });
+
+    it("falls back to .glasstrace/claimed-key when .env.local fails", async () => {
+      // Make tempDir/.env.local a directory so file write fails
+      mkdirSync(join(tempDir, ".env.local"), { recursive: true });
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      await writeClaimedKey(testKey, tempDir);
+
+      const claimedKeyPath = join(tempDir, ".glasstrace", "claimed-key");
+      const content = await readFile(claimedKeyPath, "utf-8");
+      expect(content).toBe(testKey);
+
+      const stats = statSync(claimedKeyPath);
+      expect(stats.mode & 0o777).toBe(0o600);
+
+      const stderrCalls = stderrSpy.mock.calls.map(c => String(c[0]));
+      expect(stderrCalls.some(msg => msg.includes(".glasstrace/claimed-key"))).toBe(true);
+      expect(stderrCalls.every(msg => !msg.includes(testKey))).toBe(true);
+      stderrSpy.mockRestore();
+    });
+
+    it("logs dashboard message when all file writes fail", async () => {
+      // Use a non-existent path nested under a file so both writes fail
+      const badRoot = join(tempDir, "blocked-file");
+      writeFileSync(badRoot, "block", "utf-8");
+      const impossibleRoot = join(badRoot, "subdir");
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      await writeClaimedKey(testKey, impossibleRoot);
+
+      const stderrCalls = stderrSpy.mock.calls.map(c => String(c[0]));
+      expect(stderrCalls.some(msg => msg.includes("dashboard settings"))).toBe(true);
+      expect(stderrCalls.every(msg => !msg.includes(testKey))).toBe(true);
       stderrSpy.mockRestore();
     });
   });
