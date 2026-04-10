@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.7.1
+
+### Patch Changes
+
+- 811cf91: Prevent API key exposure in claim result logging — keys are now written to .env.local instead of stderr
+
 ## 0.7.0
 
 ### Minor Changes
