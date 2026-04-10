@@ -157,21 +157,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
               () => sessionManager.getSessionId(getResolvedApiKey()),
             );
 
-            if (config.verbose) {
-              console.info("[glasstrace] Background init firing.");
-            }
-
-            const initResult = await performInit(config, anonKey, __SDK_VERSION__);
-
-            // If the backend reported an account claim, update the exporter
-            // key so subsequent span exports authenticate with the dev key.
-            if (initResult?.claimResult) {
-              setResolvedApiKey(initResult.claimResult.newApiKey);
-              notifyApiKeyResolved();
-            }
-
-            // Re-check consoleErrors with the authoritative init response config
-            maybeInstallConsoleCapture();
+            await backgroundInit(config, anonKey, currentGeneration);
           } catch (err) {
             console.warn(
               `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -191,21 +177,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
             if (currentGeneration !== registrationGeneration) return;
 
-            if (config.verbose) {
-              console.info("[glasstrace] Background init firing.");
-            }
-
-            const initResult = await performInit(config, anonKey, __SDK_VERSION__);
-
-            // If the backend reported an account claim, update the exporter
-            // key so subsequent span exports authenticate with the dev key.
-            if (initResult?.claimResult) {
-              setResolvedApiKey(initResult.claimResult.newApiKey);
-              notifyApiKeyResolved();
-            }
-
-            // Re-check consoleErrors with the authoritative init response config
-            maybeInstallConsoleCapture();
+            await backgroundInit(config, anonKey, currentGeneration);
           } catch (err) {
             console.warn(
               `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -228,13 +200,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
           if (currentGeneration !== registrationGeneration) return;
 
-          if (config.verbose) {
-            console.info("[glasstrace] Background init firing.");
-          }
-          await performInit(config, anonKeyForInit, __SDK_VERSION__);
-
-          // Re-check consoleErrors with the authoritative init response config
-          maybeInstallConsoleCapture();
+          await backgroundInit(config, anonKeyForInit, currentGeneration);
         } catch (err) {
           console.warn(
             `[glasstrace] Background init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -252,6 +218,38 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       `[glasstrace] Registration failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+/**
+ * Shared background init logic for all auth modes.
+ *
+ * Fires the init request, handles account claim transitions (updating
+ * the exporter key), and re-checks console capture config. The anonymous
+ * paths pass the anon key as `anonKeyForInit`; the dev-key path passes
+ * the straggler anon key (or null).
+ */
+async function backgroundInit(
+  config: ResolvedConfig,
+  anonKeyForInit: AnonApiKey | null,
+  generation: number,
+): Promise<void> {
+  if (config.verbose) {
+    console.info("[glasstrace] Background init firing.");
+  }
+
+  const initResult = await performInit(config, anonKeyForInit, __SDK_VERSION__);
+
+  if (generation !== registrationGeneration) return;
+
+  // If the backend reported an account claim, update the exporter
+  // key so subsequent span exports authenticate with the dev key.
+  if (initResult?.claimResult) {
+    setResolvedApiKey(initResult.claimResult.newApiKey);
+    notifyApiKeyResolved();
+  }
+
+  // Re-check consoleErrors with the authoritative init response config
+  maybeInstallConsoleCapture();
 }
 
 /**

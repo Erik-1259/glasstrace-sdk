@@ -73,6 +73,39 @@ describe("captureError", () => {
     expect(() => mod.captureError(new Error("orphan error"))).not.toThrow();
   });
 
+  it("records error.stack attribute for Error instances", async () => {
+    const { addEvent } = mockOtelWithActiveSpan();
+    mockNudge();
+
+    const mod = await import("../../../packages/sdk/src/capture-error.js");
+    mod._resetCaptureErrorForTesting();
+    await mod._preloadOtelApi();
+
+    const error = new Error("test stack capture");
+    mod.captureError(error);
+
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [, attrs] = addEvent.mock.calls[0];
+    expect(attrs["error.stack"]).toBeDefined();
+    expect(attrs["error.stack"]).toContain("test stack capture");
+    // Stack traces include the file path of the calling code
+    expect(typeof attrs["error.stack"]).toBe("string");
+  });
+
+  it("does not include error.stack for non-Error values", async () => {
+    const { addEvent } = mockOtelWithActiveSpan();
+    mockNudge();
+
+    const mod = await import("../../../packages/sdk/src/capture-error.js");
+    mod._resetCaptureErrorForTesting();
+    await mod._preloadOtelApi();
+    mod.captureError("plain string error without stack");
+
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [, attrs] = addEvent.mock.calls[0];
+    expect(attrs["error.stack"]).toBeUndefined();
+  });
+
   it("handles string errors", async () => {
     const { addEvent } = mockOtelWithActiveSpan();
     mockNudge();

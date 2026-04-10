@@ -64,10 +64,42 @@ registerGlasstrace({
 });
 ```
 
+### Source Maps (Next.js)
+
+Wrap your Next.js config to enable source map uploads for production
+stack trace resolution:
+
+```typescript
+// next.config.ts
+import { withGlasstraceConfig } from "@glasstrace/sdk";
+
+export default withGlasstraceConfig({ reactStrictMode: true });
+```
+
+### Manual Error Capture
+
+Record errors explicitly as span events, independent of automatic
+console error capture:
+
+```typescript
+import { captureError } from "@glasstrace/sdk";
+
+try {
+  await riskyOperation();
+} catch (err) {
+  captureError(err);
+}
+```
+
 ### Drizzle ORM Adapter
+
+Attach the Glasstrace logger to capture Drizzle ORM queries as spans:
 
 ```typescript
 import { GlasstraceDrizzleLogger } from "@glasstrace/sdk/drizzle";
+import { drizzle } from "drizzle-orm/node-postgres";
+
+const db = drizzle(pool, { logger: new GlasstraceDrizzleLogger() });
 ```
 
 ## CLI
@@ -121,8 +153,21 @@ instructions to stderr with the new API key.
 
 | Environment Variable | Required | Description |
 |---------------------|----------|-------------|
-| `GLASSTRACE_API_KEY` | Yes | Your project API key (`gt_dev_...`) |
+| `GLASSTRACE_API_KEY` | No | Your project API key (`gt_dev_...`). Anonymous mode without it. |
 | `GLASSTRACE_ENV` | No | Environment name (auto-detected if not set) |
+
+## Bundle Size
+
+The SDK bundles OpenTelemetry and Zod internally so consumers get a
+zero-dependency install. No separate `@opentelemetry/api` or `zod`
+installation is needed.
+
+## OTel Migration
+
+As of v0.7, `@opentelemetry/api` is bundled into the SDK and no longer
+needs to be installed separately. Existing installations remain
+compatible -- the OTel API uses `Symbol.for` for singleton coordination,
+so multiple copies coexist safely.
 
 ## Contributing
 
