@@ -47,3 +47,65 @@ jobs:
         run: |
           npm pack --dry-run --workspace=packages/protocol
           npm pack --dry-run --workspace=packages/sdk
+
+  compat:
+    name: Compatibility (min peer deps)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: corepack enable
+
+      - run: npm ci
+
+      - name: Build packages
+        run: npm run build
+
+      - name: Pack tarballs
+        run: |
+          mkdir -p /tmp/packs
+          npm pack --workspace=packages/protocol --pack-destination /tmp/packs
+          npm pack --workspace=packages/sdk --pack-destination /tmp/packs
+
+      - name: Create test project with minimum peer deps
+        run: |
+          mkdir /tmp/compat-test
+          cd /tmp/compat-test
+          npm init -y
+          # Install packed tarballs
+          npm install /tmp/packs/glasstrace-protocol-*.tgz /tmp/packs/glasstrace-sdk-*.tgz
+          # Install minimum supported peer dependency versions
+          npm install zod@4.3.6 @opentelemetry/api@1.0.0
+
+      - name: Verify protocol import and basic usage
+        run: |
+          cd /tmp/compat-test
+          node --input-type=module -e "
+            import { SessionIdSchema, CaptureConfigSchema, GLASSTRACE_ATTRIBUTE_NAMES } from '@glasstrace/protocol';
+            // Validate a schema parse round-trip
+            const id = SessionIdSchema.parse('a1b2c3d4e5f6a1b2');
+            if (typeof id !== 'string') throw new Error('SessionIdSchema parse failed');
+            // Verify constants are exported
+            if (!GLASSTRACE_ATTRIBUTE_NAMES) throw new Error('Constants not exported');
+            console.log('protocol: all imports OK');
+          "
+
+      - name: Verify SDK import and basic usage
+        run: |
+          cd /tmp/compat-test
+          node --input-type=module -e "
+            import { SdkError, readEnvVars, resolveConfig, deriveSessionId } from '@glasstrace/sdk';
+            // Verify SdkError is constructable (code, message)
+            const err = new SdkError('ingestion_unreachable', 'test error');
+            if (!(err instanceof Error)) throw new Error('SdkError not an Error');
+            // Verify env detection works without env vars set
+            const env = readEnvVars();
+            if (typeof env !== 'object') throw new Error('readEnvVars failed');
+            console.log('sdk: all imports OK');
+          "
