@@ -12,24 +12,9 @@ import {
 } from "../agent-detection/inject.js";
 import { scaffoldMcpMarker } from "./scaffolder.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
+import { MCP_ENDPOINT, formatAgentName } from "./constants.js";
 
 const execFileAsync = promisify(execFileCb);
-
-/** Glasstrace MCP endpoint for agent configuration. */
-const MCP_ENDPOINT = "https://api.glasstrace.dev/mcp";
-
-/** Maps internal agent name to a human-readable display name. */
-function formatAgentName(name: DetectedAgent["name"]): string {
-  const displayNames: Record<DetectedAgent["name"], string> = {
-    claude: "Claude Code",
-    codex: "Codex",
-    gemini: "Gemini",
-    cursor: "Cursor",
-    windsurf: "Windsurf",
-    generic: "Generic",
-  };
-  return displayNames[name];
-}
 
 /** Options for the mcp add command. */
 export interface McpAddOptions {

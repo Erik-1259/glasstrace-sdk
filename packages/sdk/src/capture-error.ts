@@ -43,6 +43,9 @@ export function captureError(error: unknown): void {
 
     if (error instanceof Error) {
       attributes["error.type"] = error.constructor.name;
+      if (error.stack) {
+        attributes["error.stack"] = error.stack;
+      }
     }
 
     span.addEvent("glasstrace.error", attributes);

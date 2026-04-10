@@ -63,6 +63,33 @@ describe("configureOtel()", () => {
       );
       expect(coexistenceWarning).toBeDefined();
     });
+
+    it("should detect collision via ProxyTracer check and not add signal handlers", async () => {
+      // Pre-register a real provider
+      const existingProvider = new otelSdk.BasicTracerProvider();
+      otelApi.trace.setGlobalTracerProvider(existingProvider);
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const sigTermBefore = process.listenerCount("SIGTERM");
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // No new shutdown handlers should be registered when collision detected
+      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
+    });
+
+    it("should register normally when only the default ProxyTracer is present", async () => {
+      // Default state: no provider registered, OTel returns ProxyTracer
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const sigTermBefore = process.listenerCount("SIGTERM");
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // Should register and add shutdown handlers
+      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore + 1);
+    });
   });
 
   describe("Shutdown hooks", () => {

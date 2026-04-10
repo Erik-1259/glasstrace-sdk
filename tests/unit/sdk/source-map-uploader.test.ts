@@ -5,10 +5,10 @@ import * as os from "node:os";
 
 // Mock child_process before importing the module under test
 vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
+  execFileSync: vi.fn(),
 }));
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   collectSourceMaps,
   computeBuildHash,
@@ -82,18 +82,18 @@ describe("collectSourceMaps", () => {
 
 describe("computeBuildHash", () => {
   beforeEach(() => {
-    vi.mocked(execSync).mockReset();
+    vi.mocked(execFileSync).mockReset();
   });
 
   it("returns git SHA when git is available", async () => {
-    vi.mocked(execSync).mockReturnValueOnce("abc123def456\n");
+    vi.mocked(execFileSync).mockReturnValueOnce("abc123def456\n");
 
     const hash = await computeBuildHash();
     expect(hash).toBe("abc123def456");
   });
 
   it("falls back to content hash when git fails", async () => {
-    vi.mocked(execSync).mockImplementationOnce(() => {
+    vi.mocked(execFileSync).mockImplementationOnce(() => {
       throw new Error("not a git repo");
     });
 
@@ -109,7 +109,7 @@ describe("computeBuildHash", () => {
   });
 
   it("content hash is deterministic", async () => {
-    vi.mocked(execSync).mockImplementation(() => {
+    vi.mocked(execFileSync).mockImplementation(() => {
       throw new Error("no git");
     });
 
@@ -124,7 +124,7 @@ describe("computeBuildHash", () => {
   });
 
   it("content hash sorts paths alphabetically", async () => {
-    vi.mocked(execSync).mockImplementation(() => {
+    vi.mocked(execFileSync).mockImplementation(() => {
       throw new Error("no git");
     });
 
@@ -143,7 +143,7 @@ describe("computeBuildHash", () => {
   });
 
   it("empty maps produce a valid hash when git fails", async () => {
-    vi.mocked(execSync).mockImplementation(() => {
+    vi.mocked(execFileSync).mockImplementation(() => {
       throw new Error("no git");
     });
 

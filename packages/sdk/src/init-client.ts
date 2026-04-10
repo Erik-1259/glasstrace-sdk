@@ -24,6 +24,9 @@ const INIT_TIMEOUT_MS = 10_000;
 /** In-memory config from the latest successful init response. */
 let currentConfig: SdkInitResponse | null = null;
 
+/** Whether the disk cache has already been checked by getActiveConfig(). */
+let configCacheChecked = false;
+
 /** Whether the next init call should be skipped (rate-limit backoff). */
 let rateLimitBackoff = false;
 
@@ -384,8 +387,12 @@ export async function performInit(
 /**
  * Returns the current capture config from the three-tier fallback chain:
  * 1. In-memory config from latest init response
- * 2. File cache
+ * 2. File cache (read at most once per process lifetime)
  * 3. DEFAULT_CAPTURE_CONFIG
+ *
+ * The disk read is cached via `configCacheChecked` to avoid repeated
+ * synchronous I/O on the hot path (called by GlasstraceExporter on
+ * every span export batch).
  */
 export function getActiveConfig(): CaptureConfig {
   // Tier 1: in-memory
@@ -393,10 +400,14 @@ export function getActiveConfig(): CaptureConfig {
     return currentConfig.config;
   }
 
-  // Tier 2: file cache
-  const cached = loadCachedConfig();
-  if (cached) {
-    return cached.config;
+  // Tier 2: file cache (only attempt once)
+  if (!configCacheChecked) {
+    configCacheChecked = true;
+    const cached = loadCachedConfig();
+    if (cached) {
+      currentConfig = cached;
+      return cached.config;
+    }
   }
 
   // Tier 3: defaults
@@ -408,6 +419,7 @@ export function getActiveConfig(): CaptureConfig {
  */
 export function _resetConfigForTesting(): void {
   currentConfig = null;
+  configCacheChecked = false;
   rateLimitBackoff = false;
 }
 

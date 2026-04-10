@@ -16,22 +16,7 @@ import { detectAgents } from "../agent-detection/detect.js";
 import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
 import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
-
-/** Glasstrace MCP endpoint for agent configuration. */
-const MCP_ENDPOINT = "https://api.glasstrace.dev/mcp";
-
-/** Maps internal agent name to a human-readable display name. */
-function formatAgentName(name: DetectedAgent["name"]): string {
-  const displayNames: Record<DetectedAgent["name"], string> = {
-    claude: "Claude Code",
-    codex: "Codex",
-    gemini: "Gemini",
-    cursor: "Cursor",
-    windsurf: "Windsurf",
-    generic: "Generic",
-  };
-  return displayNames[name];
-}
+import { MCP_ENDPOINT, formatAgentName } from "./constants.js";
 
 /** Options for the init command (parsed from CLI args or passed programmatically). */
 export interface InitOptions {
