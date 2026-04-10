@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import {
   SdkInitResponseSchema,
@@ -75,12 +75,14 @@ export async function saveCachedConfig(
   const configPath = join(dirPath, CONFIG_FILE);
 
   try {
-    await mkdir(dirPath, { recursive: true });
+    await mkdir(dirPath, { recursive: true, mode: 0o700 });
+    await chmod(dirPath, 0o700);
     const cached = {
       response,
       cachedAt: Date.now(),
     };
-    await writeFile(configPath, JSON.stringify(cached), "utf-8");
+    await writeFile(configPath, JSON.stringify(cached), { encoding: "utf-8", mode: 0o600 });
+    await chmod(configPath, 0o600);
   } catch (err) {
     console.warn(
       `[glasstrace] Failed to cache config to ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
@@ -168,6 +170,101 @@ export interface InitClaimResult {
 }
 
 /**
+ * Writes a claimed API key to disk using a fallback chain:
+ *   1. `.env.local` — update or create with the new key
+ *   2. `.glasstrace/claimed-key` — fallback if `.env.local` is not writable
+ *   3. Dashboard message — if all file writes fail (key is never logged)
+ *
+ * The key value MUST NOT appear in any log output or stderr message.
+ */
+export async function writeClaimedKey(
+  newApiKey: string,
+  projectRoot?: string,
+): Promise<void> {
+  const root = projectRoot ?? process.cwd();
+  const envLocalPath = join(root, ".env.local");
+
+  // Step 1: Try writing to .env.local
+  let envLocalWritten = false;
+  try {
+    let content: string;
+    try {
+      content = await readFile(envLocalPath, "utf-8");
+      // Replace all existing GLASSTRACE_API_KEY lines or append
+      if (/^GLASSTRACE_API_KEY=.*/m.test(content)) {
+        content = content.replace(
+          /^GLASSTRACE_API_KEY=.*$/gm,
+          `GLASSTRACE_API_KEY=${newApiKey}`,
+        );
+      } else {
+        // Ensure trailing newline before appending
+        if (content.length > 0 && !content.endsWith("\n")) {
+          content += "\n";
+        }
+        content += `GLASSTRACE_API_KEY=${newApiKey}\n`;
+      }
+    } catch (readErr: unknown) {
+      // Only create a new file when the file genuinely does not exist.
+      // Other read errors (e.g., permission denied) should not silently
+      // overwrite an existing .env.local that we cannot read.
+      const code = readErr instanceof Error ? (readErr as NodeJS.ErrnoException).code : undefined;
+      if (code !== "ENOENT") {
+        throw readErr;
+      }
+      content = `GLASSTRACE_API_KEY=${newApiKey}\n`;
+    }
+
+    await writeFile(envLocalPath, content, { encoding: "utf-8", mode: 0o600 });
+    await chmod(envLocalPath, 0o600);
+    envLocalWritten = true;
+  } catch {
+    // .env.local write failed — fall through to step 2
+  }
+
+  if (envLocalWritten) {
+    try {
+      process.stderr.write(
+        "[glasstrace] Account claimed! API key written to .env.local. Restart your dev server to use it.\n",
+      );
+    } catch { /* stderr is best-effort */ }
+    return;
+  }
+
+  // Step 2: Try writing to .glasstrace/claimed-key
+  let claimedKeyWritten = false;
+  try {
+    const dirPath = join(root, GLASSTRACE_DIR);
+    await mkdir(dirPath, { recursive: true, mode: 0o700 });
+    await chmod(dirPath, 0o700);
+    const claimedKeyPath = join(dirPath, "claimed-key");
+    await writeFile(claimedKeyPath, newApiKey, {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    await chmod(claimedKeyPath, 0o600);
+    claimedKeyWritten = true;
+  } catch {
+    // .glasstrace write also failed — fall through to step 3
+  }
+
+  if (claimedKeyWritten) {
+    try {
+      process.stderr.write(
+        "[glasstrace] Account claimed! API key written to .glasstrace/claimed-key. Copy it to your .env.local file.\n",
+      );
+    } catch { /* stderr is best-effort */ }
+    return;
+  }
+
+  // Step 3: All file writes failed — log a message WITHOUT the key
+  try {
+    process.stderr.write(
+      "[glasstrace] Account claimed but could not write key to disk. Visit your dashboard settings to rotate and retrieve a new API key.\n",
+    );
+  } catch { /* stderr is best-effort */ }
+}
+
+/**
  * Orchestrates the full init flow: send request, update config, cache result.
  * This function MUST NOT throw.
  *
@@ -218,16 +315,13 @@ export async function performInit(
       // Persist to disk
       await saveCachedConfig(result);
 
-      // Handle account claim transition
+      // Handle account claim transition — write key to disk, never to stderr
       if (result.claimResult) {
         try {
-          process.stderr.write(
-            `[glasstrace] Account claimed! Update GLASSTRACE_API_KEY=${result.claimResult.newApiKey} in your .env file.\n`,
-          );
-        } catch (logErr) {
-          console.warn(
-            `[glasstrace] Failed to write claim migration message: ${logErr instanceof Error ? logErr.message : String(logErr)}`,
-          );
+          await writeClaimedKey(result.claimResult.newApiKey);
+        } catch {
+          // writeClaimedKey handles its own errors internally, but guard
+          // against unexpected failures to ensure claimResult is never lost
         }
         return { claimResult: result.claimResult };
       }
