@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.7.2
+
+### Patch Changes
+
+- 6659716: Add error.stack to captureError, fix sideEffects field, improve documentation, and refactor internals
+
 ## 0.7.1
 
 ### Patch Changes
