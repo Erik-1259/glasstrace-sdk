@@ -434,11 +434,44 @@ if (isDirectExecution) {
         );
         process.exit(1);
       });
+  } else if (subcommand === "uninit") {
+    const remainingArgs = process.argv.slice(3);
+    const dryRun = remainingArgs.includes("--dry-run");
+
+    import("./uninit.js")
+      .then(({ runUninit }) => runUninit({ projectRoot: process.cwd(), dryRun }))
+      .then((result) => {
+        if (result.errors.length > 0) {
+          for (const err of result.errors) {
+            process.stderr.write(`Error: ${err}\n`);
+          }
+        }
+        if (result.warnings.length > 0) {
+          for (const warn of result.warnings) {
+            process.stderr.write(`Warning: ${warn}\n`);
+          }
+        }
+        if (result.summary.length > 0) {
+          process.stderr.write("\n");
+          for (const line of result.summary) {
+            process.stderr.write(`  ${line}\n`);
+          }
+          process.stderr.write("\n");
+        }
+        process.exit(result.exitCode);
+      })
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        process.exit(1);
+      });
   } else {
     process.stderr.write(
       `Unknown command: ${subcommand}\n\n` +
         "Usage:\n" +
         "  glasstrace init [--yes] [--coverage-map]\n" +
+        "  glasstrace uninit [--dry-run]\n" +
         "  glasstrace mcp add [--force] [--dry-run]\n",
     );
     process.exit(1);
