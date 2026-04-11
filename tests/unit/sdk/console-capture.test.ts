@@ -4,6 +4,8 @@ import {
   uninstallConsoleCapture,
 } from "../../../packages/sdk/src/console-capture.js";
 
+const mockMaybeShowMcpNudge = vi.fn();
+
 /**
  * Creates a mock span with a `addEvent` spy.
  * Sets up the @opentelemetry/api mock so that `trace.getSpan(context.active())`
@@ -36,6 +38,12 @@ function mockOtelWithNoActiveSpan() {
   }));
 }
 
+function mockNudge() {
+  vi.doMock("../../../packages/sdk/src/nudge/error-nudge.js", () => ({
+    maybeShowMcpNudge: mockMaybeShowMcpNudge,
+  }));
+}
+
 describe("console-capture", () => {
   let originalError: typeof console.error;
   let originalWarn: typeof console.warn;
@@ -44,6 +52,7 @@ describe("console-capture", () => {
     vi.resetModules();
     originalError = console.error;
     originalWarn = console.warn;
+    mockMaybeShowMcpNudge.mockReset();
   });
 
   afterEach(() => {
@@ -52,6 +61,7 @@ describe("console-capture", () => {
     console.error = originalError;
     console.warn = originalWarn;
     vi.doUnmock("@opentelemetry/api");
+    vi.doUnmock("../../../packages/sdk/src/nudge/error-nudge.js");
   });
 
   describe("installConsoleCapture", () => {
@@ -108,6 +118,7 @@ describe("console-capture", () => {
 
     it("skips capture for messages starting with '[glasstrace]'", async () => {
       const { addEvent } = mockOtelWithActiveSpan();
+      mockNudge();
 
       // Spy on the original console.error to verify the message is still printed
       const originalSpy = vi.fn();
@@ -127,6 +138,7 @@ describe("console-capture", () => {
 
     it("records console.error as span event when span is active", async () => {
       const { addEvent } = mockOtelWithActiveSpan();
+      mockNudge();
 
       const mod = await import("../../../packages/sdk/src/console-capture.js");
       await mod.installConsoleCapture();
@@ -140,6 +152,7 @@ describe("console-capture", () => {
 
     it("records console.warn as span event when span is active", async () => {
       const { addEvent } = mockOtelWithActiveSpan();
+      mockNudge();
 
       const mod = await import("../../../packages/sdk/src/console-capture.js");
       await mod.installConsoleCapture();
@@ -153,6 +166,7 @@ describe("console-capture", () => {
 
     it("formats multiple arguments into a single message", async () => {
       const { addEvent } = mockOtelWithActiveSpan();
+      mockNudge();
 
       const mod = await import("../../../packages/sdk/src/console-capture.js");
       await mod.installConsoleCapture();
@@ -166,6 +180,7 @@ describe("console-capture", () => {
 
     it("does not record span event when no span is active", async () => {
       mockOtelWithNoActiveSpan();
+      mockNudge();
 
       const mod = await import("../../../packages/sdk/src/console-capture.js");
       await mod.installConsoleCapture();
@@ -176,12 +191,52 @@ describe("console-capture", () => {
 
     it("handles null and undefined arguments without crashing", async () => {
       const { addEvent } = mockOtelWithActiveSpan();
+      mockNudge();
 
       const mod = await import("../../../packages/sdk/src/console-capture.js");
       await mod.installConsoleCapture();
 
       expect(() => console.error(null, undefined)).not.toThrow();
       expect(addEvent).toHaveBeenCalled();
+      mod.uninstallConsoleCapture();
+    });
+  });
+
+  describe("MCP nudge integration", () => {
+    it("calls maybeShowMcpNudge when console.error is captured with an active span", async () => {
+      mockOtelWithActiveSpan();
+      mockNudge();
+
+      const mod = await import("../../../packages/sdk/src/console-capture.js");
+      await mod.installConsoleCapture();
+      console.error("connection refused");
+
+      expect(mockMaybeShowMcpNudge).toHaveBeenCalledOnce();
+      expect(mockMaybeShowMcpNudge).toHaveBeenCalledWith("connection refused");
+      mod.uninstallConsoleCapture();
+    });
+
+    it("does not call maybeShowMcpNudge when no span is active", async () => {
+      mockOtelWithNoActiveSpan();
+      mockNudge();
+
+      const mod = await import("../../../packages/sdk/src/console-capture.js");
+      await mod.installConsoleCapture();
+      console.error("orphan error");
+
+      expect(mockMaybeShowMcpNudge).not.toHaveBeenCalled();
+      mod.uninstallConsoleCapture();
+    });
+
+    it("does not call maybeShowMcpNudge for console.warn", async () => {
+      mockOtelWithActiveSpan();
+      mockNudge();
+
+      const mod = await import("../../../packages/sdk/src/console-capture.js");
+      await mod.installConsoleCapture();
+      console.warn("this is just a warning");
+
+      expect(mockMaybeShowMcpNudge).not.toHaveBeenCalled();
       mod.uninstallConsoleCapture();
     });
   });

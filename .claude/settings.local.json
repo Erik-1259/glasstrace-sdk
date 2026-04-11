@@ -44,7 +44,11 @@
       "WebFetch(domain:ankush.one)",
       "WebFetch(domain:vercel.com)",
       "Bash(xargs -I{} git push origin --delete {})",
-      "Bash(grep -l \"Affects.*[Ss][Dd][Kk]\\\\|Affects.*glasstrace-sdk\" /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/*.md)"
+      "Bash(grep -l \"Affects.*[Ss][Dd][Kk]\\\\|Affects.*glasstrace-sdk\" /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/*.md)",
+      "Bash(grep -n \"NEXT_CONFIG_NAMES\\\\|next.config\" /Users/erik/SoftwareDevelopment/glasstrace-sdk/packages/sdk/src/cli/*.ts)",
+      "Bash(grep -n \"\\\\[^\" /Users/erik/SoftwareDevelopment/glasstrace-sdk/packages/sdk/src/cli/*.ts)",
+      "Bash(wc:*)",
+      "Bash(grep:*)"
     ]
   }
 }
