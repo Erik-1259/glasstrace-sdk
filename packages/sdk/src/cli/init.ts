@@ -18,6 +18,15 @@ import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-det
 import type { DetectedAgent } from "../agent-detection/detect.js";
 import { MCP_ENDPOINT, formatAgentName } from "./constants.js";
 
+/**
+ * Returns true if the current Node.js major version meets the minimum requirement.
+ * Exported for testability — the CLI entry point uses this to gate execution.
+ */
+export function meetsNodeVersion(minMajor: number): boolean {
+  const [major] = process.versions.node.split(".").map(Number);
+  return major >= minMajor;
+}
+
 /** Options for the init command (parsed from CLI args or passed programmatically). */
 export interface InitOptions {
   projectRoot: string;
@@ -353,6 +362,16 @@ const isDirectExecution =
     scriptBasename === "glasstrace");
 
 if (isDirectExecution) {
+  // Enforce minimum Node.js version before any command processing.
+  // The engines field in package.json is advisory — npm does not enforce
+  // it by default, so this provides a clear error for users on older runtimes.
+  if (!meetsNodeVersion(20)) {
+    process.stderr.write(
+      `Error: @glasstrace/sdk requires Node.js >= 20. Current version: ${process.version}\n`,
+    );
+    process.exit(1);
+  }
+
   const subcommand = process.argv[2];
 
   if (subcommand === "mcp") {
