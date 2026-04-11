@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.7.3
+
+### Patch Changes
+
+- 937d941: Fix first-run MCP setup by generating the anonymous key during init instead of requiring a separate dev server start, and guard against empty next.config files producing misleading "already wrapped" messages
+
 ## 0.7.2
 
 ### Patch Changes
