@@ -1,8 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-
-/** Next.js config file names to check for in workspace packages. */
-const NEXT_CONFIG_NAMES = ["next.config.ts", "next.config.js", "next.config.mjs"] as const;
+import { NEXT_CONFIG_NAMES } from "./constants.js";
 
 /** Result of classifying the project root directory. */
 export interface ProjectClassification {

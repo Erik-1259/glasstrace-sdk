@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NEXT_CONFIG_NAMES } from "./constants.js";
 
 /**
  * Options for the uninit command.
@@ -19,9 +20,6 @@ export interface UninitResult {
   warnings: string[];
   errors: string[];
 }
-
-/** Next.js config file names, checked in priority order. */
-const NEXT_CONFIG_NAMES = ["next.config.ts", "next.config.js", "next.config.mjs"] as const;
 
 /**
  * MCP config files that init may create.
