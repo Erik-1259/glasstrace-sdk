@@ -1,5 +1,15 @@
 # @glasstrace/sdk
 
+## 0.10.0
+
+### Minor Changes
+
+- 65a3004: SDK now gracefully handles non-Node.js environments (Edge Runtime, Cloudflare Workers) by disabling instrumentation with a clear warning instead of crashing on missing built-in module imports.
+
+### Patch Changes
+
+- a2a8f3e: Uninit now correctly handles next.config expressions containing parentheses or braces inside string literals and comments. Windsurf global config modifications now show the full file path in output.
+
 ## 0.9.1
 
 ### Patch Changes
