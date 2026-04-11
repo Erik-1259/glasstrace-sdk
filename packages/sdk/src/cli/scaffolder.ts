@@ -13,6 +13,12 @@ export function identityFingerprint(token: string): string {
   return `sha256:${createHash("sha256").update(token).digest("hex")}`;
 }
 
+/** Result of attempting to wrap next.config with withGlasstraceConfig. */
+export interface ScaffoldNextConfigResult {
+  modified: boolean;
+  reason?: "already-wrapped" | "empty-file" | "no-export";
+}
+
 /** Next.js config file names in priority order */
 const NEXT_CONFIG_NAMES = ["next.config.ts", "next.config.js", "next.config.mjs"] as const;
 
@@ -58,11 +64,12 @@ export async function register() {
  * `require("@glasstrace/sdk")` resolves to the CJS entrypoint natively.
  *
  * @param projectRoot - Absolute path to the project root directory.
- * @returns True if the config file was modified (or created), false if skipped.
+ * @returns A result object describing what happened, or `null` if no config
+ *   file was found at all.
  */
 export async function scaffoldNextConfig(
   projectRoot: string,
-): Promise<boolean> {
+): Promise<ScaffoldNextConfigResult | null> {
   let configPath: string | undefined;
   let configName: string | undefined;
 
@@ -76,14 +83,19 @@ export async function scaffoldNextConfig(
   }
 
   if (configPath === undefined || configName === undefined) {
-    return false;
+    return null;
   }
 
   const existing = fs.readFileSync(configPath, "utf-8");
 
+  // Guard: empty or whitespace-only files have no export to wrap
+  if (existing.trim().length === 0) {
+    return { modified: false, reason: "empty-file" };
+  }
+
   // Already wrapped — skip even in force mode to avoid double-wrapping
   if (existing.includes("withGlasstraceConfig")) {
-    return false;
+    return { modified: false, reason: "already-wrapped" };
   }
 
   const isESM = configName.endsWith(".ts") || configName.endsWith(".mjs");
@@ -93,11 +105,11 @@ export async function scaffoldNextConfig(
     const importLine = 'import { withGlasstraceConfig } from "@glasstrace/sdk";\n';
     const wrapResult = wrapExport(existing);
     if (!wrapResult.wrapped) {
-      return false;
+      return { modified: false, reason: "no-export" };
     }
     const modified = importLine + "\n" + wrapResult.content;
     fs.writeFileSync(configPath, modified, "utf-8");
-    return true;
+    return { modified: true };
   }
 
   // CJS (.js): require() the SDK (resolves to the CJS dist build) and
@@ -105,11 +117,11 @@ export async function scaffoldNextConfig(
   const requireLine = 'const { withGlasstraceConfig } = require("@glasstrace/sdk");\n';
   const wrapResult = wrapCJSExport(existing);
   if (!wrapResult.wrapped) {
-    return false;
+    return { modified: false, reason: "no-export" };
   }
   const modified = requireLine + "\n" + wrapResult.content;
   fs.writeFileSync(configPath, modified, "utf-8");
-  return true;
+  return { modified: true };
 }
 
 /** @internal Exported for unit testing only. */

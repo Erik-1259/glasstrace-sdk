@@ -69,7 +69,7 @@ describe("scaffoldNextConfig", () => {
       "const nextConfig = {};\nmodule.exports = nextConfig;\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     // CJS .js is wrapped in-place (no rename to .mjs)
     const content = fs.readFileSync(path.join(tmpDir, "next.config.js"), "utf-8");
     expect(content).toContain("withGlasstraceConfig");
@@ -115,7 +115,7 @@ module.exports = withBundleAnalyzer(nextConfig);
       "const nextConfig = {};\nexport default nextConfig;\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
     expect(content).toContain("withGlasstraceConfig");
   });
@@ -151,14 +151,14 @@ module.exports = withBundleAnalyzer(nextConfig);
       "const nextConfig = {};\nexport default nextConfig;\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.mjs"), "utf-8");
     expect(content).toContain("withGlasstraceConfig");
   });
 
-  it("error case: returns false when no next.config.* found", async () => {
+  it("returns null when no next.config.* found", async () => {
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toBeNull();
   });
 
   it("does not duplicate wrapper if already present", async () => {
@@ -167,7 +167,7 @@ module.exports = withBundleAnalyzer(nextConfig);
       'const { withGlasstraceConfig } = require("@glasstrace/sdk");\nmodule.exports = withGlasstraceConfig({});\n',
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "already-wrapped" });
   });
 
   it("handles ESM export without trailing semicolon", async () => {
@@ -176,7 +176,7 @@ module.exports = withBundleAnalyzer(nextConfig);
       "const nextConfig = {};\nexport default nextConfig\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
     expect(content).toContain("withGlasstraceConfig(nextConfig)");
     // Must not produce broken syntax like withGlasstraceConfig(nextConfig;)
@@ -189,7 +189,7 @@ module.exports = withBundleAnalyzer(nextConfig);
       "const nextConfig = {};\nmodule.exports = nextConfig\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.js"), "utf-8");
     expect(content).toContain("module.exports = withGlasstraceConfig(nextConfig)");
     expect(content).not.toContain("nextConfig;)");
@@ -209,7 +209,7 @@ export default nextConfig;
 `;
     fs.writeFileSync(path.join(tmpDir, "next.config.ts"), original);
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
     expect(content).toContain("export default withGlasstraceConfig(nextConfig);");
     // Original config declarations should be preserved
@@ -226,7 +226,7 @@ module.exports = nextConfig;
 `;
     fs.writeFileSync(path.join(tmpDir, "next.config.js"), original);
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.js"), "utf-8");
     expect(content).toContain("module.exports = withGlasstraceConfig(nextConfig)");
     expect(content).toContain("reactStrictMode: true");
@@ -243,7 +243,7 @@ module.exports = nextConfig;
 `;
     fs.writeFileSync(path.join(tmpDir, "next.config.mjs"), original);
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.mjs"), "utf-8");
     expect(content).toContain("withGlasstraceConfig({");
     expect(content).toContain("reactStrictMode: true");
@@ -257,7 +257,7 @@ module.exports = nextConfig;
 `;
     fs.writeFileSync(path.join(tmpDir, "next.config.js"), original);
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.js"), "utf-8");
     expect(content).toContain("module.exports = withGlasstraceConfig({");
     expect(content).toContain("reactStrictMode: true");
@@ -270,54 +270,54 @@ module.exports = nextConfig;
       'const { withGlasstraceConfig } = require("@glasstrace/sdk");\nmodule.exports = withGlasstraceConfig({});\n',
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "already-wrapped" });
   });
 
-  it("CJS: returns false when module.exports has no equals sign", async () => {
+  it("CJS: returns no-export reason when module.exports has no equals sign", async () => {
     fs.writeFileSync(
       path.join(tmpDir, "next.config.js"),
       "module.exports\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "no-export" });
     // File should not be modified
     expect(fs.existsSync(path.join(tmpDir, "next.config.js"))).toBe(true);
   });
 
-  it("CJS: returns false when expression after module.exports = is empty", async () => {
+  it("CJS: returns no-export reason when expression after module.exports = is empty", async () => {
     fs.writeFileSync(
       path.join(tmpDir, "next.config.js"),
       "module.exports = ;\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "no-export" });
   });
 
-  it("ESM: returns false when export default has no expression", async () => {
+  it("ESM: returns no-export reason when export default has no expression", async () => {
     fs.writeFileSync(
       path.join(tmpDir, "next.config.ts"),
       "export default\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "no-export" });
   });
 
-  it("ESM: returns false when no export default found", async () => {
+  it("ESM: returns no-export reason when no export default found", async () => {
     fs.writeFileSync(
       path.join(tmpDir, "next.config.ts"),
       "const config = {};\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "no-export" });
   });
 
-  it("CJS: returns false when no module.exports found", async () => {
+  it("CJS: returns no-export reason when no module.exports found", async () => {
     fs.writeFileSync(
       path.join(tmpDir, "next.config.js"),
       "const config = {};\n",
     );
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "no-export" });
   });
 
   it("handles ESM export with trailing whitespace", async () => {
@@ -325,9 +325,15 @@ module.exports = nextConfig;
     const original = "const nextConfig = {};\nexport default nextConfig  ;  \n";
     fs.writeFileSync(path.join(tmpDir, "next.config.ts"), original);
     const result = await scaffoldNextConfig(tmpDir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
     const content = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
     expect(content).toContain("withGlasstraceConfig");
+  });
+
+  it("returns empty-file reason for empty config file", async () => {
+    fs.writeFileSync(path.join(tmpDir, "next.config.ts"), "");
+    const result = await scaffoldNextConfig(tmpDir);
+    expect(result).toEqual({ modified: false, reason: "empty-file" });
   });
 });
 
@@ -665,7 +671,7 @@ describe("runInit — MCP auto-configuration", () => {
     }
   });
 
-  it("skips MCP config when anon key does not exist", async () => {
+  it("creates anon key and configures MCP on first run (no pre-existing key)", async () => {
     const result = await runInit({
       projectRoot: tmpDir,
       yes: true,
@@ -673,12 +679,12 @@ describe("runInit — MCP auto-configuration", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    // Should have a warning about missing key
-    expect(result.warnings.some((w: string) => w.includes("anonymous key"))).toBe(true);
-    // No MCP config files should exist
-    expect(fs.existsSync(path.join(tmpDir, ".mcp.json"))).toBe(false);
-    // Marker should not exist
-    expect(fs.existsSync(path.join(tmpDir, ".glasstrace", "mcp-connected"))).toBe(false);
+    // No warning about missing key — getOrCreateAnonKey generates one
+    expect(result.warnings.some((w: string) => w.includes("anonymous key"))).toBe(false);
+    // Anon key file should now exist
+    expect(fs.existsSync(path.join(tmpDir, ".glasstrace", "anon_key"))).toBe(true);
+    // Marker should exist (MCP was configured)
+    expect(fs.existsSync(path.join(tmpDir, ".glasstrace", "mcp-connected"))).toBe(true);
   });
 
   it("creates only generic config in CI mode", async () => {

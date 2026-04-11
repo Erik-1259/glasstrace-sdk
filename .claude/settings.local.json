@@ -43,7 +43,8 @@
       "WebFetch(domain:nickradford.dev)",
       "WebFetch(domain:ankush.one)",
       "WebFetch(domain:vercel.com)",
-      "Bash(xargs -I{} git push origin --delete {})"
+      "Bash(xargs -I{} git push origin --delete {})",
+      "Bash(grep -l \"Affects.*[Ss][Dd][Kk]\\\\|Affects.*glasstrace-sdk\" /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/*.md)"
     ]
   }
 }

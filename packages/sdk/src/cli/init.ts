@@ -11,7 +11,7 @@ import {
   addCoverageMapEnv,
 } from "./scaffolder.js";
 import { buildImportGraph } from "../import-graph.js";
-import { readAnonKey } from "../anon-key.js";
+import { getOrCreateAnonKey } from "../anon-key.js";
 import { detectAgents } from "../agent-detection/detect.js";
 import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
 import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
@@ -107,19 +107,17 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
 
   // Step 4: Detect and wrap next.config.*
   try {
-    const wrapped = await scaffoldNextConfig(projectRoot);
-    if (wrapped) {
+    const configResult = await scaffoldNextConfig(projectRoot);
+    if (configResult?.modified) {
       summary.push("Wrapped next.config with withGlasstraceConfig()");
+    } else if (configResult === null) {
+      warnings.push("No next.config.* found. You may need to create one for Next.js projects.");
+    } else if (configResult.reason === "already-wrapped") {
+      summary.push("Skipped next.config (already contains withGlasstraceConfig)");
+    } else if (configResult.reason === "empty-file") {
+      warnings.push("next.config is empty — add a Next.js configuration export to enable wrapping");
     } else {
-      // Check if it was skipped because file already wrapped vs not found
-      const hasNextConfig = ["next.config.ts", "next.config.js", "next.config.mjs"].some(
-        (name) => fs.existsSync(path.join(projectRoot, name)),
-      );
-      if (hasNextConfig) {
-        summary.push("Skipped next.config (already contains withGlasstraceConfig)");
-      } else {
-        warnings.push("No next.config.* found. You may need to create one for Next.js projects.");
-      }
+      warnings.push("next.config has no recognizable export pattern — add withGlasstraceConfig() manually");
     }
   } catch (err) {
     errors.push(`Failed to modify next.config: ${err instanceof Error ? err.message : String(err)}`);
@@ -167,13 +165,34 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     process.env["GITHUB_ACTIONS"] === "true";
 
   try {
-    const anonKey = await readAnonKey(projectRoot);
+    const anonKey = await getOrCreateAnonKey(projectRoot);
+    let anyConfigWritten = false;
 
-    if (anonKey !== null) {
-      let anyConfigWritten = false;
-
-      if (isCI) {
-        // Non-interactive: write only the generic .glasstrace/mcp.json
+    if (isCI) {
+      // Non-interactive: write only the generic .glasstrace/mcp.json
+      const genericAgent: DetectedAgent = {
+        name: "generic",
+        mcpConfigPath: path.join(projectRoot, ".glasstrace", "mcp.json"),
+        infoFilePath: null,
+        cliAvailable: false,
+        registrationCommand: null,
+      };
+      const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, anonKey);
+      await writeMcpConfig(genericAgent, genericConfig, projectRoot);
+      if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
+        anyConfigWritten = true;
+        summary.push("Created .glasstrace/mcp.json (CI mode)");
+      }
+    } else {
+      // Interactive: detect agents and configure each
+      let agents: DetectedAgent[];
+      try {
+        agents = await detectAgents(projectRoot);
+      } catch (detectErr) {
+        warnings.push(
+          `Agent detection failed: ${detectErr instanceof Error ? detectErr.message : String(detectErr)}. Writing generic config only.`,
+        );
+        // Fall back to generic-only config
         const genericAgent: DetectedAgent = {
           name: "generic",
           mcpConfigPath: path.join(projectRoot, ".glasstrace", "mcp.json"),
@@ -185,88 +204,62 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
         await writeMcpConfig(genericAgent, genericConfig, projectRoot);
         if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
           anyConfigWritten = true;
-          summary.push("Created .glasstrace/mcp.json (CI mode)");
         }
-      } else {
-        // Interactive: detect agents and configure each
-        let agents: DetectedAgent[];
+        agents = [];
+      }
+
+      const configuredNames: string[] = [];
+
+      for (const agent of agents) {
         try {
-          agents = await detectAgents(projectRoot);
-        } catch (detectErr) {
+          const configContent = generateMcpConfig(agent, MCP_ENDPOINT, anonKey);
+          await writeMcpConfig(agent, configContent, projectRoot);
+
+          // Verify the config file was actually written (writeMcpConfig
+          // swallows permission errors and returns void)
+          const configExists = agent.mcpConfigPath !== null && fs.existsSync(agent.mcpConfigPath);
+          if (!configExists) {
+            continue;
+          }
+
+          anyConfigWritten = true;
+
+          const infoContent = generateInfoSection(agent, MCP_ENDPOINT);
+          if (infoContent !== "") {
+            await injectInfoSection(agent, infoContent, projectRoot);
+          }
+
+          if (agent.name !== "generic") {
+            configuredNames.push(formatAgentName(agent.name));
+          }
+        } catch (agentErr) {
           warnings.push(
-            `Agent detection failed: ${detectErr instanceof Error ? detectErr.message : String(detectErr)}. Writing generic config only.`,
+            `Failed to configure MCP for ${agent.name}: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`,
           );
-          // Fall back to generic-only config
-          const genericAgent: DetectedAgent = {
-            name: "generic",
-            mcpConfigPath: path.join(projectRoot, ".glasstrace", "mcp.json"),
-            infoFilePath: null,
-            cliAvailable: false,
-            registrationCommand: null,
-          };
-          const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, anonKey);
-          await writeMcpConfig(genericAgent, genericConfig, projectRoot);
-          if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
-            anyConfigWritten = true;
-          }
-          agents = [];
-        }
-
-        const configuredNames: string[] = [];
-
-        for (const agent of agents) {
-          try {
-            const configContent = generateMcpConfig(agent, MCP_ENDPOINT, anonKey);
-            await writeMcpConfig(agent, configContent, projectRoot);
-
-            // Verify the config file was actually written (writeMcpConfig
-            // swallows permission errors and returns void)
-            const configExists = agent.mcpConfigPath !== null && fs.existsSync(agent.mcpConfigPath);
-            if (!configExists) {
-              continue;
-            }
-
-            anyConfigWritten = true;
-
-            const infoContent = generateInfoSection(agent, MCP_ENDPOINT);
-            if (infoContent !== "") {
-              await injectInfoSection(agent, infoContent, projectRoot);
-            }
-
-            if (agent.name !== "generic") {
-              configuredNames.push(formatAgentName(agent.name));
-            }
-          } catch (agentErr) {
-            warnings.push(
-              `Failed to configure MCP for ${agent.name}: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`,
-            );
-          }
-        }
-
-        if (configuredNames.length > 0) {
-          summary.push(`Configured MCP for: ${configuredNames.join(", ")}`);
-        } else if (anyConfigWritten) {
-          summary.push("Created .glasstrace/mcp.json (generic config)");
         }
       }
 
-      // Add MCP config files to .gitignore
-      await updateGitignore(
-        [".mcp.json", ".cursor/mcp.json", ".gemini/settings.json", ".codex/config.toml"],
-        projectRoot,
-      );
-
-      // Create marker file only if at least one config was successfully written.
-      // Without this gate, a failed MCP setup would suppress future nudges,
-      // leaving users stuck without MCP configuration.
-      if (anyConfigWritten) {
-        const markerCreated = await scaffoldMcpMarker(projectRoot, anonKey);
-        if (markerCreated) {
-          summary.push("Created .glasstrace/mcp-connected marker");
-        }
+      if (configuredNames.length > 0) {
+        summary.push(`Configured MCP for: ${configuredNames.join(", ")}`);
+      } else if (anyConfigWritten) {
+        summary.push("Created .glasstrace/mcp.json (generic config)");
       }
-    } else {
-      warnings.push("No anonymous key found. Skipping MCP auto-configuration. Run init again after the SDK has generated a key.");
+    }
+
+    // Add MCP config files to .gitignore
+    await updateGitignore(
+      [".mcp.json", ".cursor/mcp.json", ".gemini/settings.json", ".codex/config.toml"],
+      projectRoot,
+    );
+
+    // Create marker file only if at least one config was successfully written.
+    // Without this gate, a failed MCP setup would suppress future nudges,
+    // leaving users stuck without MCP configuration.
+    if (anyConfigWritten) {
+      const markerCreated = await scaffoldMcpMarker(projectRoot, anonKey);
+      if (markerCreated) {
+        summary.push("Created .glasstrace/mcp-connected marker");
+      }
     }
   } catch (mcpErr) {
     warnings.push(

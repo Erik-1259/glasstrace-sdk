@@ -179,7 +179,7 @@ describe("scaffoldNextConfig", () => {
     );
 
     const result = await scaffoldNextConfig(dir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
 
     // The .ts file should be the one that was modified
     const tsContent = fs.readFileSync(path.join(dir, "next.config.ts"), "utf-8");
@@ -200,7 +200,7 @@ describe("scaffoldNextConfig", () => {
     );
 
     const result = await scaffoldNextConfig(dir);
-    expect(result).toBe(true);
+    expect(result).toEqual({ modified: true });
 
     const content = fs.readFileSync(path.join(dir, "next.config.js"), "utf-8");
     expect(content).toContain('require("@glasstrace/sdk")');
@@ -218,16 +218,36 @@ describe("scaffoldNextConfig", () => {
     fs.writeFileSync(path.join(dir, "next.config.ts"), alreadyWrapped);
 
     const result = await scaffoldNextConfig(dir);
-    expect(result).toBe(false);
+    expect(result).toEqual({ modified: false, reason: "already-wrapped" });
 
     // File should not have been modified
     const content = fs.readFileSync(path.join(dir, "next.config.ts"), "utf-8");
     expect(content).toBe(alreadyWrapped);
   });
 
-  it("returns false when no next.config file exists", async () => {
+  it("returns null when no next.config file exists", async () => {
     const dir = createTmpDir();
     const result = await scaffoldNextConfig(dir);
-    expect(result).toBe(false);
+    expect(result).toBeNull();
+  });
+
+  it("returns empty-file reason for an empty config file without throwing", async () => {
+    const dir = createTmpDir();
+    fs.writeFileSync(path.join(dir, "next.config.ts"), "");
+
+    const result = await scaffoldNextConfig(dir);
+    expect(result).toEqual({ modified: false, reason: "empty-file" });
+
+    // File should remain empty (not modified)
+    const content = fs.readFileSync(path.join(dir, "next.config.ts"), "utf-8");
+    expect(content).toBe("");
+  });
+
+  it("returns empty-file reason for a whitespace-only config file", async () => {
+    const dir = createTmpDir();
+    fs.writeFileSync(path.join(dir, "next.config.js"), "  \n\n  ");
+
+    const result = await scaffoldNextConfig(dir);
+    expect(result).toEqual({ modified: false, reason: "empty-file" });
   });
 });
