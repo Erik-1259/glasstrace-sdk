@@ -420,6 +420,25 @@ export function register() {
     expect(result.content).toContain("registerGlasstrace()");
   });
 
+  it("produces properly spaced import braces when extending an existing import", () => {
+    const input = `import { withGlasstraceConfig } from "@glasstrace/sdk";
+
+export function register() {
+  console.log("hello");
+}
+`;
+    const result = injectRegisterGlasstrace(input);
+    expect(result.injected).toBe(true);
+    const importLines = result.content.split("\n").filter((l) => l.includes("@glasstrace/sdk"));
+    expect(importLines).toHaveLength(1);
+    // Must have spaces after { and before }
+    expect(importLines[0]).toMatch(/^import \{ .+ \} from/);
+    // Must not have {foo (no space after brace)
+    expect(importLines[0]).not.toMatch(/\{[^ ]/);
+    // Must not have foo} (no space before brace)
+    expect(importLines[0]).not.toMatch(/[^ ]\}/);
+  });
+
   it("handles register() with parameters", () => {
     const input = `export function register(options: unknown) {
   console.log(options);

@@ -113,8 +113,33 @@ MCP for any detected AI coding agents (Claude Code, Cursor, Codex,
 Gemini, Windsurf). Agent detection scans for marker files and writes
 native MCP configuration so agents can query traces immediately.
 
+If an `instrumentation.ts` file already exists with an `export function
+register()`, init injects `registerGlasstrace()` as the first statement
+rather than overwriting the file.
+
+**Monorepo support:** When run from a monorepo root (pnpm workspaces,
+npm workspaces, Turborepo, or Lerna), init auto-detects workspace
+packages and resolves the target Next.js app directory automatically.
+If multiple Next.js apps are found, run init from the specific app
+directory instead.
+
 In CI environments (`CI=true`), only a generic
 `.glasstrace/mcp.json` is written.
+
+### Removing Glasstrace
+
+```bash
+npx glasstrace uninit
+```
+
+Reverses every step of `glasstrace init`: unwraps `withGlasstraceConfig`
+from `next.config`, removes `registerGlasstrace()` from
+`instrumentation.ts` (or deletes the file if it was created by init),
+cleans up `.env.local` entries, `.gitignore` entries, MCP configs, and
+agent info sections.
+
+Flags:
+- `--dry-run` -- Preview what would be removed without making changes
 
 ### MCP Registration
 

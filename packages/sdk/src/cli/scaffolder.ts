@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { NEXT_CONFIG_NAMES } from "./constants.js";
 
 /**
  * Computes a stable identity fingerprint for deduplication purposes.
@@ -49,9 +50,6 @@ export interface ScaffoldNextConfigResult {
   modified: boolean;
   reason?: "already-wrapped" | "empty-file" | "no-export";
 }
-
-/** Next.js config file names in priority order */
-const NEXT_CONFIG_NAMES = ["next.config.ts", "next.config.js", "next.config.mjs"] as const;
 
 /**
  * Injects `registerGlasstrace()` into an existing instrumentation.ts file.
@@ -122,7 +120,7 @@ export function injectRegisterGlasstrace(content: string): InjectResult {
         // Add registerGlasstrace to existing import specifiers
         const existingImports = specifiers.trimEnd();
         const separator = existingImports.endsWith(",") ? " " : ", ";
-        const updatedImport = `import {${existingImports}${separator}registerGlasstrace} from "@glasstrace/sdk"`;
+        const updatedImport = `import { ${existingImports.trim()}${separator}registerGlasstrace } from "@glasstrace/sdk"`;
         modified = content.replace(importMatch[0], updatedImport);
         // Re-find the function in the shifted content and inject the call
         const newMatch = registerFnRegex.exec(modified);

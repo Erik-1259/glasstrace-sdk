@@ -44,10 +44,14 @@ export function generateMcpConfig(
       );
 
     case "codex": {
-      // Escape TOML special characters in the endpoint value
+      // Escape TOML basic string special characters in the endpoint value.
+      // TOML requires backslashes, quotes, and control characters to be escaped.
       const safeEndpoint = endpoint
         .replace(/\\/g, "\\\\")
-        .replace(/"/g, '\\"');
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, "\\n")
+        .replace(/\r/g, "\\r")
+        .replace(/\t/g, "\\t");
       return [
         "[mcp_servers.glasstrace]",
         `url = "${safeEndpoint}"`,
@@ -119,6 +123,11 @@ export function generateMcpConfig(
         null,
         2,
       );
+
+    default: {
+      const _exhaustive: never = agent.name;
+      throw new Error(`Unknown agent: ${_exhaustive}`);
+    }
   }
 }
 
@@ -202,5 +211,10 @@ export function generateInfoSection(
     case "windsurf":
     case "generic":
       return "";
+
+    default: {
+      const _exhaustive: never = agent.name;
+      throw new Error(`Unknown agent: ${_exhaustive}`);
+    }
   }
 }

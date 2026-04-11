@@ -109,6 +109,30 @@ describe("generateMcpConfig", () => {
       );
       expect(config).not.toContain(ANON_KEY);
     });
+
+    it("escapes control characters in the endpoint for valid TOML", () => {
+      const malformedEndpoint = "https://example.com/path\nHost: evil.com";
+      const config = generateMcpConfig(
+        makeAgent("codex"),
+        malformedEndpoint,
+        ANON_KEY,
+      );
+      // The raw newline must be escaped, not embedded literally
+      expect(config).not.toContain("\nHost:");
+      expect(config).toContain("\\n");
+      // Verify backslash and tab escaping as well
+      const withTab = "https://example.com/\tpath";
+      const tabConfig = generateMcpConfig(makeAgent("codex"), withTab, ANON_KEY);
+      expect(tabConfig).not.toContain("\t");
+      expect(tabConfig).toContain("\\t");
+    });
+
+    it("escapes carriage returns in the endpoint", () => {
+      const withCR = "https://example.com/\r\npath";
+      const config = generateMcpConfig(makeAgent("codex"), withCR, ANON_KEY);
+      expect(config).not.toContain("\r");
+      expect(config).toContain("\\r");
+    });
   });
 
   describe("Gemini CLI config", () => {
@@ -183,6 +207,17 @@ describe("generateMcpConfig", () => {
       expect(parsed.mcpServers.glasstrace.headers.Authorization).toBe(
         `Bearer ${ANON_KEY}`,
       );
+    });
+  });
+
+  describe("exhaustive switch", () => {
+    it("throws for an unknown agent name", () => {
+      const unknownAgent = makeAgent("claude");
+      // Force an invalid name to test the default branch at runtime
+      (unknownAgent as { name: string }).name = "unknown-agent";
+      expect(() =>
+        generateMcpConfig(unknownAgent as DetectedAgent, ENDPOINT, ANON_KEY),
+      ).toThrow(/Unknown agent/);
     });
   });
 
@@ -287,6 +322,16 @@ describe("generateInfoSection", () => {
       const info = generateInfoSection(makeAgent("cursor"), ENDPOINT);
       expect(info).not.toContain("Bearer");
       expect(info).not.toContain("Authorization");
+    });
+  });
+
+  describe("exhaustive switch", () => {
+    it("throws for an unknown agent name", () => {
+      const unknownAgent = makeAgent("claude");
+      (unknownAgent as { name: string }).name = "unknown-agent";
+      expect(() =>
+        generateInfoSection(unknownAgent as DetectedAgent, ENDPOINT),
+      ).toThrow(/Unknown agent/);
     });
   });
 
