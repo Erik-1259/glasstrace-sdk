@@ -45,6 +45,24 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       return;
     }
 
+    // Guard: SDK requires Node.js runtime. Some environments (e.g. Bun,
+    // Deno with partial Node compat) resolve node: imports but lack full
+    // Node.js APIs. This guard prevents cryptic failures deeper in the
+    // SDK by detecting these environments early and returning a no-op.
+    //
+    // Note: environments that cannot resolve node: imports at all (pure
+    // Edge Runtime, Cloudflare Workers) will fail at module evaluation
+    // before this guard runs. Those cases are mitigated by the package's
+    // `sideEffects: false` flag and bundler externalization of node: modules.
+    if (typeof process === "undefined" || typeof process.versions?.node !== "string") {
+      console.warn(
+        "[glasstrace] SDK requires a Node.js runtime. " +
+        "Edge Runtime, browser, and Deno without Node compat are not supported. " +
+        "Glasstrace is disabled in this environment.",
+      );
+      return;
+    }
+
     // Resolve config
     const config = resolveConfig(options);
     if (config.verbose) {

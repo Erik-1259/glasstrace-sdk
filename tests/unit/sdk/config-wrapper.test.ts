@@ -165,6 +165,51 @@ describe("withGlasstraceConfig", () => {
     expect(() => withGlasstraceConfig(undefined as unknown as Record<string, unknown>)).not.toThrow();
   });
 
+  it("returns config unchanged in non-Node.js environments", () => {
+    const originalVersions = process.versions;
+
+    // Simulate non-Node environment
+    Object.defineProperty(process, "versions", {
+      value: { ...originalVersions, node: undefined },
+      configurable: true,
+    });
+
+    try {
+      const input = { reactStrictMode: true, images: { domains: ["example.com"] } };
+      const result = withGlasstraceConfig(input);
+
+      // Config should be returned as-is (shallow copy), without webpack modifications
+      expect(result.reactStrictMode).toBe(true);
+      expect(result.images).toEqual({ domains: ["example.com"] });
+      expect(result.webpack).toBeUndefined();
+      expect(result.experimental).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, "versions", {
+        value: originalVersions,
+        configurable: true,
+      });
+    }
+  });
+
+  it("returns empty object for null input in non-Node.js environments", () => {
+    const originalVersions = process.versions;
+
+    Object.defineProperty(process, "versions", {
+      value: { ...originalVersions, node: undefined },
+      configurable: true,
+    });
+
+    try {
+      const result = withGlasstraceConfig(null as unknown as Record<string, unknown>);
+      expect(result).toEqual({});
+    } finally {
+      Object.defineProperty(process, "versions", {
+        value: originalVersions,
+        configurable: true,
+      });
+    }
+  });
+
   it("error case: malformed config preserves original", () => {
     const original = { reactStrictMode: true };
     const result = withGlasstraceConfig(original);

@@ -1,5 +1,3 @@
-import { collectSourceMaps, computeBuildHash, uploadSourceMaps } from "./source-map-uploader.js";
-
 type NextConfig = Record<string, unknown>;
 type WebpackConfigFn = (config: Record<string, unknown>, context: Record<string, unknown>) => Record<string, unknown>;
 
@@ -30,6 +28,12 @@ interface WebpackCompiler {
  * @returns A new config object with source map generation and upload enabled.
  */
 export function withGlasstraceConfig(nextConfig: NextConfig): NextConfig {
+  // Guard: config wrapper requires Node.js for source map instrumentation.
+  // In non-Node environments (Edge Runtime, browser), return config unchanged.
+  if (typeof process === "undefined" || typeof process.versions?.node !== "string") {
+    return nextConfig != null ? { ...nextConfig } : {};
+  }
+
   // Handle null/undefined gracefully
   const config: NextConfig = nextConfig != null ? { ...nextConfig } : {};
 
@@ -109,6 +113,12 @@ export async function handleSourceMapUpload(distDir: string): Promise<void> {
       );
       return;
     }
+
+    // Dynamic import: source-map-uploader uses node:fs, node:path, node:crypto,
+    // and node:child_process. Deferring the import avoids a module-evaluation
+    // crash when config-wrapper.ts is loaded in a non-Node bundler context.
+    const { collectSourceMaps, computeBuildHash, uploadSourceMaps } =
+      await import("./source-map-uploader.js");
 
     const maps = await collectSourceMaps(distDir);
 
