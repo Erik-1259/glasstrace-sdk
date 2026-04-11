@@ -3,6 +3,7 @@
   "version": "0.9.0",
   "description": "Glasstrace server-side debugging SDK for AI coding agents",
   "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
