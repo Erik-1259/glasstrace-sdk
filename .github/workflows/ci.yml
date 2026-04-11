@@ -48,6 +48,53 @@ jobs:
           npm pack --dry-run --workspace=packages/protocol
           npm pack --dry-run --workspace=packages/sdk
 
+  browser-import:
+    name: Browser import check
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: corepack enable
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Verify SDK resolves for browser bundlers
+        run: |
+          cd /tmp
+          mkdir browser-import-test && cd browser-import-test
+          npm init -y
+          npm install ${{ github.workspace }}/packages/sdk
+          # Write a test entry file that imports the SDK's main entry points
+          cat > entry.mjs <<'ENTRY'
+          import { registerGlasstrace, withGlasstraceConfig, captureError } from "@glasstrace/sdk";
+          console.log(typeof registerGlasstrace, typeof withGlasstraceConfig, typeof captureError);
+          ENTRY
+          # Bundle for browser to verify the SDK's module graph resolves.
+          # Node.js built-ins are externalized because the SDK is a server-
+          # side package — the goal is verifying the module graph resolves,
+          # not eliminating all Node.js references.
+          # Both prefixed (node:fs) and unprefixed (fs) forms are needed
+          # because tsup strips the node: prefix during bundling.
+          npx esbuild --bundle --platform=browser --outfile=out.js \
+            --external:@opentelemetry/* \
+            --external:'node:*' \
+            --external:fs --external:fs/promises --external:path \
+            --external:crypto --external:child_process \
+            --external:util --external:zlib --external:stream \
+            --external:os --external:http --external:https \
+            --external:net --external:tls --external:events \
+            --external:buffer --external:url --external:querystring \
+            entry.mjs
+          echo "Browser import check passed"
+
   compat:
     name: Compatibility (min peer deps)
     runs-on: ubuntu-latest

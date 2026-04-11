@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { resolveConfig, isProductionDisabled } from "../env-detection.js";
 
 /**
@@ -14,6 +12,26 @@ let hasFired = false;
 function sanitize(input: string): string {
   // eslint-disable-next-line no-control-regex
   return input.replace(/[\x00-\x1f\x7f]/g, "");
+}
+
+/**
+ * Checks whether the MCP marker file exists using synchronous filesystem
+ * APIs. Returns `false` when `node:fs` or `node:path` cannot be resolved
+ * (non-Node environments) or on any I/O error.
+ */
+function markerFileExists(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("node:fs") as typeof import("node:fs");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require("node:path") as typeof import("node:path");
+    const markerPath = path.join(process.cwd(), ".glasstrace", "mcp-connected");
+    return fs.existsSync(markerPath);
+  } catch {
+    // node:fs/node:path unavailable, permission denied, ENOENT from
+    // cwd(), or other error — treat as not connected
+    return false;
+  }
 }
 
 /**
@@ -42,17 +60,7 @@ export function maybeShowMcpNudge(errorSummary: string): void {
   }
 
   // Check for MCP connection marker file.
-  // Guard process.cwd() — it throws ENOENT if the working directory has been removed.
-  let markerExists = false;
-  try {
-    const markerPath = join(process.cwd(), ".glasstrace", "mcp-connected");
-    markerExists = existsSync(markerPath);
-  } catch {
-    // Permission denied, ENOENT from cwd(), or other filesystem error — treat as not connected
-    markerExists = false;
-  }
-
-  if (markerExists) {
+  if (markerFileExists()) {
     hasFired = true;
     return;
   }
