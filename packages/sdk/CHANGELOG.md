@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.11.0
+
+### Patch Changes
+
+- 3e0e551: Discovery endpoint now includes `claimed: true` when the anonymous key has been linked to an account.
+
 ## 0.10.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # @glasstrace/protocol
 
+## 0.11.0
+
+### Minor Changes
+
+- 3e0e551: Added `claimed` and `accountHint` optional fields to `DiscoveryResponseSchema` for account claim signaling.
+
 ## 0.5.0
 
 ### Minor Changes
