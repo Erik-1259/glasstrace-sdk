@@ -617,4 +617,61 @@ describe("registerGlasstrace() Orchestrator", () => {
       expect(notifySpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
   });
+
+  describe("Non-Node.js environment guard", () => {
+    it("should warn and return early when process.versions.node is undefined", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const originalVersions = process.versions;
+
+      // Simulate non-Node environment by removing node version
+      Object.defineProperty(process, "versions", {
+        value: { ...originalVersions, node: undefined },
+        configurable: true,
+      });
+
+      try {
+        registerGlasstrace();
+
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("SDK requires a Node.js runtime"),
+        );
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("Glasstrace is disabled in this environment"),
+        );
+      } finally {
+        Object.defineProperty(process, "versions", {
+          value: originalVersions,
+          configurable: true,
+        });
+      }
+    });
+
+    it("should not set registration state when guard fires", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const originalVersions = process.versions;
+
+      Object.defineProperty(process, "versions", {
+        value: { ...originalVersions, node: undefined },
+        configurable: true,
+      });
+
+      try {
+        // Call twice without resetting. If the guard incorrectly set
+        // isRegistered, the second call would silently return (no warn)
+        // instead of hitting the guard again and warning.
+        registerGlasstrace();
+        registerGlasstrace();
+
+        const guardWarnings = warnSpy.mock.calls.filter(
+          (call) => typeof call[0] === "string" && call[0].includes("SDK requires a Node.js runtime"),
+        );
+        expect(guardWarnings).toHaveLength(2);
+      } finally {
+        Object.defineProperty(process, "versions", {
+          value: originalVersions,
+          configurable: true,
+        });
+      }
+    });
+  });
 });
