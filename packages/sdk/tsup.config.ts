@@ -5,6 +5,7 @@ export default defineConfig({
   entry: {
     index: "src/index.ts",
     "cli/init": "src/cli/init.ts",
+    "cli/uninit": "src/cli/uninit.ts",
     "cli/mcp-add": "src/cli/mcp-add.ts",
     "adapters/drizzle": "src/adapters/drizzle.ts",
   },
