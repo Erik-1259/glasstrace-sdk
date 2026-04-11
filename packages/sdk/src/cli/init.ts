@@ -17,6 +17,7 @@ import { generateMcpConfig, generateInfoSection } from "../agent-detection/confi
 import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
 import { MCP_ENDPOINT, formatAgentName } from "./constants.js";
+import { resolveProjectRoot } from "./monorepo.js";
 
 /**
  * Returns true if the current Node.js major version meets the minimum requirement.
@@ -75,10 +76,23 @@ async function promptYesNo(question: string, defaultValue: boolean): Promise<boo
  * bottom calls this function and translates the result to process.exit().
  */
 export async function runInit(options: InitOptions): Promise<InitResult> {
-  const { projectRoot, yes, coverageMap } = options;
+  const { yes, coverageMap } = options;
   const summary: string[] = [];
   const warnings: string[] = [];
   const errors: string[] = [];
+
+  // Step 0: Resolve the correct project root (monorepo awareness)
+  let projectRoot: string;
+  try {
+    const classification = resolveProjectRoot(options.projectRoot);
+    projectRoot = classification.projectRoot;
+    if (classification.isMonorepo && classification.appRelativePath) {
+      summary.push(`Found Next.js app at ${classification.appRelativePath} — installing there`);
+    }
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
+    return { exitCode: 1, summary, warnings, errors };
+  }
 
   // Step 1: Detect package.json
   const packageJsonPath = path.join(projectRoot, "package.json");
