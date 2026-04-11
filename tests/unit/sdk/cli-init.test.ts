@@ -31,34 +31,94 @@ afterEach(() => {
 
 describe("scaffoldInstrumentation", () => {
   it("creates instrumentation.ts with registerGlasstrace call", async () => {
-    const result = await scaffoldInstrumentation(tmpDir, false);
-    expect(result).toBe(true);
+    const result = await scaffoldInstrumentation(tmpDir);
+    expect(result.action).toBe("created");
     const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
     expect(content).toContain("registerGlasstrace");
     expect(content).toContain("import");
   });
 
   it("includes Prisma initialization order comment", async () => {
-    await scaffoldInstrumentation(tmpDir, false);
+    await scaffoldInstrumentation(tmpDir);
     const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
     expect(content.toLowerCase()).toContain("prisma");
   });
 
-  it("returns false when file exists and force is false", async () => {
-    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), "existing content");
-    const result = await scaffoldInstrumentation(tmpDir, false);
-    expect(result).toBe(false);
-    // Original content should be unchanged
-    const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
-    expect(content).toBe("existing content");
+  it("returns already-registered when file contains registerGlasstrace() call", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "instrumentation.ts"),
+      'import { registerGlasstrace } from "@glasstrace/sdk";\nexport async function register() { registerGlasstrace(); }\n',
+    );
+    const result = await scaffoldInstrumentation(tmpDir);
+    expect(result.action).toBe("already-registered");
   });
 
-  it("overwrites when force is true", async () => {
-    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), "existing content");
-    const result = await scaffoldInstrumentation(tmpDir, true);
-    expect(result).toBe(true);
+  it("returns unrecognized when file has no register() function", async () => {
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), "// custom content without register function\n");
+    const result = await scaffoldInstrumentation(tmpDir);
+    expect(result.action).toBe("unrecognized");
+    // Original content should be unchanged
     const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
-    expect(content).toContain("registerGlasstrace");
+    expect(content).toBe("// custom content without register function\n");
+  });
+
+  it("injects registerGlasstrace into existing instrumentation.ts with Prisma", async () => {
+    const prismaContent = `import { PrismaInstrumentation } from "@prisma/instrumentation";
+
+export function register() {
+  const prisma = new PrismaInstrumentation();
+}
+`;
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), prismaContent);
+    const result = await scaffoldInstrumentation(tmpDir);
+    expect(result.action).toBe("injected");
+    const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
+    expect(content).toContain("registerGlasstrace()");
+    expect(content).toContain('import { registerGlasstrace } from "@glasstrace/sdk"');
+    // Prisma code should be preserved
+    expect(content).toContain("PrismaInstrumentation");
+  });
+
+  it("injects registerGlasstrace into existing instrumentation.ts with Sentry", async () => {
+    const sentryContent = `import * as Sentry from "@sentry/nextjs";
+
+export async function register() {
+  Sentry.init({
+    dsn: "https://example@sentry.io/123",
+  });
+}
+`;
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), sentryContent);
+    const result = await scaffoldInstrumentation(tmpDir);
+    expect(result.action).toBe("injected");
+    const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
+    expect(content).toContain("registerGlasstrace()");
+    // Sentry code should be preserved
+    expect(content).toContain("Sentry.init");
+  });
+
+  it("preserves existing file content when injecting", async () => {
+    const existing = `// Custom header comment
+import { something } from "some-lib";
+
+export function register() {
+  something();
+  console.log("registered");
+}
+`;
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), existing);
+    const result = await scaffoldInstrumentation(tmpDir);
+    expect(result.action).toBe("injected");
+    const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
+    // All original code should be preserved
+    expect(content).toContain("Custom header comment");
+    expect(content).toContain('import { something } from "some-lib"');
+    expect(content).toContain("something()");
+    expect(content).toContain('console.log("registered")');
+    // registerGlasstrace should appear before existing statements
+    const glasstraceIdx = content.indexOf("registerGlasstrace()");
+    const somethingIdx = content.indexOf("something()");
+    expect(glasstraceIdx).toBeLessThan(somethingIdx);
   });
 });
 
@@ -478,8 +538,8 @@ describe("runInit — CLI flow", () => {
     }
   });
 
-  it("non-interactive mode does not overwrite existing files", async () => {
-    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), "// custom content");
+  it("non-interactive mode warns when instrumentation.ts has unrecognized pattern", async () => {
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), "// custom content without register()");
     fs.writeFileSync(path.join(tmpDir, ".env.local"), "GLASSTRACE_API_KEY=my-key\n");
     fs.writeFileSync(path.join(tmpDir, ".gitignore"), ".glasstrace/\n");
 
@@ -489,9 +549,11 @@ describe("runInit — CLI flow", () => {
       coverageMap: false,
     });
     expect(result.exitCode).toBe(0);
-    // Existing files should be unchanged
+    // File should be unchanged (no register() to inject into)
     const instrumentationContent = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
-    expect(instrumentationContent).toBe("// custom content");
+    expect(instrumentationContent).toBe("// custom content without register()");
+    // Should have a warning about manual instructions
+    expect(result.warnings.some((w: string) => w.includes("register()"))).toBe(true);
   });
 
   it("returns summary of created/modified files", async () => {
