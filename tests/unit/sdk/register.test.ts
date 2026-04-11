@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   registerGlasstrace,
   _resetRegistrationForTesting,
   getDiscoveryHandler,
 } from "../../../packages/sdk/src/register.js";
 import { _resetConfigForTesting } from "../../../packages/sdk/src/init-client.js";
+import * as otelConfig from "../../../packages/sdk/src/otel-config.js";
 
 /** Valid developer API key for testing (gt_dev_ prefix + 48 hex chars). */
 const TEST_DEV_API_KEY = "gt_dev_" + "a".repeat(48);
@@ -15,27 +19,55 @@ const TEST_DEV_API_KEY_ALT = "gt_dev_" + "b".repeat(48);
 /** Duration (ms) to wait for background promises to settle in async tests. */
 const BACKGROUND_SETTLE_MS = 200;
 
+/** Standard init response fields shared by all mock variants. */
+const STANDARD_INIT_FIELDS = {
+  config: {
+    requestBodies: false,
+    queryParamValues: false,
+    envVarValues: false,
+    fullConsoleOutput: false,
+    importGraph: false,
+  },
+  minimumSdkVersion: "0.0.0",
+  apiVersion: "v1",
+  tierLimits: {
+    tracesPerMinute: 100,
+    storageTtlHours: 48,
+    maxTraceSizeBytes: 512000,
+    maxConcurrentSessions: 1,
+  },
+};
+
 /** Creates a mock fetch Response matching the SdkInitResponse schema. */
 function createMockInitResponse(): ReturnType<typeof vi.fn> {
   return vi.fn().mockResolvedValue({
     ok: true,
     status: 200,
     json: () => Promise.resolve({
-      config: {
-        requestBodies: false,
-        queryParamValues: false,
-        envVarValues: false,
-        fullConsoleOutput: false,
-        importGraph: false,
-      },
+      ...STANDARD_INIT_FIELDS,
       subscriptionStatus: "anonymous",
-      minimumSdkVersion: "0.0.0",
-      apiVersion: "v1",
-      tierLimits: {
-        tracesPerMinute: 100,
-        storageTtlHours: 48,
-        maxTraceSizeBytes: 512000,
-        maxConcurrentSessions: 1,
+    }),
+  });
+}
+
+/** Valid dev API key that satisfies DevApiKeySchema (gt_dev_ + 48 hex chars). */
+const CLAIMED_DEV_KEY = "gt_dev_" + "c".repeat(48);
+
+/**
+ * Creates a mock fetch Response whose init payload includes a claimResult,
+ * simulating the backend reporting an account claim transition.
+ */
+function createMockInitResponseWithClaim(): ReturnType<typeof vi.fn> {
+  return vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({
+      ...STANDARD_INIT_FIELDS,
+      subscriptionStatus: "claimed",
+      claimResult: {
+        newApiKey: CLAIMED_DEV_KEY,
+        accountId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        graceExpiresAt: Date.now() + 86_400_000,
       },
     }),
   });
@@ -493,6 +525,96 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
       expect(fetchMock).toHaveBeenCalled();
+    });
+  });
+
+  describe("Claim propagation in backgroundInit", () => {
+    // Isolate filesystem side effects from writeClaimedKey() so that
+    // claim-path tests never touch .env.local in the repo root.
+    let claimTempDir: string;
+
+    beforeEach(async () => {
+      claimTempDir = await mkdtemp(join(tmpdir(), "glasstrace-claim-test-"));
+      vi.spyOn(process, "cwd").mockReturnValue(claimTempDir);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    });
+
+    afterEach(async () => {
+      await rm(claimTempDir, { recursive: true, force: true });
+    });
+
+    it("should update the resolved API key when init returns a claimResult in dev-key mode", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const setKeySpy = vi.spyOn(otelConfig, "setResolvedApiKey");
+      const notifySpy = vi.spyOn(otelConfig, "notifyApiKeyResolved");
+
+      vi.stubGlobal("fetch", createMockInitResponseWithClaim());
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork(400);
+
+      // setResolvedApiKey is called once synchronously with the dev key,
+      // then a second time from backgroundInit with the claimed key.
+      const setKeyCalls = setKeySpy.mock.calls.map((c) => c[0]);
+      expect(setKeyCalls).toContain(TEST_DEV_API_KEY);
+      expect(setKeyCalls).toContain(CLAIMED_DEV_KEY);
+
+      // notifyApiKeyResolved is called from backgroundInit after the claim
+      expect(notifySpy).toHaveBeenCalled();
+    });
+
+    it("should not call setResolvedApiKey a second time when init has no claimResult", async () => {
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const setKeySpy = vi.spyOn(otelConfig, "setResolvedApiKey");
+      const notifySpy = vi.spyOn(otelConfig, "notifyApiKeyResolved");
+
+      // Standard mock — no claimResult in the response
+      vi.stubGlobal("fetch", createMockInitResponse());
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork(400);
+
+      // setResolvedApiKey is called exactly once: the synchronous dev-key set
+      expect(setKeySpy).toHaveBeenCalledTimes(1);
+      expect(setKeySpy).toHaveBeenCalledWith(TEST_DEV_API_KEY);
+
+      // notifyApiKeyResolved should NOT be called from backgroundInit
+      // (it is not called in the dev-key path outside of claim propagation)
+      expect(notifySpy).not.toHaveBeenCalled();
+    });
+
+    it("should propagate claimResult in anonymous mode", async () => {
+      // Anonymous mode: no GLASSTRACE_API_KEY set
+      process.env.NODE_ENV = "development";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "info").mockImplementation(() => {});
+
+      const setKeySpy = vi.spyOn(otelConfig, "setResolvedApiKey");
+      const notifySpy = vi.spyOn(otelConfig, "notifyApiKeyResolved");
+
+      vi.stubGlobal("fetch", createMockInitResponseWithClaim());
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork(400);
+
+      // In anonymous mode, setResolvedApiKey is called:
+      //   1. With the anonymous key (after getOrCreateAnonKey resolves)
+      //   2. With the claimed dev key (from backgroundInit claimResult)
+      const setKeyCalls = setKeySpy.mock.calls.map((c) => c[0]);
+      expect(setKeyCalls.length).toBeGreaterThanOrEqual(2);
+      expect(setKeyCalls[setKeyCalls.length - 1]).toBe(CLAIMED_DEV_KEY);
+
+      // notifyApiKeyResolved is called at least twice:
+      //   1. After anonymous key resolution
+      //   2. After claim propagation in backgroundInit
+      expect(notifySpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
   });
 });
