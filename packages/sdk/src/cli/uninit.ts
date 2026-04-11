@@ -39,8 +39,106 @@ const AGENT_INFO_FILES = [
 ] as const;
 
 /**
+ * Advances past a string literal (double-quoted, single-quoted, or template
+ * literal), respecting backslash escapes.
+ *
+ * Note: Template literals with `${...}` interpolations containing nested
+ * backticks are not fully supported — the scanner stops at the first
+ * unescaped backtick. This is acceptable because config files (the primary
+ * use case for `findMatchingParen`/`findMatchingBrace`) do not use nested
+ * template literals.
+ *
+ * @param text - The source text.
+ * @param start - The index of the opening quote character.
+ * @param quote - The quote character (`"`, `'`, or `` ` ``).
+ * @returns The index immediately after the closing quote.
+ * @internal Exported for unit testing only.
+ */
+export function skipString(text: string, start: number, quote: string): number {
+  let i = start + 1;
+  while (i < text.length) {
+    if (text[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (text[i] === quote) {
+      return i + 1;
+    }
+    i++;
+  }
+  return text.length;
+}
+
+/**
+ * Finds the matching closing delimiter for an opening delimiter at the given
+ * position, accounting for nesting and skipping delimiters that appear inside
+ * string literals (`"`, `'`, `` ` ``), single-line comments (`//`), and block
+ * comments.
+ *
+ * @param text - The source text to search.
+ * @param openPos - The index of the opening delimiter.
+ * @param openChar - The opening delimiter character (e.g., `(` or `{`).
+ * @param closeChar - The closing delimiter character (e.g., `)` or `}`).
+ * @returns The index of the matching closing delimiter, or -1 if not found.
+ * @internal Exported for unit testing only.
+ */
+export function findMatchingDelimiter(
+  text: string,
+  openPos: number,
+  openChar: string,
+  closeChar: string,
+): number {
+  let depth = 0;
+  let i = openPos;
+  while (i < text.length) {
+    const ch = text[i];
+
+    // Skip string literals
+    if (ch === '"' || ch === "'" || ch === "`") {
+      i = skipString(text, i, ch);
+      continue;
+    }
+
+    // Skip single-line comments.
+    // Note: This may misidentify regex literals containing `//` (e.g.,
+    // `/api\//`). Config files — the primary use case — do not contain
+    // regex literals, so this trade-off is acceptable.
+    if (ch === "/" && text[i + 1] === "/") {
+      const newline = text.indexOf("\n", i);
+      if (newline === -1) {
+        return -1;
+      }
+      i = newline + 1;
+      continue;
+    }
+
+    // Skip block comments
+    if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) {
+        return -1;
+      }
+      i = end + 2;
+      continue;
+    }
+
+    if (ch === openChar) {
+      depth++;
+    } else if (ch === closeChar) {
+      depth--;
+      if (depth === 0) {
+        return i;
+      }
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
  * Finds the matching closing parenthesis for an opening paren at the given
- * position, accounting for nested parentheses.
+ * position, accounting for nested parentheses and skipping delimiters inside
+ * string literals and comments.
  *
  * @param text - The source text to search.
  * @param openPos - The index of the opening `(`.
@@ -48,18 +146,7 @@ const AGENT_INFO_FILES = [
  * @internal Exported for unit testing only.
  */
 export function findMatchingParen(text: string, openPos: number): number {
-  let depth = 0;
-  for (let i = openPos; i < text.length; i++) {
-    if (text[i] === "(") {
-      depth++;
-    } else if (text[i] === ")") {
-      depth--;
-      if (depth === 0) {
-        return i;
-      }
-    }
-  }
-  return -1;
+  return findMatchingDelimiter(text, openPos, "(", ")");
 }
 
 /**
@@ -293,21 +380,11 @@ export function isInitCreatedInstrumentation(content: string): boolean {
 }
 
 /**
- * Finds the matching closing brace for an opening brace at the given position.
+ * Finds the matching closing brace for an opening brace at the given position,
+ * skipping delimiters inside string literals and comments.
  */
 function findMatchingBrace(text: string, openPos: number): number {
-  let depth = 0;
-  for (let i = openPos; i < text.length; i++) {
-    if (text[i] === "{") {
-      depth++;
-    } else if (text[i] === "}") {
-      depth--;
-      if (depth === 0) {
-        return i;
-      }
-    }
-  }
-  return -1;
+  return findMatchingDelimiter(text, openPos, "{", "}");
 }
 
 /**
@@ -777,11 +854,20 @@ export async function runUninit(options: UninitOptions): Promise<UninitResult> {
         const content = fs.readFileSync(windsurfConfigPath, "utf-8");
         const windsurfResult = processJsonMcpConfig(content);
 
+        // Display the path with ~ for the home directory to keep output
+        // readable, but derive it from the actual path for accuracy.
+        const home = os.homedir();
+        const displayPath = windsurfConfigPath.startsWith(home)
+          ? "~" + windsurfConfigPath.slice(home.length)
+          : windsurfConfigPath;
+
         if (windsurfResult.action === "deleted") {
           if (!dryRun) {
             fs.unlinkSync(windsurfConfigPath);
           }
-          summary.push(`${prefix}Deleted Windsurf MCP config`);
+          summary.push(
+            `${prefix}Deleted global Windsurf config (${displayPath})`,
+          );
         } else if (
           windsurfResult.action === "removed-key" &&
           windsurfResult.content !== undefined
@@ -789,7 +875,9 @@ export async function runUninit(options: UninitOptions): Promise<UninitResult> {
           if (!dryRun) {
             fs.writeFileSync(windsurfConfigPath, windsurfResult.content, "utf-8");
           }
-          summary.push(`${prefix}Removed glasstrace from Windsurf MCP config`);
+          summary.push(
+            `${prefix}Removed glasstrace from global Windsurf config (${displayPath})`,
+          );
         }
       }
     }
