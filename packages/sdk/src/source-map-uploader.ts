@@ -18,28 +18,58 @@ export interface SourceMapEntry {
 }
 
 /**
- * Recursively finds all .map files in the given build directory.
- * Returns relative paths and file contents.
+ * Metadata for a discovered source map file, without its content loaded.
+ * Used by the streaming upload flow to defer file reads until upload time.
  */
-export async function collectSourceMaps(
+export interface SourceMapFileInfo {
+  /** Relative path to the compiled JS file (`.map` extension stripped). */
+  filePath: string;
+  /** Absolute path on disk for reading the file content on demand. */
+  absolutePath: string;
+  /** File size in bytes. */
+  sizeBytes: number;
+}
+
+/** Threshold (50 MB) above which a single source map triggers a warning. */
+const LARGE_FILE_WARNING_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Recursively discovers all `.map` files in the given build directory.
+ * Returns metadata only — file content is NOT read into memory.
+ */
+export async function discoverSourceMapFiles(
   buildDir: string,
-): Promise<SourceMapEntry[]> {
-  const results: SourceMapEntry[] = [];
+): Promise<SourceMapFileInfo[]> {
+  // Resolve to absolute so absolutePath in results is always absolute,
+  // even when buildDir is relative (e.g. ".next").
+  const resolvedDir = path.resolve(buildDir);
+  const results: SourceMapFileInfo[] = [];
 
   try {
-    await walkDir(buildDir, buildDir, results);
+    await walkDirMetadata(resolvedDir, resolvedDir, results);
   } catch {
     // Directory doesn't exist or is unreadable — return empty
     return [];
   }
 
+  // Warn about oversized source map files
+  for (const file of results) {
+    if (file.sizeBytes >= LARGE_FILE_WARNING_BYTES) {
+      const sizeMB = (file.sizeBytes / (1024 * 1024)).toFixed(1);
+      sdkLog(
+        "warn",
+        `[glasstrace] Large source map detected: ${file.filePath} (${sizeMB}MB). Consider enabling source map compression.`,
+      );
+    }
+  }
+
   return results;
 }
 
-async function walkDir(
+async function walkDirMetadata(
   baseDir: string,
   currentDir: string,
-  results: SourceMapEntry[],
+  results: SourceMapFileInfo[],
 ): Promise<void> {
   let entries: import("node:fs").Dirent[];
   try {
@@ -52,21 +82,57 @@ async function walkDir(
     const fullPath = path.join(currentDir, entry.name);
 
     if (entry.isDirectory()) {
-      await walkDir(baseDir, fullPath, results);
+      await walkDirMetadata(baseDir, fullPath, results);
     } else if (entry.isFile() && entry.name.endsWith(".map")) {
       try {
-        const content = await fs.readFile(fullPath, "utf-8");
+        const stat = await fs.stat(fullPath);
         const relativePath = path.relative(baseDir, fullPath).replace(/\\/g, "/");
         // Strip the trailing .map extension so the key matches the compiled
         // JS path that the runtime uses for stack-frame lookups (e.g.
         // "static/chunks/main.js" instead of "static/chunks/main.js.map").
         const compiledPath = relativePath.replace(/\.map$/, "");
-        results.push({ filePath: compiledPath, content });
+        results.push({
+          filePath: compiledPath,
+          absolutePath: fullPath,
+          sizeBytes: stat.size,
+        });
       } catch {
         // Skip unreadable files
       }
     }
   }
+}
+
+/**
+ * Reads the content of a single source map file from disk.
+ */
+async function readSourceMapContent(absolutePath: string): Promise<string> {
+  return fs.readFile(absolutePath, "utf-8");
+}
+
+/**
+ * Recursively finds all .map files in the given build directory.
+ * Returns relative paths and file contents.
+ *
+ * @deprecated Prefer {@link discoverSourceMapFiles} to avoid loading all
+ * source maps into memory simultaneously.
+ */
+export async function collectSourceMaps(
+  buildDir: string,
+): Promise<SourceMapEntry[]> {
+  const fileInfos = await discoverSourceMapFiles(buildDir);
+  const results: SourceMapEntry[] = [];
+
+  for (const info of fileInfos) {
+    try {
+      const content = await readSourceMapContent(info.absolutePath);
+      results.push({ filePath: info.filePath, content });
+    } catch {
+      // Skip unreadable files — consistent with previous behavior
+    }
+  }
+
+  return results;
 }
 
 /**
@@ -76,9 +142,12 @@ async function walkDir(
  * On failure, falls back to a deterministic content hash:
  * sort source map file paths alphabetically, concatenate each as
  * `{relativePath}\n{fileLength}\n{fileContent}`, then SHA-256 the result.
+ *
+ * Accepts either `SourceMapEntry[]` (legacy, in-memory) or
+ * `SourceMapFileInfo[]` (streaming, reads on demand).
  */
 export async function computeBuildHash(
-  maps?: SourceMapEntry[],
+  maps?: SourceMapEntry[] | SourceMapFileInfo[],
 ): Promise<string> {
   // Try git first
   try {
@@ -95,12 +164,24 @@ export async function computeBuildHash(
     a.filePath.localeCompare(b.filePath),
   );
 
-  const hashInput = sortedMaps
-    .map((m) => `${m.filePath}\n${m.content.length}\n${m.content}`)
-    .join("");
+  const hash = crypto.createHash("sha256");
 
-  const hash = crypto.createHash("sha256").update(hashInput).digest("hex");
-  return hash;
+  for (const m of sortedMaps) {
+    let content: string;
+    if ("content" in m) {
+      content = m.content;
+    } else {
+      try {
+        content = await readSourceMapContent(m.absolutePath);
+      } catch {
+        // Skip unreadable files — consistent with collectSourceMaps behavior
+        continue;
+      }
+    }
+    hash.update(`${m.filePath}\n${content.length}\n${content}`);
+  }
+
+  return hash.digest("hex");
 }
 
 /**
@@ -108,20 +189,39 @@ export async function computeBuildHash(
  *
  * POSTs to `{endpoint}/v1/source-maps` with the API key, build hash,
  * and file entries. Validates the response against SourceMapUploadResponseSchema.
+ *
+ * Accepts either `SourceMapEntry[]` (legacy, in-memory) or
+ * `SourceMapFileInfo[]` (deferred reads). With `SourceMapFileInfo[]`,
+ * file content is read at upload time rather than at discovery time.
+ * Note: the legacy endpoint sends all files in a single JSON body, so
+ * peak memory is similar — the benefit is deferring reads past discovery.
  */
 export async function uploadSourceMaps(
   apiKey: string,
   endpoint: string,
   buildHash: string,
-  maps: SourceMapEntry[],
+  maps: SourceMapEntry[] | SourceMapFileInfo[],
 ): Promise<SourceMapUploadResponse> {
+  // Read files on demand — for SourceMapEntry[], content is already available;
+  // for SourceMapFileInfo[], each file is read individually to limit memory.
+  // Individual reads are guarded so one transient failure (deleted file,
+  // permission change) does not abort the entire upload.
+  const files: Array<{ filePath: string; sourceMap: string }> = [];
+  for (const m of maps) {
+    try {
+      const content = "content" in m
+        ? m.content
+        : await readSourceMapContent(m.absolutePath);
+      files.push({ filePath: m.filePath, sourceMap: content });
+    } catch {
+      sdkLog("warn", `[glasstrace] Skipping unreadable source map: ${m.filePath}`);
+    }
+  }
+
   const body = {
     apiKey,
     buildHash,
-    files: maps.map((m) => ({
-      filePath: m.filePath,
-      sourceMap: m.content,
-    })),
+    files,
   };
 
   const baseUrl = stripTrailingSlashes(endpoint);
@@ -281,8 +381,12 @@ export async function submitManifest(
  * Orchestrates the 3-phase presigned upload flow.
  *
  * 1. Requests presigned tokens for all source map files
- * 2. Uploads each file to blob storage with a concurrency limit of 5
+ * 2. Uploads each file to blob storage with a concurrency limit of 5,
+ *    reading file content from disk just before each upload
  * 3. Submits the manifest to finalize the upload
+ *
+ * Accepts either `SourceMapEntry[]` (legacy, in-memory) or
+ * `SourceMapFileInfo[]` (streaming, reads on demand).
  *
  * Accepts an optional `blobUploader` for test injection; defaults to
  * {@link uploadToBlob}.
@@ -291,19 +395,24 @@ export async function uploadSourceMapsPresigned(
   apiKey: string,
   endpoint: string,
   buildHash: string,
-  maps: SourceMapEntry[],
+  maps: SourceMapEntry[] | SourceMapFileInfo[],
   blobUploader: BlobUploader = uploadToBlob,
 ): Promise<SourceMapManifestResponse> {
   if (maps.length === 0) {
     throw new Error("No source maps to upload");
   }
 
+  // Determine file metadata for the presign request
+  const fileMetadata = maps.map((m) => ({
+    filePath: m.filePath,
+    sizeBytes: "content" in m
+      ? Buffer.byteLength(m.content, "utf-8")
+      : m.sizeBytes,
+  }));
+
   // Phase 1: request presigned tokens
-  const presigned = await requestPresignedTokens(apiKey, endpoint, buildHash,
-    maps.map((m) => ({
-      filePath: m.filePath,
-      sizeBytes: Buffer.byteLength(m.content, "utf-8"),
-    })),
+  const presigned = await requestPresignedTokens(
+    apiKey, endpoint, buildHash, fileMetadata,
   );
 
   // Build a lookup map for O(1) access by filePath
@@ -313,7 +422,6 @@ export async function uploadSourceMapsPresigned(
     throw new Error("Duplicate filePath entries in source maps");
   }
 
-  // Phase 2: upload to blob storage with concurrency limit of 5.
   // Validate all tokens have matching entries before starting any uploads.
   for (const token of presigned.files) {
     if (!mapsByPath.has(token.filePath)) {
@@ -323,7 +431,9 @@ export async function uploadSourceMapsPresigned(
     }
   }
 
-  // Phase 2: upload to blob storage in chunks of CONCURRENCY
+  // Phase 2: upload to blob storage in chunks of CONCURRENCY.
+  // File content is read from disk just before each upload to avoid
+  // holding all source maps in memory simultaneously.
   const CONCURRENCY = 5;
   const uploadResults: Array<{ filePath: string; sizeBytes: number; blobUrl: string }> = [];
 
@@ -332,7 +442,18 @@ export async function uploadSourceMapsPresigned(
     const chunkResults = await Promise.all(
       chunk.map(async (token) => {
         const entry = mapsByPath.get(token.filePath)!;
-        const result = await blobUploader(token.clientToken, token.pathname, entry.content);
+        let content: string;
+        if ("content" in entry) {
+          content = entry.content;
+        } else {
+          try {
+            content = await readSourceMapContent(entry.absolutePath);
+          } catch {
+            sdkLog("warn", `[glasstrace] Skipping unreadable source map: ${token.filePath}`);
+            return null;
+          }
+        }
+        const result = await blobUploader(token.clientToken, token.pathname, content);
         return {
           filePath: token.filePath,
           sizeBytes: result.size,
@@ -340,7 +461,11 @@ export async function uploadSourceMapsPresigned(
         };
       }),
     );
-    uploadResults.push(...chunkResults);
+    for (const r of chunkResults) {
+      if (r !== null) {
+        uploadResults.push(r);
+      }
+    }
   }
 
   // Phase 3: submit manifest
@@ -365,12 +490,15 @@ export interface AutoUploadOptions {
  * - At or above the threshold: checks if `@vercel/blob` is available and
  *   uses the presigned 3-phase flow. Falls back to legacy with a warning
  *   if the package is not installed.
+ *
+ * Accepts either `SourceMapEntry[]` (legacy, in-memory) or
+ * `SourceMapFileInfo[]` (streaming, reads on demand).
  */
 export async function uploadSourceMapsAuto(
   apiKey: string,
   endpoint: string,
   buildHash: string,
-  maps: SourceMapEntry[],
+  maps: SourceMapEntry[] | SourceMapFileInfo[],
   options?: AutoUploadOptions,
 ): Promise<SourceMapUploadResponse | SourceMapManifestResponse> {
   if (maps.length === 0) {
@@ -378,7 +506,12 @@ export async function uploadSourceMapsAuto(
   }
 
   const totalBytes = maps.reduce(
-    (sum, m) => sum + Buffer.byteLength(m.content, "utf-8"),
+    (sum, m) => {
+      const bytes = "content" in m
+        ? Buffer.byteLength(m.content, "utf-8")
+        : m.sizeBytes;
+      return sum + bytes;
+    },
     0,
   );
 
@@ -406,7 +539,7 @@ export async function uploadSourceMapsAuto(
 
   // Fall back to legacy upload with a warning
   sdkLog("warn",
-    `[glasstrace] Build exceeds 4.5MB (${totalBytes} bytes). Install @vercel/blob for ` +
+    `[glasstrace] Build exceeds 4.5MB (${String(totalBytes)} bytes). Install @vercel/blob for ` +
     `presigned uploads to avoid serverless body size limits. Falling back to legacy upload.`
   );
 

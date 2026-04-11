@@ -161,7 +161,12 @@ export {
 export { withGlasstraceConfig } from "./config-wrapper.js";
 
 /**
+ * {@link discoverSourceMapFiles} walks a build directory and returns metadata
+ * for all `.map` files without reading their content into memory.
+ *
  * {@link collectSourceMaps} recursively finds all `.map` files in a build directory.
+ * @deprecated Prefer {@link discoverSourceMapFiles} to avoid loading all source maps
+ * into memory simultaneously.
  *
  * {@link computeBuildHash} returns a build identifier (git SHA or content hash fallback).
  *
@@ -177,6 +182,7 @@ export { withGlasstraceConfig } from "./config-wrapper.js";
  * size, falling back to legacy upload when `@vercel/blob` is unavailable.
  */
 export {
+  discoverSourceMapFiles,
   collectSourceMaps,
   computeBuildHash,
   uploadSourceMaps,
@@ -186,6 +192,9 @@ export {
 } from "./source-map-uploader.js";
 
 /**
+ * {@link SourceMapFileInfo} represents metadata for a discovered source map file
+ * without its content loaded, used by the streaming upload flow.
+ *
  * {@link SourceMapEntry} represents a single source map file with its path and content.
  *
  * {@link BlobUploader} is the signature for the blob upload function, injectable for testing.
@@ -194,6 +203,7 @@ export {
  * test overrides for blob availability and upload behavior.
  */
 export type {
+  SourceMapFileInfo,
   SourceMapEntry,
   BlobUploader,
   AutoUploadOptions,
