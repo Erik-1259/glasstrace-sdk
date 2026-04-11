@@ -148,6 +148,66 @@ describe("getOrCreateAnonKey", () => {
   });
 });
 
+describe("getOrCreateAnonKey EEXIST retry loop", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "glasstrace-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("retries reading winner key when initial read returns null", async () => {
+    const winnerKey = "gt_anon_" + "c".repeat(48);
+    const keyDir = join(tempDir, ".glasstrace");
+    const keyPath = join(keyDir, "anon_key");
+
+    // Pre-create the directory so mkdir succeeds
+    await mkdir(keyDir, { recursive: true, mode: 0o700 });
+
+    // Create the key file with invalid content first (simulates
+    // the winner's write not yet flushed / partially written)
+    await writeFile(keyPath, "incomplete", { mode: 0o600 });
+
+    // After a short delay, overwrite with the valid winner key.
+    // This simulates the winner's write completing between retries.
+    // The 10ms delay ensures the valid key appears after the initial
+    // read but well before the first 50ms retry fires.
+    const delayedWrite = new Promise<void>((resolve, reject) => {
+      setTimeout(() => {
+        writeFile(keyPath, winnerKey, { mode: 0o600 }).then(resolve, reject);
+      }, 10);
+    });
+
+    const result = await getOrCreateAnonKey(tempDir);
+    await delayedWrite;
+
+    // Should have read the winner's key after retry, not generated a new one
+    expect(result).toBe(winnerKey);
+  });
+
+  it("falls back to overwrite when all retries return null", async () => {
+    const keyDir = join(tempDir, ".glasstrace");
+    const keyPath = join(keyDir, "anon_key");
+
+    // Pre-create the directory and file with permanently invalid content
+    await mkdir(keyDir, { recursive: true, mode: 0o700 });
+    await writeFile(keyPath, "permanently_corrupt", { mode: 0o600 });
+
+    const result = await getOrCreateAnonKey(tempDir);
+
+    // Should have generated a new key and overwritten the corrupt file
+    expect(result).toMatch(/^gt_anon_[a-f0-9]{48}$/);
+    expect(result).not.toBe("permanently_corrupt");
+
+    // Verify the file was overwritten with the new key
+    const fileContent = await readFile(keyPath, "utf-8");
+    expect(fileContent).toBe(result);
+  });
+});
+
 describe("readAnonKey", () => {
   let tempDir: string;
 
