@@ -1,5 +1,12 @@
 # @glasstrace/sdk
 
+## 0.9.0
+
+### Minor Changes
+
+- a870032: Added `npx @glasstrace/sdk uninit` command that cleanly reverses all init artifacts. Supports `--dry-run` to preview changes.
+- 5707f7c: Init now detects monorepo roots and automatically finds the Next.js app to scaffold into. Supports pnpm workspaces, npm workspaces, Turborepo, and Lerna monorepos.
+
 ## 0.8.0
 
 ### Minor Changes
