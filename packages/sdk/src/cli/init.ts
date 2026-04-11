@@ -87,27 +87,28 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     return { exitCode: 1, summary, warnings, errors };
   }
 
-  // Step 2 + 3: Generate instrumentation.ts
-  const instrumentationPath = path.join(projectRoot, "instrumentation.ts");
-  const instrumentationExists = fs.existsSync(instrumentationPath);
-  let shouldWriteInstrumentation = true;
-
-  if (instrumentationExists && !yes) {
-    shouldWriteInstrumentation = await promptYesNo(
-      "instrumentation.ts already exists. Overwrite?",
-      false,
-    );
-  } else if (instrumentationExists && yes) {
-    // Non-interactive: never overwrite (idempotent)
-    shouldWriteInstrumentation = false;
-  }
-
+  // Step 2: Ensure instrumentation.ts has registerGlasstrace()
   try {
-    const created = await scaffoldInstrumentation(projectRoot, shouldWriteInstrumentation && instrumentationExists);
-    if (created) {
-      summary.push("Created instrumentation.ts");
-    } else if (instrumentationExists) {
-      summary.push("Skipped instrumentation.ts (already exists)");
+    const instrResult = await scaffoldInstrumentation(projectRoot);
+    switch (instrResult.action) {
+      case "created":
+        summary.push("Created instrumentation.ts");
+        break;
+      case "injected":
+        summary.push("Added registerGlasstrace() to existing instrumentation.ts");
+        break;
+      case "already-registered":
+        summary.push("Skipped instrumentation.ts (registerGlasstrace already present)");
+        break;
+      case "unrecognized":
+        warnings.push(
+          "instrumentation.ts exists but has no recognizable register() function.\n" +
+            "Add this import at the top of your file:\n\n" +
+            '  import { registerGlasstrace } from "@glasstrace/sdk";\n\n' +
+            "Then add this as the first statement in your register() function:\n\n" +
+            "  registerGlasstrace();\n",
+        );
+        break;
     }
   } catch (err) {
     errors.push(`Failed to write instrumentation.ts: ${err instanceof Error ? err.message : String(err)}`);

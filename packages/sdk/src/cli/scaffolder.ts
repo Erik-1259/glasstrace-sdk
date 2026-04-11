@@ -13,6 +13,37 @@ export function identityFingerprint(token: string): string {
   return `sha256:${createHash("sha256").update(token).digest("hex")}`;
 }
 
+/**
+ * Checks whether `content` contains a real (non-commented) `registerGlasstrace()` call.
+ *
+ * Strips single-line `// ...` comments before matching so that
+ * `// registerGlasstrace()` is not treated as a real invocation.
+ * Block comments are not stripped — block-commenting a function call
+ * while keeping it syntactically valid is extremely unlikely in practice.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function hasRegisterGlasstraceCall(content: string): boolean {
+  return content.split("\n").some((line) => {
+    const uncommented = line.replace(/\/\/.*$/, "");
+    return /\bregisterGlasstrace\s*\(/.test(uncommented);
+  });
+}
+
+/** Result of attempting to inject registerGlasstrace into an existing file. */
+export interface InjectResult {
+  content: string;
+  injected: boolean;
+}
+
+/** Result of the instrumentation.ts scaffolding step. */
+export type InstrumentationAction = "created" | "injected" | "already-registered" | "unrecognized";
+
+/** Structured result from scaffoldInstrumentation. */
+export interface ScaffoldInstrumentationResult {
+  action: InstrumentationAction;
+}
+
 /** Result of attempting to wrap next.config with withGlasstraceConfig. */
 export interface ScaffoldNextConfigResult {
   modified: boolean;
@@ -23,24 +54,121 @@ export interface ScaffoldNextConfigResult {
 const NEXT_CONFIG_NAMES = ["next.config.ts", "next.config.js", "next.config.mjs"] as const;
 
 /**
- * Generates `instrumentation.ts` with a `registerGlasstrace()` call.
- * If the file exists and `force` is false, the file is not overwritten.
+ * Injects `registerGlasstrace()` into an existing instrumentation.ts file.
+ *
+ * Strategy:
+ * 1. If the file already contains a real `registerGlasstrace()` call — no-op
+ *    (commented-out calls are ignored)
+ * 2. Find `export [async] function register()` pattern
+ * 3. Add `import { registerGlasstrace } from "@glasstrace/sdk"` at top
+ *    (or extend existing `@glasstrace/sdk` import, skipping if already imported)
+ * 4. Insert `registerGlasstrace()` as the first statement in the function body
+ *
+ * @param content - The existing file content
+ * @returns The modified content if injection succeeded, or the original content
+ *   with `injected: false` if the pattern was not recognized
+ */
+export function injectRegisterGlasstrace(content: string): InjectResult {
+  // Already has a registerGlasstrace() call — no-op.
+  // Uses a helper that strips single-line comments before matching
+  // so that `// registerGlasstrace()` is not treated as a real call.
+  if (hasRegisterGlasstraceCall(content)) {
+    return { injected: false, content };
+  }
+
+  // Find the register() function: export [async] function register(...) {
+  const registerFnRegex = /export\s+(?:async\s+)?function\s+register\s*\([^)]*\)\s*\{/;
+  const match = registerFnRegex.exec(content);
+
+  if (!match) {
+    return { injected: false, content };
+  }
+
+  // Determine indentation from the function body by looking at the first
+  // indented line after the opening brace. Only capture spaces and tabs
+  // (not newlines) to avoid blank lines corrupting the detected indent.
+  // Default to 2-space indent (matches the scaffolded template).
+  const afterBrace = content.slice(match.index + match[0].length);
+  const indentMatch = /\n([ \t]+)/.exec(afterBrace);
+  const indent = indentMatch ? indentMatch[1] : "  ";
+
+  // Build the import line
+  const importLine = 'import { registerGlasstrace } from "@glasstrace/sdk";\n';
+
+  // Check if the file already imports from @glasstrace/sdk
+  const hasGlasstraceImport = content.includes("@glasstrace/sdk");
+
+  // Insert registerGlasstrace() as the first statement in the function body
+  const insertPoint = match.index + match[0].length;
+  const callInjection = `\n${indent}// Glasstrace must be registered before other instrumentation\n${indent}registerGlasstrace();\n`;
+
+  let modified: string;
+  if (hasGlasstraceImport) {
+    // File already imports from @glasstrace/sdk — check whether registerGlasstrace
+    // is already among the specifiers to avoid producing a duplicate like
+    // `import { registerGlasstrace, registerGlasstrace }`.
+    const importRegex = /import\s*\{([^}]+)\}\s*from\s*["']@glasstrace\/sdk["']/;
+    const importMatch = importRegex.exec(content);
+    if (importMatch) {
+      const specifiers = importMatch[1];
+      const alreadyImported = specifiers
+        .split(",")
+        .some((s) => s.trim() === "registerGlasstrace");
+
+      if (alreadyImported) {
+        // Import already has registerGlasstrace — only inject the call
+        modified = content.slice(0, insertPoint) + callInjection + content.slice(insertPoint);
+      } else {
+        // Add registerGlasstrace to existing import specifiers
+        const existingImports = specifiers.trimEnd();
+        const separator = existingImports.endsWith(",") ? " " : ", ";
+        const updatedImport = `import {${existingImports}${separator}registerGlasstrace} from "@glasstrace/sdk"`;
+        modified = content.replace(importMatch[0], updatedImport);
+        // Re-find the function in the shifted content and inject the call
+        const newMatch = registerFnRegex.exec(modified);
+        if (newMatch) {
+          const newInsertPoint = newMatch.index + newMatch[0].length;
+          modified = modified.slice(0, newInsertPoint) + callInjection + modified.slice(newInsertPoint);
+        }
+      }
+    } else {
+      // Non-destructured import (e.g., import * as sdk) — add a separate import
+      modified = importLine + content;
+      // Re-find the function in the shifted content and inject the call
+      const newMatch = registerFnRegex.exec(modified);
+      if (newMatch) {
+        const newInsertPoint = newMatch.index + newMatch[0].length;
+        modified = modified.slice(0, newInsertPoint) + callInjection + modified.slice(newInsertPoint);
+      }
+    }
+  } else {
+    // Add import at the top of the file and the call in the function body
+    modified = importLine + content.slice(0, insertPoint) + callInjection + content.slice(insertPoint);
+  }
+
+  return { injected: true, content: modified };
+}
+
+/**
+ * Ensures `instrumentation.ts` exists and contains a `registerGlasstrace()` call.
+ *
+ * - If the file does not exist, creates it with the standard template.
+ * - If the file exists and already contains `registerGlasstrace`, skips it.
+ * - If the file exists without `registerGlasstrace`, attempts to inject the
+ *   call into the existing `register()` function.
+ * - If injection fails (no recognizable `register()` function), returns
+ *   `"unrecognized"` so the caller can display manual instructions.
  *
  * @param projectRoot - Absolute path to the project root directory.
- * @param force - When true, overwrite an existing instrumentation.ts file.
- * @returns True if the file was written, false if it was skipped.
+ * @returns A structured result describing what action was taken.
  */
 export async function scaffoldInstrumentation(
   projectRoot: string,
-  force: boolean,
-): Promise<boolean> {
+): Promise<ScaffoldInstrumentationResult> {
   const filePath = path.join(projectRoot, "instrumentation.ts");
 
-  if (fs.existsSync(filePath) && !force) {
-    return false;
-  }
-
-  const content = `import { registerGlasstrace } from "@glasstrace/sdk";
+  if (!fs.existsSync(filePath)) {
+    const content = `import { registerGlasstrace } from "@glasstrace/sdk";
 
 export async function register() {
   // Glasstrace must be registered before Prisma instrumentation
@@ -49,9 +177,28 @@ export async function register() {
   registerGlasstrace();
 }
 `;
+    fs.writeFileSync(filePath, content, "utf-8");
+    return { action: "created" };
+  }
 
-  fs.writeFileSync(filePath, content, "utf-8");
-  return true;
+  // File exists — check whether registerGlasstrace() is already called.
+  // Uses a helper that strips single-line comments before matching
+  // so that `// registerGlasstrace()` is not treated as a real call.
+  const existing = fs.readFileSync(filePath, "utf-8");
+
+  if (hasRegisterGlasstraceCall(existing)) {
+    return { action: "already-registered" };
+  }
+
+  // Attempt injection into the existing file
+  const result = injectRegisterGlasstrace(existing);
+
+  if (result.injected) {
+    fs.writeFileSync(filePath, result.content, "utf-8");
+    return { action: "injected" };
+  }
+
+  return { action: "unrecognized" };
 }
 
 /**
