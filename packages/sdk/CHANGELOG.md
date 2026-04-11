@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.8.0
+
+### Minor Changes
+
+- ad5e5e2: Init now injects registerGlasstrace() into existing instrumentation.ts files instead of skipping them. Projects with pre-existing Prisma, Sentry, or other instrumentation no longer need to manually add the Glasstrace registration call.
+
 ## 0.7.3
 
 ### Patch Changes
