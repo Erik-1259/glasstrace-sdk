@@ -5,7 +5,7 @@ import { resolveConfig, isProductionDisabled, isAnonymousMode } from "./env-dete
 import type { ResolvedConfig } from "./env-detection.js";
 import { SessionManager } from "./session.js";
 import { getOrCreateAnonKey, readAnonKey } from "./anon-key.js";
-import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig } from "./init-client.js";
+import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig, getLinkedAccountId, getClaimResult } from "./init-client.js";
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
 import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
@@ -144,11 +144,23 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
         let resolvedAnonKey: AnonApiKey | null = null;
         const anonKeyPromise = getOrCreateAnonKey();
 
+        // Derive claim state from the init response.
+        // Called on every discovery request so it reflects the latest state.
+        // Two sources indicate a claimed account:
+        //   1. linkedAccountId — key was already linked to an account
+        //   2. claimResult — a claim just completed during this init call
+        const getClaimState = () => {
+          if (getLinkedAccountId()) return { claimed: true as const };
+          if (getClaimResult()) return { claimed: true as const };
+          return null;
+        };
+
         // Use getResolvedApiKey() for session ID instead of
         // capturing the mutable effectiveKey closure variable.
         discoveryHandler = createDiscoveryHandler(
           async () => resolvedAnonKey,
           () => sessionManager.getSessionId(getResolvedApiKey()),
+          getClaimState,
         );
 
         if (config.verbose) {
@@ -173,6 +185,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             discoveryHandler = createDiscoveryHandler(
               () => Promise.resolve(anonKey),
               () => sessionManager.getSessionId(getResolvedApiKey()),
+              getClaimState,
             );
 
             await backgroundInit(config, anonKey, currentGeneration);

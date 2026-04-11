@@ -83,6 +83,9 @@ export { getOrCreateAnonKey, readAnonKey } from "./anon-key.js";
  *
  * {@link getActiveConfig} returns the current capture config from a three-tier
  * fallback chain: in-memory, file cache, then built-in defaults.
+ *
+ * {@link getLinkedAccountId} returns the `linkedAccountId` from the current
+ * in-memory init response, or `undefined` if unavailable.
  */
 export {
   loadCachedConfig,
@@ -90,6 +93,7 @@ export {
   sendInitRequest,
   performInit,
   getActiveConfig,
+  getLinkedAccountId,
 } from "./init-client.js";
 
 /**
@@ -123,8 +127,17 @@ export type { GlasstraceExporterOptions } from "./enriching-exporter.js";
  * Returns `null` for non-matching paths. On a successful `GET`, responds with the
  * anonymous key and current session ID; other methods or error states return
  * appropriate HTTP error responses. CORS is restricted to known browser extension origins.
+ *
+ * When provided, the `getClaimState` callback includes `claimed` and optional
+ * `accountHint` fields in the response for the browser extension.
  */
 export { createDiscoveryHandler } from "./discovery-endpoint.js";
+
+/**
+ * Claim state shape returned by the `getClaimState` callback passed to
+ * {@link createDiscoveryHandler}.
+ */
+export type { ClaimState } from "./discovery-endpoint.js";
 
 /**
  * {@link registerGlasstrace} is the primary SDK entry point. Call it in

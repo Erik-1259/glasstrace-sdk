@@ -39,11 +39,27 @@ function buildCorsHeaders(origin: string | null): Record<string, string> {
 }
 
 /**
+ * Claim state returned by the `getClaimState` callback.
+ *
+ * - `claimed` — `true` when the anonymous key has been linked to an account.
+ * - `accountHint` — optional masked identifier (e.g. `"er***@example.com"`)
+ *   for the browser extension to display to the user.
+ */
+export interface ClaimState {
+  claimed: boolean;
+  accountHint?: string;
+}
+
+/**
  * Creates a request handler for the `/__glasstrace/config` discovery endpoint.
  *
  * The returned handler checks if the request URL path is `/__glasstrace/config`.
  * If not, returns `null` (pass-through). If it matches, returns a `DiscoveryResponse`
  * with the anonymous key and current session ID.
+ *
+ * When `getClaimState` returns a non-null value with `claimed: true`, the
+ * response includes `claimed` and (optionally) `accountHint` so the browser
+ * extension can prompt the user to sign in.
  *
  * The triple guard (anonymous + dev + active) is enforced by the caller,
  * not by this module. If the handler is registered, it serves.
@@ -51,6 +67,7 @@ function buildCorsHeaders(origin: string | null): Record<string, string> {
 export function createDiscoveryHandler(
   getAnonKey: () => Promise<AnonApiKey | null>,
   getSessionId: () => SessionId,
+  getClaimState?: () => ClaimState | null,
 ): (request: Request) => Promise<Response | null> {
   return async (request: Request): Promise<Response | null> => {
     // Check path match
@@ -109,8 +126,18 @@ export function createDiscoveryHandler(
       // Get the current session ID
       const sessionId = getSessionId();
 
+      // Build response body, conditionally including claim fields
+      const responseBody: Record<string, unknown> = { key: anonKey, sessionId };
+      const claimState = getClaimState?.();
+      if (claimState?.claimed) {
+        responseBody.claimed = true;
+        if (claimState.accountHint) {
+          responseBody.accountHint = claimState.accountHint;
+        }
+      }
+
       return new Response(
-        JSON.stringify({ key: anonKey, sessionId }),
+        JSON.stringify(responseBody),
         {
           status: 200,
           headers: corsHeaders,

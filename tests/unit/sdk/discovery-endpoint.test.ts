@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { DiscoveryResponseSchema } from "@glasstrace/protocol";
 import type { AnonApiKey, SessionId } from "@glasstrace/protocol";
 import { createDiscoveryHandler, isAllowedOrigin, buildCorsHeaders } from "../../../packages/sdk/src/discovery-endpoint.js";
+import type { ClaimState } from "../../../packages/sdk/src/discovery-endpoint.js";
 
 const MOCK_ANON_KEY = ("gt_anon_" + "a".repeat(48)) as AnonApiKey;
 const MOCK_SESSION_ID = "abcdef0123456789" as SessionId;
@@ -10,12 +11,16 @@ function makeHandler(opts?: {
   anonKey?: AnonApiKey | null;
   sessionId?: SessionId;
   getAnonKeyThrows?: boolean;
+  claimState?: ClaimState | null;
 }) {
   const getAnonKey = opts?.getAnonKeyThrows
     ? () => Promise.reject(new Error("filesystem error"))
     : () => Promise.resolve(opts?.anonKey !== undefined ? opts.anonKey : MOCK_ANON_KEY);
   const getSessionId = () => opts?.sessionId ?? MOCK_SESSION_ID;
-  return createDiscoveryHandler(getAnonKey, getSessionId);
+  const getClaimState = opts?.claimState !== undefined
+    ? () => opts.claimState ?? null
+    : undefined;
+  return createDiscoveryHandler(getAnonKey, getSessionId, getClaimState);
 }
 
 function makeRequest(
@@ -271,6 +276,90 @@ describe("Discovery Endpoint (/__glasstrace/config)", () => {
     it("always includes Vary: Origin", () => {
       expect(buildCorsHeaders(null)["Vary"]).toBe("Origin");
       expect(buildCorsHeaders("chrome-extension://abc")["Vary"]).toBe("Origin");
+    });
+  });
+
+  describe("Claim state in discovery response", () => {
+    it("includes claimed: true when getClaimState returns claimed", async () => {
+      const handler = makeHandler({ claimState: { claimed: true } });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      expect(response).not.toBeNull();
+      const body = await response!.json();
+      expect(body.claimed).toBe(true);
+      expect(body.accountHint).toBeUndefined();
+    });
+
+    it("includes claimed and accountHint when both are provided", async () => {
+      const handler = makeHandler({
+        claimState: { claimed: true, accountHint: "er***@example.com" },
+      });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      expect(response).not.toBeNull();
+      const body = await response!.json();
+      expect(body.claimed).toBe(true);
+      expect(body.accountHint).toBe("er***@example.com");
+    });
+
+    it("omits claimed when getClaimState returns null", async () => {
+      const handler = makeHandler({ claimState: null });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      expect(response).not.toBeNull();
+      const body = await response!.json();
+      expect(body.claimed).toBeUndefined();
+      expect(body.accountHint).toBeUndefined();
+    });
+
+    it("omits claimed when getClaimState is not provided", async () => {
+      const handler = makeHandler();
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      expect(response).not.toBeNull();
+      const body = await response!.json();
+      expect(body.claimed).toBeUndefined();
+    });
+
+    it("omits claimed when getClaimState returns claimed: false", async () => {
+      const handler = makeHandler({ claimState: { claimed: false } });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      expect(response).not.toBeNull();
+      const body = await response!.json();
+      expect(body.claimed).toBeUndefined();
+    });
+
+    it("omits accountHint when claimed is true but accountHint is empty string", async () => {
+      const handler = makeHandler({
+        claimState: { claimed: true, accountHint: "" },
+      });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      expect(response).not.toBeNull();
+      const body = await response!.json();
+      expect(body.claimed).toBe(true);
+      expect(body.accountHint).toBeUndefined();
+    });
+
+    it("response with claim state validates against DiscoveryResponseSchema", async () => {
+      const handler = makeHandler({
+        claimState: { claimed: true, accountHint: "er***@example.com" },
+      });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      const body = await response!.json();
+      const result = DiscoveryResponseSchema.safeParse(body);
+      expect(result.success).toBe(true);
+    });
+
+    it("response without claim state validates against DiscoveryResponseSchema", async () => {
+      const handler = makeHandler({ claimState: null });
+      const response = await handler(makeRequest("/__glasstrace/config"));
+
+      const body = await response!.json();
+      const result = DiscoveryResponseSchema.safeParse(body);
+      expect(result.success).toBe(true);
     });
   });
 });
