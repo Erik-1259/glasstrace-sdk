@@ -22,6 +22,8 @@ function createTmpProject(opts: { withAnonKey?: boolean } = {}): string {
     path.join(dir, "package.json"),
     JSON.stringify({ name: "test-project" }),
   );
+  // next.config.ts is required for resolveProjectRoot to classify this as a Next.js app
+  fs.writeFileSync(path.join(dir, "next.config.ts"), "export default {};\n");
   if (opts.withAnonKey !== false) {
     const glasstraceDir = path.join(dir, ".glasstrace");
     fs.mkdirSync(glasstraceDir, { recursive: true });

@@ -21,6 +21,7 @@ function createTmpProject(): string {
   return dir;
 }
 
+
 beforeEach(() => {
   tmpDir = createTmpProject();
 });
@@ -505,6 +506,13 @@ describe("scaffoldGitignore", () => {
 });
 
 describe("runInit — CLI flow", () => {
+  // runInit requires a Next.js config to pass monorepo classification
+  beforeEach(() => {
+    if (!fs.existsSync(path.join(tmpDir, "next.config.ts"))) {
+      fs.writeFileSync(path.join(tmpDir, "next.config.ts"), "export default {};\n");
+    }
+  });
+
   it("scaffolds all files in a project", async () => {
     fs.writeFileSync(
       path.join(tmpDir, "next.config.js"),
@@ -523,7 +531,7 @@ describe("runInit — CLI flow", () => {
     expect(gitignore).toContain(".glasstrace/");
   });
 
-  it("error case: exits with code 1 when no package.json", async () => {
+  it("error case: exits with code 1 when no package.json and no next.config", async () => {
     const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "glasstrace-cli-empty-"));
     try {
       const result = await runInit({
@@ -533,8 +541,25 @@ describe("runInit — CLI flow", () => {
       });
       expect(result.exitCode).toBe(1);
       expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors.some((e: string) => e.includes("No Next.js project found"))).toBe(true);
     } finally {
       fs.rmSync(emptyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("error case: exits with code 1 when next.config exists but no package.json", async () => {
+    const noPackageDir = fs.mkdtempSync(path.join(os.tmpdir(), "glasstrace-cli-nopkg-"));
+    try {
+      fs.writeFileSync(path.join(noPackageDir, "next.config.ts"), "export default {};\n");
+      const result = await runInit({
+        projectRoot: noPackageDir,
+        yes: true,
+        coverageMap: false,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.errors.some((e: string) => e.includes("No package.json found"))).toBe(true);
+    } finally {
+      fs.rmSync(noPackageDir, { recursive: true, force: true });
     }
   });
 
@@ -585,16 +610,6 @@ describe("runInit — CLI flow", () => {
     const envLocal = fs.readFileSync(path.join(tmpDir, ".env.local"), "utf-8");
     const envMatches = envLocal.match(/GLASSTRACE_API_KEY/g);
     expect(envMatches?.length).toBe(1);
-  });
-
-  it("error case: prints warning when no next.config.* found", async () => {
-    const result = await runInit({
-      projectRoot: tmpDir,
-      yes: true,
-      coverageMap: false,
-    });
-    expect(result.exitCode).toBe(0);
-    expect(result.warnings.some((w: string) => w.toLowerCase().includes("next.config"))).toBe(true);
   });
 
   it("adds GLASSTRACE_COVERAGE_MAP=true when coverageMap enabled", async () => {
@@ -681,6 +696,13 @@ describe("scaffoldMcpMarker", () => {
 });
 
 describe("runInit — MCP auto-configuration", () => {
+  // runInit requires a Next.js config to pass monorepo classification
+  beforeEach(() => {
+    if (!fs.existsSync(path.join(tmpDir, "next.config.ts"))) {
+      fs.writeFileSync(path.join(tmpDir, "next.config.ts"), "export default {};\n");
+    }
+  });
+
   // Tests that exercise the interactive (non-CI) agent detection path need
   // to ensure CI is not set, since GitHub Actions sets CI=true by default.
   let savedCI: string | undefined;
