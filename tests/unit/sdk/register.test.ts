@@ -616,6 +616,35 @@ describe("registerGlasstrace() Orchestrator", () => {
       //   2. After claim propagation in backgroundInit
       expect(notifySpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
+
+    it("should report claimed via discovery when claimResult is present but linkedAccountId is absent", async () => {
+      // Regression test: getClaimState must check claimResult as a fallback,
+      // not only linkedAccountId. A valid init response can include claimResult
+      // (claim happening NOW) without linkedAccountId being set yet.
+      process.env.NODE_ENV = "development";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "info").mockImplementation(() => {});
+
+      // Mock init response with claimResult but NO linkedAccountId
+      vi.stubGlobal("fetch", createMockInitResponseWithClaim());
+
+      registerGlasstrace();
+
+      await waitForBackgroundWork(400);
+
+      const handler = getDiscoveryHandler();
+      expect(handler).not.toBeNull();
+
+      const request = new Request("http://localhost:3000/__glasstrace/config", {
+        method: "GET",
+      });
+      const response = await handler!(request);
+      expect(response).not.toBeNull();
+      expect(response!.status).toBe(200);
+
+      const body = await response!.json();
+      expect(body.claimed).toBe(true);
+    });
   });
 
   describe("Non-Node.js environment guard", () => {

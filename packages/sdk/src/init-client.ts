@@ -415,6 +415,29 @@ export function getActiveConfig(): CaptureConfig {
 }
 
 /**
+ * Returns the `linkedAccountId` from the current in-memory init response,
+ * or `undefined` if no init response is available or no account is linked.
+ *
+ * Used by the discovery endpoint to determine whether `claimed: true`
+ * should be included in the response.
+ */
+export function getLinkedAccountId(): string | undefined {
+  return currentConfig?.linkedAccountId;
+}
+
+/**
+ * Returns the `claimResult` from the current in-memory init response,
+ * or `undefined` if no init response is available or no claim occurred.
+ *
+ * Used by the discovery endpoint to detect in-flight claims: a valid
+ * init response can include `claimResult` (claim happening NOW) without
+ * `linkedAccountId` being set yet.
+ */
+export function getClaimResult(): SdkInitResponse["claimResult"] {
+  return currentConfig?.claimResult;
+}
+
+/**
  * Resets the in-memory config store. For testing only.
  */
 export function _resetConfigForTesting(): void {

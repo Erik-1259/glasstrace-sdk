@@ -84,6 +84,8 @@ export type SdkInitResponse = z.infer<typeof SdkInitResponseSchema>;
 export const DiscoveryResponseSchema = z.object({
   key: AnonApiKeySchema,
   sessionId: SessionIdSchema,
+  claimed: z.boolean().optional(),
+  accountHint: z.string().optional(),
 });
 export type DiscoveryResponse = z.infer<typeof DiscoveryResponseSchema>;
 
