@@ -11,7 +11,7 @@ import {
   scaffoldMcpMarker,
   addCoverageMapEnv,
 } from "../../../packages/sdk/src/cli/scaffolder.js";
-import { runInit } from "../../../packages/sdk/src/cli/init.js";
+import { runInit, meetsNodeVersion } from "../../../packages/sdk/src/cli/init.js";
 
 let tmpDir: string;
 
@@ -867,5 +867,27 @@ describe("runInit — MCP auto-configuration", () => {
     } finally {
       restoreCI();
     }
+  });
+});
+
+describe("meetsNodeVersion", () => {
+  it("returns true when current Node.js major version meets the minimum", () => {
+    // The test runner itself is Node >= 20, so this should pass
+    expect(meetsNodeVersion(20)).toBe(true);
+  });
+
+  it("returns true when minimum is lower than current version", () => {
+    expect(meetsNodeVersion(14)).toBe(true);
+    expect(meetsNodeVersion(16)).toBe(true);
+    expect(meetsNodeVersion(18)).toBe(true);
+  });
+
+  it("returns false when minimum exceeds current version", () => {
+    // No shipping Node version has major version 999
+    expect(meetsNodeVersion(999)).toBe(false);
+  });
+
+  it("returns true when minimum is exactly 0", () => {
+    expect(meetsNodeVersion(0)).toBe(true);
   });
 });
