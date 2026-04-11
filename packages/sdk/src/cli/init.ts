@@ -16,8 +16,15 @@ import { detectAgents } from "../agent-detection/detect.js";
 import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
 import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
-import { MCP_ENDPOINT, formatAgentName } from "./constants.js";
+import { MCP_ENDPOINT, NEXT_CONFIG_NAMES, formatAgentName } from "./constants.js";
 import { resolveProjectRoot } from "./monorepo.js";
+import {
+  isInitCreatedInstrumentation,
+  removeRegisterGlasstrace,
+  unwrapExport,
+  unwrapCJSExport,
+  removeGlasstraceConfigImport,
+} from "./uninit.js";
 
 /**
  * Returns true if the current Node.js major version meets the minimum requirement.
@@ -72,6 +79,138 @@ async function promptYesNo(question: string, defaultValue: boolean): Promise<boo
 }
 
 /**
+ * Identifies a scaffolding step that can be reversed during rollback.
+ * Steps are tracked in execution order and rolled back in reverse.
+ */
+type CompletedStep = "instrumentation" | "next-config" | "env-local" | "gitignore";
+
+/**
+ * Tracks state needed for accurate rollback of init steps.
+ * Separating this from the step list allows rollback to restore
+ * original file content rather than doing surgical removal.
+ */
+interface RollbackState {
+  steps: CompletedStep[];
+  /** Original instrumentation.ts content saved before injection.
+   *  When present, rollback restores this instead of using removeRegisterGlasstrace. */
+  originalInstrumentationContent?: string;
+}
+
+/**
+ * Removes leading blank lines that can appear after removing import lines.
+ * Duplicated from uninit.ts to avoid exporting a trivial utility.
+ */
+function cleanLeadingBlankLines(content: string): string {
+  return content.replace(/^\n{2,}/, "\n");
+}
+
+/**
+ * Best-effort rollback of completed init steps in reverse order.
+ * Each step is individually try/caught so that a failure in one
+ * rollback does not prevent the remaining steps from being attempted.
+ *
+ * @internal Exported for unit testing only.
+ */
+export async function rollbackSteps(
+  steps: CompletedStep[],
+  projectRoot: string,
+  state?: Omit<RollbackState, "steps">,
+): Promise<void> {
+  for (const step of [...steps].reverse()) {
+    try {
+      switch (step) {
+        case "instrumentation": {
+          const instrPath = path.join(projectRoot, "instrumentation.ts");
+          if (fs.existsSync(instrPath)) {
+            const content = fs.readFileSync(instrPath, "utf-8");
+            if (isInitCreatedInstrumentation(content)) {
+              fs.unlinkSync(instrPath);
+            } else if (state?.originalInstrumentationContent !== undefined) {
+              // Restore the exact original content to avoid removing
+              // pre-existing imports that removeRegisterGlasstrace would strip.
+              fs.writeFileSync(instrPath, state.originalInstrumentationContent, "utf-8");
+            } else {
+              const cleaned = removeRegisterGlasstrace(content);
+              if (cleaned !== content) {
+                fs.writeFileSync(instrPath, cleaned, "utf-8");
+              }
+            }
+          }
+          break;
+        }
+        case "next-config": {
+          for (const name of NEXT_CONFIG_NAMES) {
+            const configPath = path.join(projectRoot, name);
+            if (!fs.existsSync(configPath)) {
+              continue;
+            }
+            const content = fs.readFileSync(configPath, "utf-8");
+            if (!content.includes("withGlasstraceConfig")) {
+              continue;
+            }
+            const isESM = name.endsWith(".ts") || name.endsWith(".mjs");
+            const unwrapResult = isESM
+              ? unwrapExport(content)
+              : unwrapCJSExport(content);
+            if (unwrapResult.unwrapped) {
+              const cleaned = removeGlasstraceConfigImport(unwrapResult.content);
+              fs.writeFileSync(configPath, cleanLeadingBlankLines(cleaned), "utf-8");
+            }
+            break;
+          }
+          break;
+        }
+        case "env-local": {
+          // Only remove GLASSTRACE_API_KEY lines — scaffoldEnvLocal (step 5)
+          // only adds the API key. Removing GLASSTRACE_COVERAGE_MAP here would
+          // delete a user's pre-existing coverage map setting if init fails
+          // after step 5 but before the coverage map step.
+          const envPath = path.join(projectRoot, ".env.local");
+          if (fs.existsSync(envPath)) {
+            const content = fs.readFileSync(envPath, "utf-8");
+            const lines = content.split("\n");
+            const filtered = lines.filter((line) => {
+              const trimmed = line.trim();
+              return !/^\s*#?\s*GLASSTRACE_API_KEY\s*=/.test(trimmed);
+            });
+            if (filtered.length !== lines.length) {
+              const result = filtered.join("\n");
+              if (result.trim().length === 0) {
+                fs.unlinkSync(envPath);
+              } else {
+                fs.writeFileSync(envPath, result, "utf-8");
+              }
+            }
+          }
+          break;
+        }
+        case "gitignore": {
+          const gitignorePath = path.join(projectRoot, ".gitignore");
+          if (fs.existsSync(gitignorePath)) {
+            const content = fs.readFileSync(gitignorePath, "utf-8");
+            const lines = content.split("\n");
+            const filtered = lines.filter(
+              (line) => line.trim() !== ".glasstrace/",
+            );
+            if (filtered.length !== lines.length) {
+              const result = filtered.join("\n");
+              if (result.trim().length === 0) {
+                fs.unlinkSync(gitignorePath);
+              } else {
+                fs.writeFileSync(gitignorePath, result, "utf-8");
+              }
+            }
+          }
+          break;
+        }
+      }
+    } catch {
+      // Best-effort rollback — log nothing, continue with remaining steps
+    }
+  }
+}
+
+/**
  * Core init logic. Exported for testability — the CLI entry point at the
  * bottom calls this function and translates the result to process.exit().
  */
@@ -101,15 +240,30 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     return { exitCode: 1, summary, warnings, errors };
   }
 
+  // Track completed steps so we can roll them back if a later step fails.
+  // Only steps that modify the filesystem are tracked — pre-existing state
+  // (e.g., "already-registered") is never rolled back.
+  const rollbackState: RollbackState = { steps: [] };
+
   // Step 2: Ensure instrumentation.ts has registerGlasstrace()
   try {
+    // Save original content before scaffolding modifies the file.
+    // This allows rollback to restore exactly what was there, rather than
+    // relying on surgical removal (which can strip pre-existing imports).
+    const instrPath = path.join(projectRoot, "instrumentation.ts");
+    if (fs.existsSync(instrPath)) {
+      rollbackState.originalInstrumentationContent = fs.readFileSync(instrPath, "utf-8");
+    }
+
     const instrResult = await scaffoldInstrumentation(projectRoot);
     switch (instrResult.action) {
       case "created":
         summary.push("Created instrumentation.ts");
+        rollbackState.steps.push("instrumentation");
         break;
       case "injected":
         summary.push("Added registerGlasstrace() to existing instrumentation.ts");
+        rollbackState.steps.push("instrumentation");
         break;
       case "already-registered":
         summary.push("Skipped instrumentation.ts (registerGlasstrace already present)");
@@ -125,6 +279,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
         break;
     }
   } catch (err) {
+    await rollbackSteps(rollbackState.steps, projectRoot, rollbackState);
     errors.push(`Failed to write instrumentation.ts: ${err instanceof Error ? err.message : String(err)}`);
     return { exitCode: 1, summary, warnings, errors };
   }
@@ -134,6 +289,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     const configResult = await scaffoldNextConfig(projectRoot);
     if (configResult?.modified) {
       summary.push("Wrapped next.config with withGlasstraceConfig()");
+      rollbackState.steps.push("next-config");
     } else if (configResult === null) {
       warnings.push("No next.config.* found. You may need to create one for Next.js projects.");
     } else if (configResult.reason === "already-wrapped") {
@@ -144,6 +300,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       warnings.push("next.config has no recognizable export pattern — add withGlasstraceConfig() manually");
     }
   } catch (err) {
+    await rollbackSteps(rollbackState.steps, projectRoot, rollbackState);
     errors.push(`Failed to modify next.config: ${err instanceof Error ? err.message : String(err)}`);
     return { exitCode: 1, summary, warnings, errors };
   }
@@ -153,10 +310,12 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     const envCreated = await scaffoldEnvLocal(projectRoot);
     if (envCreated) {
       summary.push("Updated .env.local with Glasstrace configuration");
+      rollbackState.steps.push("env-local");
     } else {
       summary.push("Skipped .env.local (GLASSTRACE_API_KEY already configured)");
     }
   } catch (err) {
+    await rollbackSteps(rollbackState.steps, projectRoot, rollbackState);
     errors.push(`Failed to update .env.local: ${err instanceof Error ? err.message : String(err)}`);
     return { exitCode: 1, summary, warnings, errors };
   }
@@ -166,10 +325,12 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     const gitignoreUpdated = await scaffoldGitignore(projectRoot);
     if (gitignoreUpdated) {
       summary.push("Updated .gitignore with .glasstrace/");
+      rollbackState.steps.push("gitignore");
     } else {
       summary.push("Skipped .gitignore (.glasstrace/ already listed)");
     }
   } catch (err) {
+    await rollbackSteps(rollbackState.steps, projectRoot, rollbackState);
     errors.push(`Failed to update .gitignore: ${err instanceof Error ? err.message : String(err)}`);
     return { exitCode: 1, summary, warnings, errors };
   }
