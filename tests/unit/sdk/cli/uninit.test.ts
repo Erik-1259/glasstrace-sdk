@@ -13,6 +13,8 @@ import {
   processJsonMcpConfig,
   processTomlMcpConfig,
   findMatchingParen,
+  findMatchingDelimiter,
+  skipString,
 } from "../../../../packages/sdk/src/cli/uninit.js";
 import {
   wrapExport,
@@ -68,6 +70,116 @@ describe("findMatchingParen", () => {
 
   it("finds inner paren match", () => {
     expect(findMatchingParen("(a(b)c)", 2)).toBe(4);
+  });
+
+  it("skips parentheses inside double-quoted strings", () => {
+    // The ) inside the string should not count as a match
+    const text = '(a, ")b)", c)';
+    expect(findMatchingParen(text, 0)).toBe(text.length - 1);
+  });
+
+  it("skips parentheses inside single-quoted strings", () => {
+    const text = "(a, ')b)', c)";
+    expect(findMatchingParen(text, 0)).toBe(text.length - 1);
+  });
+
+  it("skips parentheses inside template literals", () => {
+    const text = "(a, `)b)`, c)";
+    expect(findMatchingParen(text, 0)).toBe(text.length - 1);
+  });
+
+  it("skips parentheses inside single-line comments", () => {
+    const text = "(a,\n// ) not a match\nc)";
+    expect(findMatchingParen(text, 0)).toBe(text.length - 1);
+  });
+
+  it("skips parentheses inside block comments", () => {
+    const text = "(a, /* ) not a match */ c)";
+    expect(findMatchingParen(text, 0)).toBe(text.length - 1);
+  });
+
+  it("handles escaped quotes inside strings", () => {
+    // String contains \" so the ) after it is still inside the string
+    const text = '(a, "\\")still string)", c)';
+    expect(findMatchingParen(text, 0)).toBe(text.length - 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMatchingDelimiter (brace variant)
+// ---------------------------------------------------------------------------
+
+describe("findMatchingDelimiter (braces)", () => {
+  it("finds matching brace for simple expression", () => {
+    expect(findMatchingDelimiter("{abc}", 0, "{", "}")).toBe(4);
+  });
+
+  it("skips braces inside strings", () => {
+    const text = '{ key: "}" }';
+    expect(findMatchingDelimiter(text, 0, "{", "}")).toBe(text.length - 1);
+  });
+
+  it("skips braces inside single-line comments", () => {
+    const text = "{\n// } not a match\n}";
+    expect(findMatchingDelimiter(text, 0, "{", "}")).toBe(text.length - 1);
+  });
+
+  it("skips braces inside block comments", () => {
+    const text = "{ /* } not a match */ }";
+    expect(findMatchingDelimiter(text, 0, "{", "}")).toBe(text.length - 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// skipString
+// ---------------------------------------------------------------------------
+
+describe("skipString", () => {
+  it("skips a simple double-quoted string", () => {
+    expect(skipString('"hello" rest', 0, '"')).toBe(7);
+  });
+
+  it("handles escaped quotes", () => {
+    expect(skipString('"he\\"llo" rest', 0, '"')).toBe(9);
+  });
+
+  it("returns text.length for unterminated string", () => {
+    expect(skipString('"unterminated', 0, '"')).toBe(13);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unwrapExport with string-containing parens
+// ---------------------------------------------------------------------------
+
+describe("unwrapExport with string-embedded delimiters", () => {
+  it("correctly unwraps config containing ) inside a string value", () => {
+    const input = 'export default withGlasstraceConfig({ output: ")" });\n';
+    const result = unwrapExport(input);
+    expect(result.unwrapped).toBe(true);
+    expect(result.content).toContain('export default { output: ")" };\n');
+    expect(result.content).not.toContain("withGlasstraceConfig");
+  });
+
+  it("correctly unwraps config containing ( and ) inside string values", () => {
+    const input =
+      'export default withGlasstraceConfig({ regex: "(foo)" });\n';
+    const result = unwrapExport(input);
+    expect(result.unwrapped).toBe(true);
+    expect(result.content).toContain('export default { regex: "(foo)" };\n');
+  });
+
+  it("correctly unwraps config with single-line comment containing )", () => {
+    const input = [
+      "export default withGlasstraceConfig({",
+      "  // output: ) not a real paren",
+      "  reactStrictMode: true,",
+      "});",
+    ].join("\n");
+    const result = unwrapExport(input);
+    expect(result.unwrapped).toBe(true);
+    expect(result.content).toContain("reactStrictMode: true");
+    expect(result.content).not.toContain("withGlasstraceConfig");
   });
 });
 
@@ -1133,5 +1245,85 @@ export async function register() {
     expect(result.exitCode).toBe(0);
     expect(fs.existsSync(path.join(dir, ".env.local"))).toBe(false);
     expect(result.summary.some((s) => s.includes("Deleted .env.local"))).toBe(true);
+  });
+
+  it("Windsurf summary includes full path for deleted config", async () => {
+    const dir = createTmpProject();
+    // Create Windsurf marker so the code processes the global config
+    fs.writeFileSync(path.join(dir, ".windsurfrules"), "");
+
+    // Override HOME so os.homedir() returns a temp directory, avoiding
+    // any interaction with the real user's Windsurf config
+    const fakeHome = createTmpDir();
+    const originalHome = process.env["HOME"];
+    process.env["HOME"] = fakeHome;
+
+    try {
+      const windsurfDir = path.join(fakeHome, ".codeium", "windsurf");
+      fs.mkdirSync(windsurfDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(windsurfDir, "mcp_config.json"),
+        JSON.stringify(
+          {
+            mcpServers: {
+              glasstrace: { url: "https://api.glasstrace.dev/mcp" },
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const result = await runUninit({ projectRoot: dir, dryRun: true });
+      expect(result.exitCode).toBe(0);
+
+      const windsurfSummary = result.summary.find((s) =>
+        s.includes("Windsurf"),
+      );
+      expect(windsurfSummary).toBeDefined();
+      expect(windsurfSummary).toContain("~/.codeium/windsurf/mcp_config.json");
+      expect(windsurfSummary).toContain("Deleted global Windsurf config");
+    } finally {
+      process.env["HOME"] = originalHome;
+    }
+  });
+
+  it("Windsurf summary includes full path for removed key", async () => {
+    const dir = createTmpProject();
+    fs.writeFileSync(path.join(dir, ".windsurfrules"), "");
+
+    const fakeHome = createTmpDir();
+    const originalHome = process.env["HOME"];
+    process.env["HOME"] = fakeHome;
+
+    try {
+      const windsurfDir = path.join(fakeHome, ".codeium", "windsurf");
+      fs.mkdirSync(windsurfDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(windsurfDir, "mcp_config.json"),
+        JSON.stringify(
+          {
+            mcpServers: {
+              glasstrace: { url: "https://api.glasstrace.dev/mcp" },
+              other: { url: "https://other.dev/mcp" },
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const result = await runUninit({ projectRoot: dir, dryRun: true });
+      expect(result.exitCode).toBe(0);
+
+      const windsurfSummary = result.summary.find((s) =>
+        s.includes("Windsurf"),
+      );
+      expect(windsurfSummary).toBeDefined();
+      expect(windsurfSummary).toContain("~/.codeium/windsurf/mcp_config.json");
+      expect(windsurfSummary).toContain("Removed glasstrace");
+    } finally {
+      process.env["HOME"] = originalHome;
+    }
   });
 });
