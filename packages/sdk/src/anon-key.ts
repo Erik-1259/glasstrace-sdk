@@ -80,15 +80,20 @@ export async function getOrCreateAnonKey(projectRoot?: string): Promise<AnonApiK
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "EEXIST") {
-      // Another process won the race — read their key. The winner's
-      // writeFile is atomic at the filesystem level (single write syscall
-      // for small payloads like a 56-char key), so one immediate retry
-      // is sufficient.
-      const winnerKey = await readAnonKey(root);
-      if (winnerKey !== null) {
-        return winnerKey;
+      // Another process won the race. Retry reading their key with
+      // short delays — the winner's writeFile is atomic for small
+      // payloads but the filesystem may not have flushed yet.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const winnerKey = await readAnonKey(root);
+        if (winnerKey !== null) {
+          return winnerKey;
+        }
+        // Short delay before next retry (50ms), skip after final attempt
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
       }
-      // File exists but content is invalid after retries — overwrite it.
+      // All retries exhausted — overwrite as last resort.
       // Use explicit chmod after overwrite since writeFile mode only
       // applies on creation on some platforms.
       try {
