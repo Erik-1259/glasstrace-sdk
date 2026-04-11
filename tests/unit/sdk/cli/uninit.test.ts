@@ -14,6 +14,10 @@ import {
   processTomlMcpConfig,
   findMatchingParen,
 } from "../../../../packages/sdk/src/cli/uninit.js";
+import {
+  wrapExport,
+  wrapCJSExport,
+} from "../../../../packages/sdk/src/cli/scaffolder.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -583,6 +587,145 @@ describe("processTomlMcpConfig", () => {
     ].join("\n");
     const result = processTomlMcpConfig(content);
     expect(result.action).toBe("skipped");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-trip wrap/unwrap symmetry
+// ---------------------------------------------------------------------------
+
+/**
+ * Simulates the full wrap pipeline that scaffoldNextConfig performs for ESM:
+ * add import line, blank line separator, then the wrapped content.
+ */
+function simulateESMWrap(original: string): string {
+  const importLine = 'import { withGlasstraceConfig } from "@glasstrace/sdk";\n';
+  const wrapResult = wrapExport(original);
+  if (!wrapResult.wrapped) {
+    throw new Error("wrapExport failed — no export default found");
+  }
+  return importLine + "\n" + wrapResult.content;
+}
+
+/**
+ * Simulates the full unwrap pipeline that runUninit performs for ESM:
+ * unwrap the export, remove the import line, clean leading blank lines.
+ */
+function simulateESMUnwrap(wrapped: string): string {
+  const unwrapResult = unwrapExport(wrapped);
+  if (!unwrapResult.unwrapped) {
+    throw new Error("unwrapExport failed — no withGlasstraceConfig found");
+  }
+  const cleaned = removeGlasstraceConfigImport(unwrapResult.content);
+  // Match the cleanLeadingBlankLines behavior from uninit.ts
+  return cleaned.replace(/^\n{2,}/, "\n");
+}
+
+/**
+ * Simulates the full wrap pipeline that scaffoldNextConfig performs for CJS:
+ * add require line, blank line separator, then the wrapped content.
+ */
+function simulateCJSWrap(original: string): string {
+  const requireLine = 'const { withGlasstraceConfig } = require("@glasstrace/sdk");\n';
+  const wrapResult = wrapCJSExport(original);
+  if (!wrapResult.wrapped) {
+    throw new Error("wrapCJSExport failed — no module.exports found");
+  }
+  return requireLine + "\n" + wrapResult.content;
+}
+
+/**
+ * Simulates the full unwrap pipeline that runUninit performs for CJS:
+ * unwrap the export, remove the require line, clean leading blank lines.
+ */
+function simulateCJSUnwrap(wrapped: string): string {
+  const unwrapResult = unwrapCJSExport(wrapped);
+  if (!unwrapResult.unwrapped) {
+    throw new Error("unwrapCJSExport failed — no withGlasstraceConfig found");
+  }
+  const cleaned = removeGlasstraceConfigImport(unwrapResult.content);
+  return cleaned.replace(/^\n{2,}/, "\n");
+}
+
+/**
+ * Normalizes whitespace for structural comparison: trims leading/trailing
+ * whitespace and collapses multiple consecutive blank lines into one.
+ * This allows the test to accept minor whitespace differences while
+ * ensuring the logical structure is preserved.
+ */
+function normalize(s: string): string {
+  return s.trim().replace(/\n{3,}/g, "\n\n");
+}
+
+describe("round-trip wrap/unwrap symmetry", () => {
+  it("ESM identifier: export default nextConfig", () => {
+    const original = "const nextConfig = {};\nexport default nextConfig;\n";
+    const wrapped = simulateESMWrap(original);
+    const restored = simulateESMUnwrap(wrapped);
+
+    expect(normalize(restored)).toBe(normalize(original));
+    expect(restored).not.toContain("withGlasstraceConfig");
+    expect(restored).not.toContain("@glasstrace/sdk");
+  });
+
+  it("ESM object literal: export default { reactStrictMode: true }", () => {
+    const original = "export default { reactStrictMode: true };\n";
+    const wrapped = simulateESMWrap(original);
+    const restored = simulateESMUnwrap(wrapped);
+
+    expect(normalize(restored)).toBe(normalize(original));
+    expect(restored).not.toContain("withGlasstraceConfig");
+    expect(restored).not.toContain("@glasstrace/sdk");
+  });
+
+  it("ESM multiline object: export default with multiple properties", () => {
+    const original = [
+      "const nextConfig = {",
+      "  reactStrictMode: true,",
+      "  swcMinify: true,",
+      "  images: {",
+      '    domains: ["example.com"],',
+      "  },",
+      "};",
+      "",
+      "export default nextConfig;",
+      "",
+    ].join("\n");
+    const wrapped = simulateESMWrap(original);
+    const restored = simulateESMUnwrap(wrapped);
+
+    expect(normalize(restored)).toBe(normalize(original));
+    expect(restored).toContain("reactStrictMode: true");
+    expect(restored).toContain("swcMinify: true");
+    expect(restored).toContain("export default nextConfig;");
+    expect(restored).not.toContain("withGlasstraceConfig");
+  });
+
+  it("CJS: module.exports = nextConfig", () => {
+    const original = "const nextConfig = {};\nmodule.exports = nextConfig;\n";
+    const wrapped = simulateCJSWrap(original);
+    const restored = simulateCJSUnwrap(wrapped);
+
+    expect(normalize(restored)).toBe(normalize(original));
+    expect(restored).not.toContain("withGlasstraceConfig");
+    expect(restored).not.toContain("@glasstrace/sdk");
+  });
+
+  it("CJS with nested call: module.exports = withBundleAnalyzer(config)", () => {
+    const original = [
+      'const withBundleAnalyzer = require("@next/bundle-analyzer")();',
+      "const config = { reactStrictMode: true };",
+      "",
+      "module.exports = withBundleAnalyzer(config);",
+      "",
+    ].join("\n");
+    const wrapped = simulateCJSWrap(original);
+    const restored = simulateCJSUnwrap(wrapped);
+
+    expect(normalize(restored)).toBe(normalize(original));
+    expect(restored).toContain("withBundleAnalyzer(config)");
+    expect(restored).not.toContain("withGlasstraceConfig");
+    expect(restored).not.toContain("@glasstrace/sdk");
   });
 });
 
