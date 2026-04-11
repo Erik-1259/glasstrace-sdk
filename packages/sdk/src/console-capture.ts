@@ -6,6 +6,8 @@
  * log messages (prefixed with "[glasstrace]") are never captured.
  */
 
+import { maybeShowMcpNudge } from "./nudge/error-nudge.js";
+
 /**
  * Module-level flag to suppress capture of SDK-internal log messages.
  * Set to `true` before calling `console.warn`/`console.error` from SDK code,
@@ -86,9 +88,16 @@ export async function installConsoleCapture(): Promise<void> {
     if (otelApi) {
       const span = otelApi.trace.getSpan(otelApi.context.active());
       if (span) {
+        const formattedMessage = formatArgs(args);
         span.addEvent("console.error", {
-          "console.message": formatArgs(args),
+          "console.message": formattedMessage,
         });
+        // Show one-time MCP connection nudge on first captured error
+        try {
+          maybeShowMcpNudge(formattedMessage);
+        } catch {
+          // Never allow the monkey-patched console.error wrapper to throw
+        }
       }
     }
   };

@@ -33,9 +33,11 @@ export function maybeShowMcpNudge(errorSummary: string): void {
     return;
   }
 
-  // Production check — suppress silently
+  // Production check — suppress silently, but remember the decision
+  // so subsequent calls fast-exit via hasFired without re-running I/O.
   const config = resolveConfig();
   if (isProductionDisabled(config)) {
+    hasFired = true;
     return;
   }
 
@@ -51,6 +53,7 @@ export function maybeShowMcpNudge(errorSummary: string): void {
   }
 
   if (markerExists) {
+    hasFired = true;
     return;
   }
 

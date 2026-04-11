@@ -181,4 +181,63 @@ describe("maybeShowMcpNudge", () => {
 
     expect(stderrSpy).toHaveBeenCalledOnce();
   });
+
+  it("sets hasFired on production early-return so resolveConfig is not called again", async () => {
+    const resolveConfigSpy = vi.fn(() => ({
+      apiKey: undefined,
+      endpoint: "https://api.glasstrace.dev",
+      forceEnable: false,
+      verbose: false,
+      environment: undefined,
+      coverageMapEnabled: false,
+      nodeEnv: "production",
+      vercelEnv: undefined,
+    }));
+
+    vi.doMock("../../../../packages/sdk/src/env-detection.js", () => ({
+      resolveConfig: resolveConfigSpy,
+      isProductionDisabled: (config: { forceEnable: boolean; nodeEnv?: string; vercelEnv?: string }) => {
+        if (config.forceEnable) return false;
+        if (config.nodeEnv === "production") return true;
+        if (config.vercelEnv === "production") return true;
+        return false;
+      },
+    }));
+
+    try {
+      const maybeShowMcpNudge = await loadModule();
+
+      // First call: resolveConfig runs, detects production, sets hasFired
+      maybeShowMcpNudge("first error");
+      expect(resolveConfigSpy).toHaveBeenCalledOnce();
+      expect(stderrSpy).not.toHaveBeenCalled();
+
+      // Second call: hasFired is true, fast-exits without calling resolveConfig
+      maybeShowMcpNudge("second error");
+      expect(resolveConfigSpy).toHaveBeenCalledOnce(); // still 1, not 2
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("../../../../packages/sdk/src/env-detection.js");
+    }
+  });
+
+  it("sets hasFired on marker-exists early-return so resolveConfig is not called again", async () => {
+    // Create marker file
+    const glasstraceDir = join(tempDir, ".glasstrace");
+    mkdirSync(glasstraceDir, { recursive: true });
+    writeFileSync(join(glasstraceDir, "mcp-connected"), "");
+
+    const maybeShowMcpNudge = await loadModule();
+
+    // First call: marker exists, sets hasFired, suppresses nudge
+    maybeShowMcpNudge("first error");
+    expect(stderrSpy).not.toHaveBeenCalled();
+
+    // Remove marker to prove second call doesn't re-check filesystem
+    rmSync(join(glasstraceDir, "mcp-connected"));
+
+    // Second call: hasFired is true, fast-exits even though marker is gone
+    maybeShowMcpNudge("second error");
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
 });
