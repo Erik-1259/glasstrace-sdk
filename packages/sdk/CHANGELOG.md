@@ -1,5 +1,13 @@
 # @glasstrace/sdk
 
+## 0.9.1
+
+### Patch Changes
+
+- 766acd1: Added `sideEffects` field to package.json to enable bundler tree-shaking of unused exports.
+- 83f7904: Fixed race condition in anonymous key creation where concurrent cold starts could end up with different keys.
+- 37f5358: MCP connection nudge now fires on the first captured console.error, not just on explicit captureError() calls.
+
 ## 0.9.0
 
 ### Minor Changes
