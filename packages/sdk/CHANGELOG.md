@@ -1,5 +1,15 @@
 # @glasstrace/sdk
 
+## 0.12.0
+
+### Minor Changes
+
+- 879c6ef: SDK runtime modules no longer crash in non-Node environments. Session ID derivation falls back to a deterministic hash when node:crypto is unavailable. File-system operations use dynamic imports to avoid bundler failures.
+
+### Patch Changes
+
+- 005db52: Init now automatically rolls back completed scaffolding steps when a later step fails, preventing half-configured projects.
+
 ## 0.11.0
 
 ### Patch Changes
