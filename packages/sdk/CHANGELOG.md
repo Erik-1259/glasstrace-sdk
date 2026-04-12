@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.12.5
+
+### Patch Changes
+
+- 570add7: Fix error status code inference for Next.js dev server timing race (DISC-1134) and add trace pipeline diagnostics in verbose mode for DISC-1133 investigation.
+
 ## 0.12.4
 
 ### Patch Changes
