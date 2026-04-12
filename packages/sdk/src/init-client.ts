@@ -12,6 +12,7 @@ import type {
   SdkDiagnosticCode,
 } from "@glasstrace/protocol";
 import type { ResolvedConfig } from "./env-detection.js";
+import { recordInitFailure, recordConfigSync, acknowledgeHealthReport } from "./health-collector.js";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const CONFIG_FILE = "config";
@@ -94,6 +95,7 @@ export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
     // Parse the response through the schema
     const result = SdkInitResponseSchema.safeParse(cached.response);
     if (result.success) {
+      recordConfigSync(cached.cachedAt);
       return result.data;
     }
 
@@ -330,6 +332,7 @@ export async function performInit(
   config: ResolvedConfig,
   anonKey: AnonApiKey | null,
   sdkVersion: string,
+  healthReport?: SdkHealthReport | null,
 ): Promise<InitClaimResult | null> {
   // Skip if in rate-limit backoff
   if (rateLimitBackoff) {
@@ -354,7 +357,7 @@ export async function performInit(
         anonKey,
         sdkVersion,
         undefined,
-        undefined,
+        healthReport ?? undefined,
         undefined,
         controller.signal,
       );
@@ -363,6 +366,10 @@ export async function performInit(
 
       // Update in-memory config
       currentConfig = result;
+      recordConfigSync(Date.now());
+      if (healthReport) {
+        acknowledgeHealthReport(healthReport);
+      }
 
       // Persist to disk
       await saveCachedConfig(result);
@@ -381,6 +388,7 @@ export async function performInit(
       return null;
     } catch (err) {
       clearTimeout(timeoutId);
+      recordInitFailure();
 
       if (err instanceof DOMException && err.name === "AbortError") {
         console.warn("[glasstrace] ingestion_unreachable: Init request timed out.");
@@ -424,6 +432,7 @@ export async function performInit(
       return null;
     }
   } catch (err) {
+    recordInitFailure();
     // Outermost catch -- should never reach here, but safety net
     console.warn(
       `[glasstrace] Unexpected init error: ${err instanceof Error ? err.message : String(err)}`,

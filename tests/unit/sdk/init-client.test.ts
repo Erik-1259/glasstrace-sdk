@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SdkInitResponse } from "@glasstrace/protocol";
+import type { SdkInitResponse, SdkHealthReport } from "@glasstrace/protocol";
 import { DEFAULT_CAPTURE_CONFIG } from "@glasstrace/protocol";
 import {
   loadCachedConfig,
@@ -17,6 +17,7 @@ import {
   _setCurrentConfig,
 } from "../../../packages/sdk/src/init-client.js";
 import type { ResolvedConfig } from "../../../packages/sdk/src/env-detection.js";
+import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 
 function makeInitResponse(overrides?: Partial<SdkInitResponse>): SdkInitResponse {
   return {
@@ -679,6 +680,302 @@ describe("Init Client + Config Cache", () => {
       // Should return defaults now (no in-memory config)
       const config = getActiveConfig();
       expect(config).toEqual(DEFAULT_CAPTURE_CONFIG);
+    });
+  });
+
+  describe("Health report recording", () => {
+    it("records config sync timestamp on successful performInit", async () => {
+      const syncSpy = vi.spyOn(healthCollector, "recordConfigSync");
+      const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(makeInitResponse()),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0");
+
+      expect(syncSpy).toHaveBeenCalledTimes(1);
+      const timestamp = syncSpy.mock.calls[0][0];
+      expect(typeof timestamp).toBe("number");
+      expect(timestamp).toBeGreaterThan(0);
+      expect(failSpy).not.toHaveBeenCalled();
+
+      vi.unstubAllGlobals();
+    });
+
+    it("records init failure on network error", async () => {
+      const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
+      const syncSpy = vi.spyOn(healthCollector, "recordConfigSync");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0");
+
+      expect(failSpy).toHaveBeenCalledTimes(1);
+      expect(syncSpy).not.toHaveBeenCalled();
+
+      vi.unstubAllGlobals();
+    });
+
+    it("records init failure on HTTP 401", async () => {
+      const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: () => Promise.resolve(""),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0");
+
+      expect(failSpy).toHaveBeenCalledTimes(1);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("records init failure on HTTP 429", async () => {
+      const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        text: () => Promise.resolve(""),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0");
+
+      expect(failSpy).toHaveBeenCalledTimes(1);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("records init failure on HTTP 500", async () => {
+      const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve(""),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0");
+
+      expect(failSpy).toHaveBeenCalledTimes(1);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("passes health report to sendInitRequest payload", async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = JSON.parse(init.body as string);
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(makeInitResponse()),
+        });
+      }));
+
+      const healthReport: SdkHealthReport = {
+        tracesExportedSinceLastInit: 42,
+        tracesDropped: 3,
+        initFailures: 1,
+        configAge: 5000,
+        sdkVersion: "1.0.0",
+      };
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", healthReport);
+
+      expect(capturedBody?.healthReport).toEqual(healthReport);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("omits healthReport from payload when null", async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = JSON.parse(init.body as string);
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(makeInitResponse()),
+        });
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", null);
+
+      expect(capturedBody).toBeDefined();
+      expect("healthReport" in capturedBody!).toBe(false);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("acknowledges health report on successful performInit", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(makeInitResponse()),
+      }));
+
+      const healthReport = {
+        tracesExportedSinceLastInit: 5,
+        tracesDropped: 1,
+        initFailures: 0,
+        configAge: 1000,
+        sdkVersion: "1.0.0",
+      };
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", healthReport);
+
+      expect(ackSpy).toHaveBeenCalledTimes(1);
+      expect(ackSpy).toHaveBeenCalledWith(healthReport);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("does not acknowledge health report on network failure", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
+
+      expect(ackSpy).not.toHaveBeenCalled();
+
+      vi.unstubAllGlobals();
+    });
+
+    it("does not acknowledge health report on HTTP 401", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: () => Promise.resolve(""),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
+
+      expect(ackSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it("does not acknowledge health report on HTTP 429", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        text: () => Promise.resolve(""),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
+
+      expect(ackSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it("does not acknowledge health report on HTTP 500", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve(""),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
+
+      expect(ackSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it("does not acknowledge health report on timeout", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const abortError = new DOMException("The operation was aborted", "AbortError");
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
+
+      expect(ackSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it("does not acknowledge health report on ZodError", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ invalid: "response" }),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
+
+      expect(ackSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it("works when called without healthReport argument (backward compat)", async () => {
+      const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(makeInitResponse()),
+      }));
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0");
+
+      // Should not throw, and should not call acknowledge (no report to acknowledge)
+      expect(ackSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it("records config sync from cached config on loadCachedConfig", () => {
+      const syncSpy = vi.spyOn(healthCollector, "recordConfigSync");
+
+      const response = makeInitResponse();
+      const cachedAt = Date.now() - 3000;
+      const cached = { response, cachedAt };
+      const dirPath = join(tempDir, ".glasstrace");
+      mkdirSync(dirPath, { recursive: true });
+      writeFileSync(join(dirPath, "config"), JSON.stringify(cached), "utf-8");
+
+      const result = loadCachedConfig(tempDir);
+
+      expect(result).not.toBeNull();
+      expect(syncSpy).toHaveBeenCalledWith(cachedAt);
     });
   });
 });

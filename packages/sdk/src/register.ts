@@ -9,6 +9,7 @@ import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig, getL
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
 import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
+import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 
 /** Whether console capture has been installed in this registration cycle. */
 let consoleCaptureInstalled = false;
@@ -268,7 +269,8 @@ async function backgroundInit(
     console.info("[glasstrace] Background init firing.");
   }
 
-  const initResult = await performInit(config, anonKeyForInit, __SDK_VERSION__);
+  const healthReport = collectHealthReport(__SDK_VERSION__);
+  const initResult = await performInit(config, anonKeyForInit, __SDK_VERSION__, healthReport);
 
   if (generation !== registrationGeneration) return;
 
@@ -341,6 +343,7 @@ export function _resetRegistrationForTesting(): void {
   discoveryHandler = null;
   consoleCaptureInstalled = false;
   registrationGeneration++;
+  _resetHealthForTesting();
   uninstallConsoleCapture();
   resetOtelConfigForTesting();
 }

@@ -6,6 +6,7 @@ import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import type { CaptureConfig } from "@glasstrace/protocol";
 import { GlasstraceExporter, API_KEY_PENDING } from "../../../packages/sdk/src/enriching-exporter.js";
 import { SessionManager } from "../../../packages/sdk/src/session.js";
+import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -840,6 +841,126 @@ describe("GlasstraceExporter", () => {
       // Original span attributes should be unchanged
       expect(Object.keys(span.attributes)).toEqual(Object.keys(originalAttributes));
       expect(span.attributes[ATTR.ROUTE]).toBeUndefined();
+    });
+  });
+
+  describe("Health recording", () => {
+    it("records exported span count on direct export", () => {
+      const spy = vi.spyOn(healthCollector, "recordSpansExported");
+      const { exporter } = createExporter();
+
+      exporter.export([createMockSpan(), createMockSpan()], vi.fn());
+
+      expect(spy).toHaveBeenCalledWith(2);
+    });
+
+    it("records exported span count on flush after key resolution", () => {
+      const spy = vi.spyOn(healthCollector, "recordSpansExported");
+      const delegate = createMockDelegate();
+      let currentKey = API_KEY_PENDING;
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+      });
+
+      exporter.export([createMockSpan(), createMockSpan(), createMockSpan()], vi.fn());
+      expect(spy).not.toHaveBeenCalled();
+
+      currentKey = TEST_API_KEY;
+      exporter.notifyKeyResolved();
+
+      expect(spy).toHaveBeenCalledWith(3);
+    });
+
+    it("records dropped span count on buffer overflow", () => {
+      const spy = vi.spyOn(healthCollector, "recordSpansDropped");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => API_KEY_PENDING,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => createMockDelegate(),
+      });
+
+      // Fill buffer to 1024
+      for (let i = 0; i < 1024; i++) {
+        exporter.export([createMockSpan()], vi.fn());
+      }
+      expect(spy).not.toHaveBeenCalled();
+
+      // One more triggers eviction of the oldest batch (1 span)
+      exporter.export([createMockSpan()], vi.fn());
+      expect(spy).toHaveBeenCalledWith(1);
+    });
+
+    it("records dropped span count on shutdown with unresolved key", async () => {
+      const spy = vi.spyOn(healthCollector, "recordSpansDropped");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => API_KEY_PENDING,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => createMockDelegate(),
+      });
+
+      exporter.export([createMockSpan(), createMockSpan()], vi.fn());
+      exporter.export([createMockSpan()], vi.fn());
+
+      await exporter.shutdown();
+
+      expect(spy).toHaveBeenCalledWith(3);
+    });
+
+    it("records dropped span count on direct export with no delegate factory", () => {
+      const spy = vi.spyOn(healthCollector, "recordSpansDropped");
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => TEST_API_KEY,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: null,
+      });
+
+      exporter.export([createMockSpan(), createMockSpan()], vi.fn());
+
+      expect(spy).toHaveBeenCalledWith(2);
+    });
+
+    it("records dropped span count when flushPending has no delegate factory", () => {
+      const spy = vi.spyOn(healthCollector, "recordSpansDropped");
+      let currentKey = API_KEY_PENDING;
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: null,
+      });
+
+      // Buffer 3 spans while key is pending
+      exporter.export([createMockSpan(), createMockSpan()], vi.fn());
+      exporter.export([createMockSpan()], vi.fn());
+
+      // Resolve key — triggers flushPending, but no delegate factory
+      currentKey = TEST_API_KEY;
+      exporter.notifyKeyResolved();
+
+      expect(spy).toHaveBeenCalledWith(3);
     });
   });
 });

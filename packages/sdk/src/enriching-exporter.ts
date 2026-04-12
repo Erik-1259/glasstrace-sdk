@@ -5,6 +5,7 @@ import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import type { CaptureConfig } from "@glasstrace/protocol";
 import type { SessionManager } from "./session.js";
 import { classifyFetchTarget } from "./fetch-classifier.js";
+import { recordSpansExported, recordSpansDropped } from "./health-collector.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -86,8 +87,10 @@ export class GlasstraceExporter implements SpanExporter {
     const exporter = this.ensureDelegate();
     if (exporter) {
       exporter.export(enrichedSpans, resultCallback);
+      recordSpansExported(enrichedSpans.length);
     } else {
-      // No delegate factory — report success so the pipeline does not stall
+      // No delegate factory — spans are discarded, count as dropped
+      recordSpansDropped(enrichedSpans.length);
       resultCallback({ code: 0 });
     }
   }
@@ -108,6 +111,7 @@ export class GlasstraceExporter implements SpanExporter {
       console.warn(
         `[glasstrace] Shutdown with ${this.pendingSpanCount} buffered spans — API key never resolved, spans lost.`,
       );
+      recordSpansDropped(this.pendingSpanCount);
       // Complete pending callbacks so pipeline doesn't hang
       for (const batch of this.pendingBatches) {
         batch.resultCallback({ code: 0 });
@@ -309,6 +313,7 @@ export class GlasstraceExporter implements SpanExporter {
     while (this.pendingSpanCount > MAX_PENDING_SPANS && this.pendingBatches.length > 1) {
       const evicted = this.pendingBatches.shift()!;
       this.pendingSpanCount -= evicted.spans.length;
+      recordSpansDropped(evicted.spans.length);
       // Complete callback so pipeline doesn't hang
       evicted.resultCallback({ code: 0 });
 
@@ -338,10 +343,13 @@ export class GlasstraceExporter implements SpanExporter {
 
     const exporter = this.ensureDelegate();
     if (!exporter) {
-      // No delegate factory — complete callbacks and discard
+      // No delegate factory — complete callbacks and count as dropped
+      let discardedCount = 0;
       for (const batch of this.pendingBatches) {
+        discardedCount += batch.spans.length;
         batch.resultCallback({ code: 0 });
       }
+      recordSpansDropped(discardedCount);
       this.pendingBatches = [];
       this.pendingSpanCount = 0;
       return;
@@ -355,6 +363,7 @@ export class GlasstraceExporter implements SpanExporter {
       // Enrich at flush time with the now-resolved key
       const enriched = batch.spans.map((span) => this.enrichSpan(span));
       exporter.export(enriched, batch.resultCallback);
+      recordSpansExported(enriched.length);
     }
   }
 
