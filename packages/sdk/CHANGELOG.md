@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.12.1
+
+### Patch Changes
+
+- f075582: Source map uploads now stream files individually instead of loading all into memory simultaneously, reducing peak memory usage for large projects.
+
 ## 0.12.0
 
 ### Minor Changes
