@@ -17,7 +17,8 @@ let lastConfigSyncAt: number | null = null;
 // --- Recording functions (called by other modules) ---
 
 /**
- * Records that spans were successfully forwarded to the delegate exporter.
+ * Records that spans were submitted to the delegate exporter.
+ * Counts submission, not confirmed delivery (DISC-1118).
  * Called by GlasstraceExporter after delegate.export() is invoked.
  */
 export function recordSpansExported(count: number): void {
