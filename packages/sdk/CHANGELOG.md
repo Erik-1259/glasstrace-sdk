@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.12.3
+
+### Patch Changes
+
+- 82d2fa6: Fix trace capture rate by reducing BatchSpanProcessor flush interval from 5 seconds to 1 second, adding export failure logging so OTLP errors are no longer silent, fixing forceFlush to drain pending span batches, and enabling OTel diagnostic logging in verbose mode.
+
 ## 0.12.2
 
 ### Patch Changes
