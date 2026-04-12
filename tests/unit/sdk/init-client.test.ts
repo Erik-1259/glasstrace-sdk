@@ -15,6 +15,8 @@ import {
   _resetConfigForTesting,
   _isRateLimitBackoff,
   _setCurrentConfig,
+  consumeRateLimitFlag,
+  didLastInitSucceed,
 } from "../../../packages/sdk/src/init-client.js";
 import type { ResolvedConfig } from "../../../packages/sdk/src/env-detection.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
@@ -976,6 +978,97 @@ describe("Init Client + Config Cache", () => {
 
       expect(result).not.toBeNull();
       expect(syncSpy).toHaveBeenCalledWith(cachedAt);
+    });
+  });
+
+  describe("consumeRateLimitFlag", () => {
+    it("returns true after 429 response", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        text: () => Promise.resolve(""),
+      }));
+
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+
+      expect(consumeRateLimitFlag()).toBe(true);
+      vi.unstubAllGlobals();
+    });
+
+    it("returns false after successful init", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(makeInitResponse()),
+      }));
+
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+
+      expect(consumeRateLimitFlag()).toBe(false);
+      vi.unstubAllGlobals();
+    });
+
+    it("clears on read", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        text: () => Promise.resolve(""),
+      }));
+
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+
+      expect(consumeRateLimitFlag()).toBe(true);
+      expect(consumeRateLimitFlag()).toBe(false);
+      vi.unstubAllGlobals();
+    });
+  });
+
+  describe("didLastInitSucceed", () => {
+    it("returns true after successful init", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(makeInitResponse()),
+      }));
+
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+
+      expect(didLastInitSucceed()).toBe(true);
+      vi.unstubAllGlobals();
+    });
+
+    it("returns false after failed init", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+
+      expect(didLastInitSucceed()).toBe(false);
+      vi.unstubAllGlobals();
+    });
+
+    it("returns false after 429", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        text: () => Promise.resolve(""),
+      }));
+
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+
+      expect(didLastInitSucceed()).toBe(false);
+      vi.unstubAllGlobals();
+    });
+
+    it("returns false when no API key available", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await performInit(makeResolvedConfig({ apiKey: undefined }), null, "1.0.0");
+
+      expect(didLastInitSucceed()).toBe(false);
     });
   });
 });

@@ -10,6 +10,7 @@ import {
 import { _resetConfigForTesting } from "../../../packages/sdk/src/init-client.js";
 import * as otelConfig from "../../../packages/sdk/src/otel-config.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
+import * as heartbeat from "../../../packages/sdk/src/heartbeat.js";
 
 /** Valid developer API key for testing (gt_dev_ prefix + 48 hex chars). */
 const TEST_DEV_API_KEY = "gt_dev_" + "a".repeat(48);
@@ -792,6 +793,46 @@ describe("registerGlasstrace() Orchestrator", () => {
       expect(postReport?.tracesExportedSinceLastInit).toBe(0);
       expect(postReport?.tracesDropped).toBe(0);
       expect(postReport?.initFailures).toBe(0);
+    });
+  });
+
+  describe("Checkpoint 9: Heartbeat wiring", () => {
+    it("should start heartbeat after successful backgroundInit", async () => {
+      const startSpy = vi.spyOn(heartbeat, "startHeartbeat");
+
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      registerGlasstrace();
+      await waitForBackgroundWork();
+
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(startSpy).toHaveBeenCalledWith(
+        expect.any(Object),    // config
+        expect.anything(),     // anonKey
+        expect.any(String),    // sdkVersion
+        expect.any(Number),    // generation
+        expect.any(Function),  // onClaimTransition callback
+      );
+    });
+
+    it("should NOT start heartbeat after failed backgroundInit", async () => {
+      const startSpy = vi.spyOn(heartbeat, "startHeartbeat");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      registerGlasstrace();
+      await waitForBackgroundWork();
+
+      expect(startSpy).not.toHaveBeenCalled();
+    });
+
+    it("should reset heartbeat on _resetRegistrationForTesting", () => {
+      const resetSpy = vi.spyOn(heartbeat, "_resetHeartbeatForTesting");
+
+      _resetRegistrationForTesting();
+
+      expect(resetSpy).toHaveBeenCalledTimes(1);
     });
   });
 });

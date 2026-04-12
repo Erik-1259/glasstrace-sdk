@@ -66,6 +66,9 @@ let configCacheChecked = false;
 /** Whether the next init call should be skipped (rate-limit backoff). */
 let rateLimitBackoff = false;
 
+/** Whether the most recent performInit call completed the success path. */
+let lastInitSucceeded = false;
+
 /**
  * Reads and validates a cached config file from `.glasstrace/config`.
  * Returns the parsed `SdkInitResponse` or `null` on any failure,
@@ -334,6 +337,8 @@ export async function performInit(
   sdkVersion: string,
   healthReport?: SdkHealthReport | null,
 ): Promise<InitClaimResult | null> {
+  lastInitSucceeded = false;
+
   // Skip if in rate-limit backoff
   if (rateLimitBackoff) {
     rateLimitBackoff = false; // Reset for next call
@@ -370,6 +375,7 @@ export async function performInit(
       if (healthReport) {
         acknowledgeHealthReport(healthReport);
       }
+      lastInitSucceeded = true;
 
       // Persist to disk
       await saveCachedConfig(result);
@@ -418,6 +424,10 @@ export async function performInit(
       }
 
       // Schema validation failure from sendInitRequest.parse
+      // NOTE: Health report was already sent to the backend (HTTP 200).
+      // Not acknowledging here means the next report will double-count
+      // these values. This is intentional — over-reporting is preferable
+      // to data loss when the response is unparseable (DISC-1120).
       if (err instanceof Error && err.name === "ZodError") {
         console.warn(
           "[glasstrace] Init response failed validation (schema version mismatch?). Using cached config.",
@@ -432,8 +442,8 @@ export async function performInit(
       return null;
     }
   } catch (err) {
-    recordInitFailure();
-    // Outermost catch -- should never reach here, but safety net
+    // Outermost catch — safety net. The inner catch already called
+    // recordInitFailure(), so skip here to avoid double-counting (DISC-1121).
     console.warn(
       `[glasstrace] Unexpected init error: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -502,6 +512,7 @@ export function _resetConfigForTesting(): void {
   currentConfig = null;
   configCacheChecked = false;
   rateLimitBackoff = false;
+  lastInitSucceeded = false;
 }
 
 /**
@@ -516,4 +527,26 @@ export function _setCurrentConfig(config: SdkInitResponse): void {
  */
 export function _isRateLimitBackoff(): boolean {
   return rateLimitBackoff;
+}
+
+/**
+ * Reads and clears the rate-limit backoff flag.
+ * Called by the heartbeat after performInit returns null to detect 429 responses.
+ * Returns true if a 429 occurred, false otherwise.
+ */
+export function consumeRateLimitFlag(): boolean {
+  if (rateLimitBackoff) {
+    rateLimitBackoff = false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true if the most recent performInit call completed the success path
+ * (recordConfigSync + acknowledgeHealthReport were called).
+ * Used by backgroundInit to decide whether to start the heartbeat.
+ */
+export function didLastInitSucceed(): boolean {
+  return lastInitSucceeded;
 }

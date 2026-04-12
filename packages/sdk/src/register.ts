@@ -5,11 +5,12 @@ import { resolveConfig, isProductionDisabled, isAnonymousMode } from "./env-dete
 import type { ResolvedConfig } from "./env-detection.js";
 import { SessionManager } from "./session.js";
 import { getOrCreateAnonKey, readAnonKey } from "./anon-key.js";
-import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig, getLinkedAccountId, getClaimResult } from "./init-client.js";
+import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig, getLinkedAccountId, getClaimResult, didLastInitSucceed } from "./init-client.js";
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
 import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
+import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
 
 /** Whether console capture has been installed in this registration cycle. */
 let consoleCaptureInstalled = false;
@@ -283,6 +284,16 @@ async function backgroundInit(
 
   // Re-check consoleErrors with the authoritative init response config
   maybeInstallConsoleCapture();
+
+  // Start the periodic health heartbeat if init succeeded.
+  // The heartbeat re-calls performInit every 5 minutes to report health
+  // metrics and refresh config. Only starts after first successful init.
+  if (didLastInitSucceed()) {
+    startHeartbeat(config, anonKeyForInit, __SDK_VERSION__, generation, (newApiKey) => {
+      setResolvedApiKey(newApiKey);
+      notifyApiKeyResolved();
+    });
+  }
 }
 
 /**
@@ -344,6 +355,7 @@ export function _resetRegistrationForTesting(): void {
   consoleCaptureInstalled = false;
   registrationGeneration++;
   _resetHealthForTesting();
+  _resetHeartbeatForTesting();
   uninstallConsoleCapture();
   resetOtelConfigForTesting();
 }
