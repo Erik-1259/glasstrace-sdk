@@ -117,21 +117,21 @@ export async function handleSourceMapUpload(distDir: string): Promise<void> {
     // Dynamic import: source-map-uploader uses node:fs, node:path, node:crypto,
     // and node:child_process. Deferring the import avoids a module-evaluation
     // crash when config-wrapper.ts is loaded in a non-Node bundler context.
-    const { collectSourceMaps, computeBuildHash, uploadSourceMaps } =
+    const { discoverSourceMapFiles, computeBuildHash, uploadSourceMaps } =
       await import("./source-map-uploader.js");
 
-    const maps = await collectSourceMaps(distDir);
+    const files = await discoverSourceMapFiles(distDir);
 
-    if (maps.length === 0) {
+    if (files.length === 0) {
       console.info("[glasstrace] No source map files found. Skipping upload.");
       return;
     }
 
-    const buildHash = await computeBuildHash(maps);
+    const buildHash = await computeBuildHash(files);
 
-    await uploadSourceMaps(apiKey, endpoint, buildHash, maps);
+    await uploadSourceMaps(apiKey, endpoint, buildHash, files);
     console.info(
-      `[glasstrace] Uploaded ${String(maps.length)} source map(s) for build ${buildHash}.`,
+      `[glasstrace] Uploaded ${String(files.length)} source map(s) for build ${buildHash}.`,
     );
   } catch (error: unknown) {
     // Build must NEVER fail because of Glasstrace

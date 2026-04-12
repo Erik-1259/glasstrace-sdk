@@ -11,6 +11,7 @@ vi.mock("node:child_process", () => ({
 import { execFileSync } from "node:child_process";
 import {
   collectSourceMaps,
+  discoverSourceMapFiles,
   computeBuildHash,
   uploadSourceMaps,
   requestPresignedTokens,
@@ -77,6 +78,102 @@ describe("collectSourceMaps", () => {
       path.join(tmpDir, "nonexistent"),
     );
     expect(maps).toEqual([]);
+  });
+});
+
+describe("discoverSourceMapFiles", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "glasstrace-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns metadata without reading file content", async () => {
+    fs.mkdirSync(path.join(tmpDir, "static", "chunks"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "static", "chunks", "main.js.map"),
+      '{"version":3}',
+    );
+
+    const files = await discoverSourceMapFiles(tmpDir);
+    expect(files).toHaveLength(1);
+    expect(files[0].filePath).toBe("static/chunks/main.js");
+    expect(files[0].absolutePath).toBe(
+      path.join(tmpDir, "static", "chunks", "main.js.map"),
+    );
+    // absolutePath must be truly absolute
+    expect(path.isAbsolute(files[0].absolutePath)).toBe(true);
+    expect(files[0].sizeBytes).toBe(
+      Buffer.byteLength('{"version":3}', "utf-8"),
+    );
+    // Crucially: no 'content' property
+    expect("content" in files[0]).toBe(false);
+  });
+
+  it("discovers multiple .map files recursively", async () => {
+    fs.mkdirSync(path.join(tmpDir, "static", "chunks"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "static", "chunks", "main.js.map"),
+      '{"version":3}',
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "static", "chunks", "vendor.js.map"),
+      '{"version":3,"sources":[]}',
+    );
+
+    const files = await discoverSourceMapFiles(tmpDir);
+    expect(files).toHaveLength(2);
+    expect(files.map((f) => f.filePath).sort()).toEqual([
+      "static/chunks/main.js",
+      "static/chunks/vendor.js",
+    ]);
+  });
+
+  it("returns empty array for non-existent directory", async () => {
+    const files = await discoverSourceMapFiles(
+      path.join(tmpDir, "nonexistent"),
+    );
+    expect(files).toEqual([]);
+  });
+
+  it("ignores non-.map files", async () => {
+    fs.writeFileSync(path.join(tmpDir, "main.js"), "console.log('hi')");
+    fs.writeFileSync(path.join(tmpDir, "style.css"), "body{}");
+
+    const files = await discoverSourceMapFiles(tmpDir);
+    expect(files).toEqual([]);
+  });
+
+  it("does not log warning for small source map files", async () => {
+    fs.writeFileSync(path.join(tmpDir, "small.js.map"), '{"version":3}');
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const files = await discoverSourceMapFiles(tmpDir);
+    expect(files).toHaveLength(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+  });
+
+  it("logs warning for large source map files", async () => {
+    const largeFile = path.join(tmpDir, "large.js.map");
+    fs.writeFileSync(largeFile, "");
+    fs.truncateSync(largeFile, 50 * 1024 * 1024);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const files = await discoverSourceMapFiles(tmpDir);
+    expect(files).toHaveLength(1);
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0][0]).toContain("Large source map detected");
+    expect(warnSpy.mock.calls[0][0]).toContain("50.0MB");
+
+    warnSpy.mockRestore();
   });
 });
 
@@ -150,6 +247,44 @@ describe("computeBuildHash", () => {
     const hash = await computeBuildHash([]);
     expect(hash).toBeTruthy();
     expect(hash).toMatch(/^[a-f0-9]+$/);
+  });
+
+  it("produces same hash from SourceMapFileInfo as from SourceMapEntry", async () => {
+    vi.mocked(execFileSync).mockImplementation(() => {
+      throw new Error("no git");
+    });
+
+    // Create real files on disk
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "glasstrace-hash-"));
+    try {
+      const content1 = '{"version":3,"file":"a.js"}';
+      const content2 = '{"version":3,"file":"b.js"}';
+      fs.writeFileSync(path.join(tmpDir, "a.js.map"), content1);
+      fs.writeFileSync(path.join(tmpDir, "b.js.map"), content2);
+
+      const entries = [
+        { filePath: "a.js", content: content1 },
+        { filePath: "b.js", content: content2 },
+      ];
+      const fileInfos = [
+        {
+          filePath: "a.js",
+          absolutePath: path.join(tmpDir, "a.js.map"),
+          sizeBytes: Buffer.byteLength(content1, "utf-8"),
+        },
+        {
+          filePath: "b.js",
+          absolutePath: path.join(tmpDir, "b.js.map"),
+          sizeBytes: Buffer.byteLength(content2, "utf-8"),
+        },
+      ];
+
+      const hashFromEntries = await computeBuildHash(entries);
+      const hashFromFileInfos = await computeBuildHash(fileInfos);
+      expect(hashFromEntries).toBe(hashFromFileInfos);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -293,6 +428,46 @@ describe("uploadSourceMaps", () => {
       ),
     ).rejects.toThrow("Source map upload failed: 503 Service Unavailable");
     expect(textMock).toHaveBeenCalledOnce();
+  });
+
+  it("reads file content lazily when given SourceMapFileInfo[]", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "glasstrace-lazy-"));
+    try {
+      const content = '{"version":3,"file":"main.js"}';
+      fs.writeFileSync(path.join(tmpDir, "main.js.map"), content);
+
+      const mockResponse = {
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          success: true,
+          buildHash: "abc123",
+          fileCount: 1,
+          totalSizeBytes: Buffer.byteLength(content, "utf-8"),
+        }),
+      };
+      vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
+
+      const result = await uploadSourceMaps(
+        "gt_dev_" + "a".repeat(48),
+        "https://api.glasstrace.dev",
+        "abc123",
+        [{
+          filePath: "main.js",
+          absolutePath: path.join(tmpDir, "main.js.map"),
+          sizeBytes: Buffer.byteLength(content, "utf-8"),
+        }],
+      );
+
+      expect(result.success).toBe(true);
+
+      // Verify the request body contains the file content read from disk
+      const [, options] = vi.mocked(fetch).mock.calls[0];
+      const body = JSON.parse((options as RequestInit).body as string);
+      expect(body.files[0].sourceMap).toBe(content);
+      expect(body.files[0].filePath).toBe("main.js");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
