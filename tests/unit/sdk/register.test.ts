@@ -9,6 +9,7 @@ import {
 } from "../../../packages/sdk/src/register.js";
 import { _resetConfigForTesting } from "../../../packages/sdk/src/init-client.js";
 import * as otelConfig from "../../../packages/sdk/src/otel-config.js";
+import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 
 /** Valid developer API key for testing (gt_dev_ prefix + 48 hex chars). */
 const TEST_DEV_API_KEY = "gt_dev_" + "a".repeat(48);
@@ -701,6 +702,96 @@ describe("registerGlasstrace() Orchestrator", () => {
           configurable: true,
         });
       }
+    });
+  });
+
+  describe("Checkpoint 8: Health report collection", () => {
+    it("should collect health report before performing init", async () => {
+      const collectSpy = vi.spyOn(healthCollector, "collectHealthReport");
+
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      registerGlasstrace();
+      await waitForBackgroundWork();
+
+      expect(collectSpy).toHaveBeenCalledTimes(1);
+      // Verify sdkVersion argument is a string (injected by build as __SDK_VERSION__)
+      const sdkVersionArg = collectSpy.mock.calls[0][0];
+      expect(typeof sdkVersionArg).toBe("string");
+    });
+
+    it("should pass collected health report to performInit", async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = JSON.parse(init.body as string);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            ...STANDARD_INIT_FIELDS,
+            subscriptionStatus: "anonymous",
+          }),
+        });
+      }));
+
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      registerGlasstrace();
+      await waitForBackgroundWork();
+
+      expect(capturedBody).toBeDefined();
+      expect(capturedBody?.healthReport).toBeDefined();
+      const report = capturedBody?.healthReport as Record<string, unknown>;
+      expect(typeof report.tracesExportedSinceLastInit).toBe("number");
+      expect(typeof report.tracesDropped).toBe("number");
+      expect(typeof report.initFailures).toBe("number");
+      expect(typeof report.configAge).toBe("number");
+      expect(typeof report.sdkVersion).toBe("string");
+    });
+
+    it("should reset health state on _resetRegistrationForTesting", () => {
+      const resetSpy = vi.spyOn(healthCollector, "_resetHealthForTesting");
+
+      _resetRegistrationForTesting();
+
+      expect(resetSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("end-to-end: recorded spans appear in init payload and counters are acknowledged", async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = JSON.parse(init.body as string);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            ...STANDARD_INIT_FIELDS,
+            subscriptionStatus: "anonymous",
+          }),
+        });
+      }));
+
+      // Record real health metrics BEFORE registering
+      healthCollector.recordSpansExported(42);
+      healthCollector.recordSpansDropped(7);
+      healthCollector.recordInitFailure();
+
+      process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
+      registerGlasstrace();
+      await waitForBackgroundWork();
+
+      // Verify the init payload contained our recorded values
+      expect(capturedBody).toBeDefined();
+      const report = capturedBody?.healthReport as Record<string, unknown>;
+      expect(report.tracesExportedSinceLastInit).toBe(42);
+      expect(report.tracesDropped).toBe(7);
+      expect(report.initFailures).toBe(1);
+
+      // Verify counters were acknowledged (subtracted) after successful init
+      const postReport = healthCollector.collectHealthReport("1.0.0");
+      expect(postReport?.tracesExportedSinceLastInit).toBe(0);
+      expect(postReport?.tracesDropped).toBe(0);
+      expect(postReport?.initFailures).toBe(0);
     });
   });
 });
