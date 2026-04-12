@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
-import { join } from "node:path";
 import {
   SdkInitResponseSchema,
   SdkCachedConfigSchema,
@@ -21,6 +18,44 @@ const CONFIG_FILE = "config";
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const INIT_TIMEOUT_MS = 10_000;
 
+/**
+ * Lazily imports `node:fs/promises` and `node:path`. Returns `null` if
+ * the modules are unavailable (non-Node environments). Cached after first call.
+ */
+let fsPathAsyncCache: { fs: typeof import("node:fs/promises"); path: typeof import("node:path") } | null | undefined;
+
+async function loadFsPathAsync(): Promise<{ fs: typeof import("node:fs/promises"); path: typeof import("node:path") } | null> {
+  if (fsPathAsyncCache !== undefined) return fsPathAsyncCache;
+  try {
+    const [fs, path] = await Promise.all([
+      import("node:fs/promises"),
+      import("node:path"),
+    ]);
+    fsPathAsyncCache = { fs, path };
+    return fsPathAsyncCache;
+  } catch {
+    fsPathAsyncCache = null;
+    return null;
+  }
+}
+
+/**
+ * Lazily imports synchronous `node:fs` and `node:path` via `require()`.
+ * Returns `null` when unavailable. Used by `loadCachedConfig` which is
+ * synchronous for startup performance.
+ */
+function loadFsSyncOrNull(): { readFileSync: typeof import("node:fs").readFileSync; join: typeof import("node:path").join } | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("node:fs") as typeof import("node:fs");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require("node:path") as typeof import("node:path");
+    return { readFileSync: fs.readFileSync, join: path.join };
+  } catch {
+    return null;
+  }
+}
+
 /** In-memory config from the latest successful init response. */
 let currentConfig: SdkInitResponse | null = null;
 
@@ -32,15 +67,19 @@ let rateLimitBackoff = false;
 
 /**
  * Reads and validates a cached config file from `.glasstrace/config`.
- * Returns the parsed `SdkInitResponse` or `null` on any failure.
+ * Returns the parsed `SdkInitResponse` or `null` on any failure,
+ * including when `node:fs` is unavailable (non-Node environments).
  */
 export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
+  const modules = loadFsSyncOrNull();
+  if (!modules) return null;
+
   const root = projectRoot ?? process.cwd();
-  const configPath = join(root, GLASSTRACE_DIR, CONFIG_FILE);
+  const configPath = modules.join(root, GLASSTRACE_DIR, CONFIG_FILE);
 
   try {
     // Use synchronous read for startup performance (this is called during init)
-    const content = readFileSync(configPath, "utf-8");
+    const content = modules.readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(content);
     const cached = SdkCachedConfigSchema.parse(parsed);
 
@@ -67,25 +106,29 @@ export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
 
 /**
  * Persists the init response to `.glasstrace/config`.
- * On failure, logs a warning and continues.
+ * Silently skipped when `node:fs` is unavailable (non-Node environments).
+ * On I/O failure, logs a warning and continues.
  */
 export async function saveCachedConfig(
   response: SdkInitResponse,
   projectRoot?: string,
 ): Promise<void> {
+  const modules = await loadFsPathAsync();
+  if (!modules) return;
+
   const root = projectRoot ?? process.cwd();
-  const dirPath = join(root, GLASSTRACE_DIR);
-  const configPath = join(dirPath, CONFIG_FILE);
+  const dirPath = modules.path.join(root, GLASSTRACE_DIR);
+  const configPath = modules.path.join(dirPath, CONFIG_FILE);
 
   try {
-    await mkdir(dirPath, { recursive: true, mode: 0o700 });
-    await chmod(dirPath, 0o700);
+    await modules.fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
+    await modules.fs.chmod(dirPath, 0o700);
     const cached = {
       response,
       cachedAt: Date.now(),
     };
-    await writeFile(configPath, JSON.stringify(cached), { encoding: "utf-8", mode: 0o600 });
-    await chmod(configPath, 0o600);
+    await modules.fs.writeFile(configPath, JSON.stringify(cached), { encoding: "utf-8", mode: 0o600 });
+    await modules.fs.chmod(configPath, 0o600);
   } catch (err) {
     console.warn(
       `[glasstrace] Failed to cache config to ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
@@ -179,87 +222,93 @@ export interface InitClaimResult {
  *   3. Dashboard message — if all file writes fail (key is never logged)
  *
  * The key value MUST NOT appear in any log output or stderr message.
+ * In non-Node environments where `node:fs` is unavailable, falls through
+ * directly to the dashboard message (step 3).
  */
 export async function writeClaimedKey(
   newApiKey: string,
   projectRoot?: string,
 ): Promise<void> {
-  const root = projectRoot ?? process.cwd();
-  const envLocalPath = join(root, ".env.local");
+  const modules = await loadFsPathAsync();
 
-  // Step 1: Try writing to .env.local
-  let envLocalWritten = false;
-  try {
-    let content: string;
+  if (modules) {
+    const root = projectRoot ?? process.cwd();
+    const envLocalPath = modules.path.join(root, ".env.local");
+
+    // Step 1: Try writing to .env.local
+    let envLocalWritten = false;
     try {
-      content = await readFile(envLocalPath, "utf-8");
-      // Replace all existing GLASSTRACE_API_KEY lines or append
-      if (/^GLASSTRACE_API_KEY=.*/m.test(content)) {
-        content = content.replace(
-          /^GLASSTRACE_API_KEY=.*$/gm,
-          `GLASSTRACE_API_KEY=${newApiKey}`,
-        );
-      } else {
-        // Ensure trailing newline before appending
-        if (content.length > 0 && !content.endsWith("\n")) {
-          content += "\n";
+      let content: string;
+      try {
+        content = await modules.fs.readFile(envLocalPath, "utf-8");
+        // Replace all existing GLASSTRACE_API_KEY lines or append
+        if (/^GLASSTRACE_API_KEY=.*/m.test(content)) {
+          content = content.replace(
+            /^GLASSTRACE_API_KEY=.*$/gm,
+            `GLASSTRACE_API_KEY=${newApiKey}`,
+          );
+        } else {
+          // Ensure trailing newline before appending
+          if (content.length > 0 && !content.endsWith("\n")) {
+            content += "\n";
+          }
+          content += `GLASSTRACE_API_KEY=${newApiKey}\n`;
         }
-        content += `GLASSTRACE_API_KEY=${newApiKey}\n`;
+      } catch (readErr: unknown) {
+        // Only create a new file when the file genuinely does not exist.
+        // Other read errors (e.g., permission denied) should not silently
+        // overwrite an existing .env.local that we cannot read.
+        const code = readErr instanceof Error ? (readErr as NodeJS.ErrnoException).code : undefined;
+        if (code !== "ENOENT") {
+          throw readErr;
+        }
+        content = `GLASSTRACE_API_KEY=${newApiKey}\n`;
       }
-    } catch (readErr: unknown) {
-      // Only create a new file when the file genuinely does not exist.
-      // Other read errors (e.g., permission denied) should not silently
-      // overwrite an existing .env.local that we cannot read.
-      const code = readErr instanceof Error ? (readErr as NodeJS.ErrnoException).code : undefined;
-      if (code !== "ENOENT") {
-        throw readErr;
-      }
-      content = `GLASSTRACE_API_KEY=${newApiKey}\n`;
+
+      await modules.fs.writeFile(envLocalPath, content, { encoding: "utf-8", mode: 0o600 });
+      await modules.fs.chmod(envLocalPath, 0o600);
+      envLocalWritten = true;
+    } catch {
+      // .env.local write failed — fall through to step 2
     }
 
-    await writeFile(envLocalPath, content, { encoding: "utf-8", mode: 0o600 });
-    await chmod(envLocalPath, 0o600);
-    envLocalWritten = true;
-  } catch {
-    // .env.local write failed — fall through to step 2
-  }
+    if (envLocalWritten) {
+      try {
+        process.stderr.write(
+          "[glasstrace] Account claimed! API key written to .env.local. Restart your dev server to use it.\n",
+        );
+      } catch { /* stderr is best-effort */ }
+      return;
+    }
 
-  if (envLocalWritten) {
+    // Step 2: Try writing to .glasstrace/claimed-key
+    let claimedKeyWritten = false;
     try {
-      process.stderr.write(
-        "[glasstrace] Account claimed! API key written to .env.local. Restart your dev server to use it.\n",
-      );
-    } catch { /* stderr is best-effort */ }
-    return;
+      const dirPath = modules.path.join(root, GLASSTRACE_DIR);
+      await modules.fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
+      await modules.fs.chmod(dirPath, 0o700);
+      const claimedKeyPath = modules.path.join(dirPath, "claimed-key");
+      await modules.fs.writeFile(claimedKeyPath, newApiKey, {
+        encoding: "utf-8",
+        mode: 0o600,
+      });
+      await modules.fs.chmod(claimedKeyPath, 0o600);
+      claimedKeyWritten = true;
+    } catch {
+      // .glasstrace write also failed — fall through to step 3
+    }
+
+    if (claimedKeyWritten) {
+      try {
+        process.stderr.write(
+          "[glasstrace] Account claimed! API key written to .glasstrace/claimed-key. Copy it to your .env.local file.\n",
+        );
+      } catch { /* stderr is best-effort */ }
+      return;
+    }
   }
 
-  // Step 2: Try writing to .glasstrace/claimed-key
-  let claimedKeyWritten = false;
-  try {
-    const dirPath = join(root, GLASSTRACE_DIR);
-    await mkdir(dirPath, { recursive: true, mode: 0o700 });
-    await chmod(dirPath, 0o700);
-    const claimedKeyPath = join(dirPath, "claimed-key");
-    await writeFile(claimedKeyPath, newApiKey, {
-      encoding: "utf-8",
-      mode: 0o600,
-    });
-    await chmod(claimedKeyPath, 0o600);
-    claimedKeyWritten = true;
-  } catch {
-    // .glasstrace write also failed — fall through to step 3
-  }
-
-  if (claimedKeyWritten) {
-    try {
-      process.stderr.write(
-        "[glasstrace] Account claimed! API key written to .glasstrace/claimed-key. Copy it to your .env.local file.\n",
-      );
-    } catch { /* stderr is best-effort */ }
-    return;
-  }
-
-  // Step 3: All file writes failed — log a message WITHOUT the key
+  // Step 3: All file writes failed (or node:fs unavailable) — log a message WITHOUT the key
   try {
     process.stderr.write(
       "[glasstrace] Account claimed but could not write key to disk. Visit your dashboard settings to rotate and retrieve a new API key.\n",

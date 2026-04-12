@@ -6,6 +6,8 @@ import {
   getDateString,
   SessionManager,
   _resetEnvCacheForTesting,
+  _resetHashFnForTesting,
+  _useFallbackHashForTesting,
 } from "../../../packages/sdk/src/session.js";
 
 describe("deriveSessionId", () => {
@@ -292,5 +294,88 @@ describe("SessionManager", () => {
     // Should still be window 0 because activity was refreshed 3h ago
     const expected = deriveSessionId("test-key", "localhost:3000", "2026-03-22", 0);
     expect(id).toBe(expected);
+  });
+});
+
+describe("deriveSessionId fallback hash (FNV-1a)", () => {
+  beforeEach(() => {
+    _useFallbackHashForTesting();
+  });
+
+  afterEach(() => {
+    _resetHashFnForTesting();
+  });
+
+  it("produces a valid 16-character hex session ID", () => {
+    const id = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+    expect(id).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("is deterministic for identical inputs", () => {
+    const a = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+    const b = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+    expect(a).toBe(b);
+  });
+
+  it("produces different values for different API keys", () => {
+    const a = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+    const b = deriveSessionId("key2", "localhost:3000", "2026-03-22", 0);
+    expect(a).not.toBe(b);
+  });
+
+  it("produces different values for different origins", () => {
+    const a = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+    const b = deriveSessionId("key1", "localhost:4000", "2026-03-22", 0);
+    expect(a).not.toBe(b);
+  });
+
+  it("produces different values for different dates", () => {
+    const a = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+    const b = deriveSessionId("key1", "localhost:3000", "2026-03-23", 0);
+    expect(a).not.toBe(b);
+  });
+
+  it("produces different values for different window indices", () => {
+    const a = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+    const b = deriveSessionId("key1", "localhost:3000", "2026-03-22", 1);
+    expect(a).not.toBe(b);
+  });
+
+  it("handles empty string inputs without throwing", () => {
+    expect(() => deriveSessionId("", "", "", 0)).not.toThrow();
+    const id = deriveSessionId("", "", "", 0);
+    expect(id).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("produces different output than SHA-256 (confirms fallback path)", () => {
+    const fallbackId = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+
+    // Compute what SHA-256 would produce
+    const input = JSON.stringify(["key1", "localhost:3000", "2026-03-22", 0]);
+    const sha256Id = createHash("sha256").update(input).digest("hex").slice(0, 16);
+
+    // Fallback uses FNV-1a which is a different algorithm
+    expect(fallbackId).not.toBe(sha256Id);
+  });
+});
+
+describe("deriveSessionId hash function reset", () => {
+  afterEach(() => {
+    _resetHashFnForTesting();
+  });
+
+  it("_resetHashFnForTesting causes re-resolution to SHA-256", () => {
+    // Force fallback
+    _useFallbackHashForTesting();
+    const fallbackId = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+
+    // Reset and re-derive — should use SHA-256 again
+    _resetHashFnForTesting();
+    const sha256Id = deriveSessionId("key1", "localhost:3000", "2026-03-22", 0);
+
+    const input = JSON.stringify(["key1", "localhost:3000", "2026-03-22", 0]);
+    const expected = createHash("sha256").update(input).digest("hex").slice(0, 16);
+    expect(sha256Id).toBe(expected);
+    expect(fallbackId).not.toBe(sha256Id);
   });
 });

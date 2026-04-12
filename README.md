@@ -181,6 +181,26 @@ instructions to stderr with the new API key.
 | `GLASSTRACE_API_KEY` | No | Your project API key (`gt_dev_...`). Anonymous mode without it. |
 | `GLASSTRACE_ENV` | No | Environment name (auto-detected if not set) |
 
+## Edge Runtime / Non-Node Environments
+
+The SDK can be bundled for non-Node targets without failing on
+unresolvable `node:` imports. Node.js built-in modules (`node:crypto`,
+`node:fs`, `node:path`) are loaded dynamically at call time, not at
+import time. Bundlers like esbuild and webpack can externalize `node:*`
+modules and the SDK will degrade gracefully at runtime.
+
+In non-Node environments, the SDK degrades gracefully:
+
+- **Session IDs** use a deterministic FNV-1a hash instead of SHA-256
+- **Key persistence** falls back to ephemeral in-memory storage
+- **Config caching** is skipped (defaults are used)
+- **`registerGlasstrace`** detects the non-Node environment and
+  returns a no-op
+
+Server-only utilities (`collectSourceMaps`, `buildImportGraph`) still
+require Node.js and should be excluded from browser bundles via your
+bundler's externalization config.
+
 ## Bundle Size
 
 The SDK bundles OpenTelemetry and Zod internally so consumers get a

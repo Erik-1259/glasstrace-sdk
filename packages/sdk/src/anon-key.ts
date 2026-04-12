@@ -1,10 +1,30 @@
-import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
-import { join } from "node:path";
 import { AnonApiKeySchema, createAnonApiKey } from "@glasstrace/protocol";
 import type { AnonApiKey } from "@glasstrace/protocol";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const ANON_KEY_FILE = "anon_key";
+
+/**
+ * Lazily imports `node:fs/promises` and `node:path`. Returns `null` if
+ * the modules are unavailable (non-Node environments). The result is
+ * cached after first resolution.
+ */
+let fsPathCache: { fs: typeof import("node:fs/promises"); path: typeof import("node:path") } | null | undefined;
+
+async function loadFsPath(): Promise<{ fs: typeof import("node:fs/promises"); path: typeof import("node:path") } | null> {
+  if (fsPathCache !== undefined) return fsPathCache;
+  try {
+    const [fs, path] = await Promise.all([
+      import("node:fs/promises"),
+      import("node:path"),
+    ]);
+    fsPathCache = { fs, path };
+    return fsPathCache;
+  } catch {
+    fsPathCache = null;
+    return null;
+  }
+}
 
 /**
  * In-memory cache for ephemeral keys when filesystem persistence fails.
@@ -18,22 +38,27 @@ const ephemeralKeyCache = new Map<string, AnonApiKey>();
  * - The file does not exist
  * - The file content is invalid
  * - An I/O error occurs
+ * - `node:fs` is unavailable (non-Node environment)
  */
 export async function readAnonKey(projectRoot?: string): Promise<AnonApiKey | null> {
   const root = projectRoot ?? process.cwd();
-  const keyPath = join(root, GLASSTRACE_DIR, ANON_KEY_FILE);
 
-  try {
-    const content = await readFile(keyPath, "utf-8");
-    const result = AnonApiKeySchema.safeParse(content);
-    if (result.success) {
-      return result.data;
+  const modules = await loadFsPath();
+  if (modules) {
+    const keyPath = modules.path.join(root, GLASSTRACE_DIR, ANON_KEY_FILE);
+    try {
+      const content = await modules.fs.readFile(keyPath, "utf-8");
+      const result = AnonApiKeySchema.safeParse(content);
+      if (result.success) {
+        return result.data;
+      }
+    } catch {
+      // Fall through to check ephemeral cache
     }
-  } catch {
-    // Fall through to check ephemeral cache
   }
 
-  // Check in-memory cache (used when filesystem persistence failed)
+  // Check in-memory cache (used when filesystem persistence failed
+  // or when node:fs is unavailable)
   const cached = ephemeralKeyCache.get(root);
   if (cached !== undefined) {
     return cached;
@@ -50,11 +75,10 @@ export async function readAnonKey(projectRoot?: string): Promise<AnonApiKey | nu
  * - Writes the new key to `.glasstrace/anon_key`, creating the directory if needed
  * - On file write failure: logs a warning, caches an ephemeral in-memory key so
  *   repeated calls in the same process return the same key
+ * - In non-Node environments: returns an ephemeral in-memory key
  */
 export async function getOrCreateAnonKey(projectRoot?: string): Promise<AnonApiKey> {
   const root = projectRoot ?? process.cwd();
-  const dirPath = join(root, GLASSTRACE_DIR);
-  const keyPath = join(dirPath, ANON_KEY_FILE);
 
   // Try reading existing key from filesystem
   const existingKey = await readAnonKey(root);
@@ -71,11 +95,22 @@ export async function getOrCreateAnonKey(projectRoot?: string): Promise<AnonApiK
   // Generate a new key
   const newKey = createAnonApiKey();
 
+  // Attempt filesystem persistence (only in Node.js environments)
+  const modules = await loadFsPath();
+  if (!modules) {
+    // No filesystem access — cache in memory
+    ephemeralKeyCache.set(root, newKey);
+    return newKey;
+  }
+
+  const dirPath = modules.path.join(root, GLASSTRACE_DIR);
+  const keyPath = modules.path.join(dirPath, ANON_KEY_FILE);
+
   // Persist to filesystem using atomic create-or-fail (O_CREAT | O_EXCL)
   // to prevent TOCTOU races where concurrent cold starts both generate keys.
   try {
-    await mkdir(dirPath, { recursive: true, mode: 0o700 });
-    await writeFile(keyPath, newKey, { flag: "wx", mode: 0o600 });
+    await modules.fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
+    await modules.fs.writeFile(keyPath, newKey, { flag: "wx", mode: 0o600 });
     return newKey;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -97,8 +132,8 @@ export async function getOrCreateAnonKey(projectRoot?: string): Promise<AnonApiK
       // Use explicit chmod after overwrite since writeFile mode only
       // applies on creation on some platforms.
       try {
-        await writeFile(keyPath, newKey, { mode: 0o600 });
-        await chmod(keyPath, 0o600);
+        await modules.fs.writeFile(keyPath, newKey, { mode: 0o600 });
+        await modules.fs.chmod(keyPath, 0o600);
         return newKey;
       } catch {
         // Overwrite failed — fall through to ephemeral cache
