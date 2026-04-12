@@ -154,7 +154,6 @@ export async function configureOtel(
     environment: config.environment,
     endpointUrl: exporterUrl,
     createDelegate: createOtlpExporter,
-    verbose: config.verbose,
   });
   _activeExporter = glasstraceExporter;
 
@@ -223,9 +222,6 @@ export async function configureOtel(
   const processor = new BatchSpanProcessor(glasstraceExporter, {
     scheduledDelayMillis: 1000,
   });
-  if (config.verbose) {
-    sdkLog("info", "[glasstrace:diag] BatchSpanProcessor configured: scheduledDelayMillis=1000");
-  }
   const provider = new BasicTracerProvider({
     spanProcessors: [processor],
   });
