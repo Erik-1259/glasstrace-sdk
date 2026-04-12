@@ -963,4 +963,190 @@ describe("GlasstraceExporter", () => {
       expect(spy).toHaveBeenCalledWith(3);
     });
   });
+
+  describe("Export failure logging", () => {
+    it("logs warning when delegate export fails on direct export", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const failingDelegate = {
+        ...createMockDelegate(),
+        export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
+          resultCallback({ code: 1, error: new Error("auth failed") });
+        },
+        shutdown: vi.fn().mockResolvedValue(undefined),
+        forceFlush: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => TEST_API_KEY,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => failingDelegate,
+      });
+
+      const callback = vi.fn();
+      exporter.export([createMockSpan()], callback);
+
+      const exportWarning = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("Span export failed"),
+      );
+      expect(exportWarning).toBeDefined();
+      expect(exportWarning![0]).toContain("auth failed");
+
+      // Callback should still be called (propagated)
+      expect(callback).toHaveBeenCalledWith({ code: 1, error: expect.any(Error) });
+    });
+
+    it("logs warning when delegate export fails on flush path", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let currentKey = API_KEY_PENDING;
+
+      const failingDelegate = {
+        ...createMockDelegate(),
+        export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
+          resultCallback({ code: 1, error: new Error("network timeout") });
+        },
+        shutdown: vi.fn().mockResolvedValue(undefined),
+        forceFlush: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => failingDelegate,
+      });
+
+      const callback = vi.fn();
+      exporter.export([createMockSpan()], callback);
+
+      // Resolve key to trigger flush
+      currentKey = TEST_API_KEY;
+      exporter.notifyKeyResolved();
+
+      const exportWarning = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("Span export failed"),
+      );
+      expect(exportWarning).toBeDefined();
+      expect(exportWarning![0]).toContain("network timeout");
+    });
+
+    it("logs 'unknown error' when export fails without error object", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const failingDelegate = {
+        ...createMockDelegate(),
+        export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
+          resultCallback({ code: 1 });
+        },
+        shutdown: vi.fn().mockResolvedValue(undefined),
+        forceFlush: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => TEST_API_KEY,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => failingDelegate,
+      });
+
+      exporter.export([createMockSpan()], vi.fn());
+
+      const exportWarning = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("Span export failed"),
+      );
+      expect(exportWarning).toBeDefined();
+      expect(exportWarning![0]).toContain("unknown error");
+    });
+
+    it("does NOT log on successful export", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { exporter } = createExporter();
+      exporter.export([createMockSpan()], vi.fn());
+
+      const exportWarnings = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === "string" && call[0].includes("Span export failed"),
+      );
+      expect(exportWarnings).toHaveLength(0);
+    });
+  });
+
+  describe("forceFlush with pending batches", () => {
+    it("flushes pending batches when key resolved but notifyKeyResolved not called", async () => {
+      const delegate = createMockDelegate();
+      let currentKey = API_KEY_PENDING;
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+      });
+
+      // Buffer spans while key is pending
+      exporter.export([createMockSpan(), createMockSpan()], vi.fn());
+      expect(delegate.exportedSpans).toHaveLength(0);
+
+      // Resolve key WITHOUT calling notifyKeyResolved
+      currentKey = TEST_API_KEY;
+
+      // forceFlush should detect resolved key and flush pending batches
+      await exporter.forceFlush();
+
+      expect(delegate.exportedSpans).toHaveLength(1);
+      expect(delegate.exportedSpans[0]).toHaveLength(2);
+    });
+
+    it("does NOT flush when key is still pending", async () => {
+      const delegate = createMockDelegate();
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => API_KEY_PENDING,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+      });
+
+      exporter.export([createMockSpan()], vi.fn());
+
+      await exporter.forceFlush();
+
+      // Spans should still be buffered, not flushed
+      expect(delegate.exportedSpans).toHaveLength(0);
+    });
+
+    it("delegates forceFlush to underlying exporter after flushing pending", async () => {
+      const delegate = createMockDelegate();
+      let currentKey = API_KEY_PENDING;
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+      });
+
+      exporter.export([createMockSpan()], vi.fn());
+
+      currentKey = TEST_API_KEY;
+      await exporter.forceFlush();
+
+      // Both pending flush AND delegate forceFlush should have happened
+      expect(delegate.exportedSpans).toHaveLength(1);
+      expect(delegate.forceFlush).toHaveBeenCalled();
+    });
+  });
 });
