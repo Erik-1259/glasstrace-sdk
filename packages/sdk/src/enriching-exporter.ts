@@ -6,6 +6,7 @@ import type { CaptureConfig } from "@glasstrace/protocol";
 import type { SessionManager } from "./session.js";
 import { classifyFetchTarget } from "./fetch-classifier.js";
 import { recordSpansExported, recordSpansDropped } from "./health-collector.js";
+import { sdkLog } from "./console-capture.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -86,7 +87,12 @@ export class GlasstraceExporter implements SpanExporter {
     const enrichedSpans = spans.map((span) => this.enrichSpan(span));
     const exporter = this.ensureDelegate();
     if (exporter) {
-      exporter.export(enrichedSpans, resultCallback);
+      exporter.export(enrichedSpans, (result) => {
+        if (result.code !== 0) {
+          sdkLog("warn", `[glasstrace] Span export failed: ${result.error?.message ?? "unknown error"}`);
+        }
+        resultCallback(result);
+      });
       recordSpansExported(enrichedSpans.length);
     } else {
       // No delegate factory — spans are discarded, count as dropped
@@ -125,7 +131,17 @@ export class GlasstraceExporter implements SpanExporter {
     }
   }
 
+  /**
+   * Flushes any pending buffered spans (if the API key has resolved) and
+   * delegates to the underlying exporter's forceFlush to drain its queue.
+   */
   forceFlush(): Promise<void> {
+    // Flush pending batches if the key has resolved but they haven't been
+    // drained yet (e.g., key resolved between the last export and this flush).
+    if (this.getApiKey() !== API_KEY_PENDING && this.pendingBatches.length > 0) {
+      this.flushPending();
+    }
+
     if (this.delegate?.forceFlush) {
       return this.delegate.forceFlush();
     }
@@ -362,7 +378,12 @@ export class GlasstraceExporter implements SpanExporter {
     for (const batch of batches) {
       // Enrich at flush time with the now-resolved key
       const enriched = batch.spans.map((span) => this.enrichSpan(span));
-      exporter.export(enriched, batch.resultCallback);
+      exporter.export(enriched, (result) => {
+        if (result.code !== 0) {
+          sdkLog("warn", `[glasstrace] Span export failed: ${result.error?.message ?? "unknown error"}`);
+        }
+        batch.resultCallback(result);
+      });
       recordSpansExported(enriched.length);
     }
   }

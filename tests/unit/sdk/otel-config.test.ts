@@ -43,6 +43,7 @@ describe("configureOtel()", () => {
     // Clean up signal listeners before disabling trace to prevent leaks
     resetOtelConfigForTesting();
     otelApi.trace.disable();
+    otelApi.diag.disable();
   });
 
   describe("Provider coexistence", () => {
@@ -189,6 +190,46 @@ describe("configureOtel()", () => {
       } finally {
         killSpy.mockRestore();
       }
+    });
+  });
+
+  describe("BatchSpanProcessor configuration", () => {
+    it("should use 1-second flush interval instead of 5-second default", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const bspSpy = vi.spyOn(otelSdk, "BatchSpanProcessor");
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      expect(bspSpy).toHaveBeenCalledTimes(1);
+      const configArg = bspSpy.mock.calls[0][1];
+      expect(configArg).toBeDefined();
+      expect(configArg?.scheduledDelayMillis).toBe(1000);
+    });
+  });
+
+  describe("OTel diagnostic logging", () => {
+    it("should enable diag logger at WARN level when verbose is true", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const diagSpy = vi.spyOn(otelApi.diag, "setLogger");
+
+      await configureOtel(createTestConfig({ verbose: true }), sessionManager);
+
+      expect(diagSpy).toHaveBeenCalledTimes(1);
+      // Custom sdkLog-based logger (not DiagConsoleLogger) with warn/error methods
+      const logger = diagSpy.mock.calls[0][0];
+      expect(typeof logger.warn).toBe("function");
+      expect(typeof logger.error).toBe("function");
+      expect(diagSpy.mock.calls[0][1]).toBe(otelApi.DiagLogLevel.WARN);
+    });
+
+    it("should NOT enable diag logger when verbose is false", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const diagSpy = vi.spyOn(otelApi.diag, "setLogger");
+
+      await configureOtel(createTestConfig({ verbose: false }), sessionManager);
+
+      expect(diagSpy).not.toHaveBeenCalled();
     });
   });
 });

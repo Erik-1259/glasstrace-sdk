@@ -5,6 +5,7 @@ import { BasicTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trac
 import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
+import { sdkLog } from "./console-capture.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let _resolvedApiKey: string = API_KEY_PENDING;
@@ -198,9 +199,29 @@ export async function configureOtel(
     return;
   }
 
+  // Enable OTel diagnostic logging in verbose mode so OTLP exporter
+  // errors (auth failures, network issues) are surfaced to the developer.
+  // Set AFTER coexistence check to avoid mutating global diag state when
+  // Glasstrace is not the active tracer. Routes through sdkLog to avoid
+  // console-capture recording OTel internals as user span events.
+  if (config.verbose) {
+    otelApi.diag.setLogger(
+      {
+        verbose: (msg) => sdkLog("info", `[otel] ${msg}`),
+        debug: (msg) => sdkLog("info", `[otel] ${msg}`),
+        info: (msg) => sdkLog("info", `[otel] ${msg}`),
+        warn: (msg) => sdkLog("warn", `[otel] ${msg}`),
+        error: (msg) => sdkLog("error", `[otel] ${msg}`),
+      },
+      otelApi.DiagLogLevel.WARN,
+    );
+  }
+
   // Use BatchSpanProcessor for production OTLP exports to avoid blocking
   // the event loop on every span.end() call.
-  const processor = new BatchSpanProcessor(glasstraceExporter);
+  const processor = new BatchSpanProcessor(glasstraceExporter, {
+    scheduledDelayMillis: 1000,
+  });
   const provider = new BasicTracerProvider({
     spanProcessors: [processor],
   });
