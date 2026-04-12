@@ -1,4 +1,4 @@
-import { SpanKind } from "@opentelemetry/api";
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
 import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
@@ -32,6 +32,7 @@ export interface GlasstraceExporterOptions {
   environment: string | undefined;
   endpointUrl: string;
   createDelegate: ((url: string, headers: Record<string, string>) => SpanExporter) | null;
+  verbose?: boolean;
 }
 
 interface PendingBatch {
@@ -58,6 +59,7 @@ export class GlasstraceExporter implements SpanExporter {
   private readonly environment: string | undefined;
   private readonly endpointUrl: string;
   private readonly createDelegateFn: ((url: string, headers: Record<string, string>) => SpanExporter) | null;
+  private readonly verbose: boolean;
 
   private delegate: SpanExporter | null = null;
   private delegateKey: string | null = null;
@@ -72,6 +74,7 @@ export class GlasstraceExporter implements SpanExporter {
     this.environment = options.environment;
     this.endpointUrl = options.endpointUrl;
     this.createDelegateFn = options.createDelegate;
+    this.verbose = options.verbose ?? false;
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -85,11 +88,16 @@ export class GlasstraceExporter implements SpanExporter {
 
     // Key is available — enrich and export
     const enrichedSpans = spans.map((span) => this.enrichSpan(span));
+    if (this.verbose) {
+      sdkLog("info", `[glasstrace:diag] Export batch: ${enrichedSpans.length} spans`);
+    }
     const exporter = this.ensureDelegate();
     if (exporter) {
       exporter.export(enrichedSpans, (result) => {
         if (result.code !== 0) {
           sdkLog("warn", `[glasstrace] Span export failed: ${result.error?.message ?? "unknown error"}`);
+        } else if (this.verbose) {
+          sdkLog("info", `[glasstrace:diag] Export success: ${enrichedSpans.length} spans delivered`);
         }
         resultCallback(result);
       });
@@ -211,6 +219,28 @@ export class GlasstraceExporter implements SpanExporter {
         extra[ATTR.HTTP_STATUS_CODE] = statusCode;
       }
 
+      // Infer error status when Next.js timing race reports 200 on error spans.
+      // Only triggers when: span is an HTTP span (has method) with ERROR status
+      // AND http status is 200, 0, or missing. Does NOT override valid error
+      // codes (404, 500, etc.) — only fixes the "200 on error" timing race
+      // from Next.js dev server (DISC-1134).
+      if (method && span.status?.code === SpanStatusCode.ERROR) {
+        if (statusCode === undefined || statusCode === 0 || statusCode === 200) {
+          const httpErrorType = attrs["error.type"];
+          if (typeof httpErrorType === "string") {
+            const parsed = parseInt(httpErrorType, 10);
+            if (!isNaN(parsed) && parsed >= 400 && parsed <= 599) {
+              extra[ATTR.HTTP_STATUS_CODE] = parsed;
+            } else {
+              extra[ATTR.HTTP_STATUS_CODE] = 500;
+            }
+          } else {
+            extra[ATTR.HTTP_STATUS_CODE] = 500;
+          }
+        }
+        // If statusCode is already >= 400, leave it alone (correct value)
+      }
+
       // glasstrace.http.duration_ms
       if (span.startTime && span.endTime) {
         const [startSec, startNano] = span.startTime;
@@ -324,6 +354,9 @@ export class GlasstraceExporter implements SpanExporter {
   ): void {
     this.pendingBatches.push({ spans, resultCallback });
     this.pendingSpanCount += spans.length;
+    if (this.verbose) {
+      sdkLog("info", `[glasstrace:diag] Buffering ${spans.length} spans (key pending, total: ${this.pendingSpanCount})`);
+    }
 
     // Evict oldest batches if over limit
     while (this.pendingSpanCount > MAX_PENDING_SPANS && this.pendingBatches.length > 1) {
@@ -332,6 +365,9 @@ export class GlasstraceExporter implements SpanExporter {
       recordSpansDropped(evicted.spans.length);
       // Complete callback so pipeline doesn't hang
       evicted.resultCallback({ code: 0 });
+      if (this.verbose) {
+        sdkLog("info", `[glasstrace:diag] Buffer overflow: evicted ${evicted.spans.length} spans (total pending: ${this.pendingSpanCount})`);
+      }
 
       if (!this.overflowLogged) {
         this.overflowLogged = true;
@@ -381,6 +417,8 @@ export class GlasstraceExporter implements SpanExporter {
       exporter.export(enriched, (result) => {
         if (result.code !== 0) {
           sdkLog("warn", `[glasstrace] Span export failed: ${result.error?.message ?? "unknown error"}`);
+        } else if (this.verbose) {
+          sdkLog("info", `[glasstrace:diag] Flush export success: ${enriched.length} spans delivered`);
         }
         batch.resultCallback(result);
       });

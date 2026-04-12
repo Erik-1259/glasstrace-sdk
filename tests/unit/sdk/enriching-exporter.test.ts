@@ -30,6 +30,7 @@ function createMockSpan(overrides?: {
   startTime?: [number, number];
   endTime?: [number, number];
   instrumentationScope?: { name: string; version?: string };
+  status?: { code: SpanStatusCode; message?: string };
 }): ReadableSpan {
   return {
     name: overrides?.name ?? "GET /api/users",
@@ -42,7 +43,7 @@ function createMockSpan(overrides?: {
     parentSpanId: undefined,
     startTime: overrides?.startTime ?? [1700000000, 0],
     endTime: overrides?.endTime ?? [1700000000, 150_000_000], // 150ms
-    status: { code: SpanStatusCode.OK },
+    status: overrides?.status ?? { code: SpanStatusCode.OK },
     attributes: overrides?.attributes ?? {
       "http.method": "GET",
       "http.route": "/api/users",
@@ -1147,6 +1148,249 @@ describe("GlasstraceExporter", () => {
       // Both pending flush AND delegate forceFlush should have happened
       expect(delegate.exportedSpans).toHaveLength(1);
       expect(delegate.forceFlush).toHaveBeenCalled();
+    });
+  });
+
+  describe("Error status inference (DISC-1134)", () => {
+    it("infers 500 when span has ERROR status and http.status_code is 200", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR, message: "Internal Server Error" },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("infers 500 when span has ERROR status and http.status_code is 0", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 0,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("infers 500 when span has ERROR status and no http.status_code", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("uses error.type numeric value when present (e.g. '404' → 404)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "error.type": "404",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(404);
+    });
+
+    it("defaults to 500 when error.type is non-numeric (e.g. 'NotFoundError')", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "error.type": "NotFoundError",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("keeps existing error status code when already >= 400", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 404,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(404);
+    });
+
+    it("does NOT infer error status on OK spans with status_code 200", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+    });
+
+    it("does NOT infer error status on UNSET spans with status_code 200", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+    });
+
+    it("does NOT infer error status on non-HTTP error spans (e.g. DB spans)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR, message: "query failed" },
+        attributes: {
+          "db.operation": "SELECT",
+          "db.sql.table": "users",
+        },
+        instrumentationScope: { name: "@prisma/instrumentation" },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      // Non-HTTP span should NOT get an inferred HTTP status code
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBeUndefined();
+    });
+  });
+
+  describe("Diagnostic logging (DISC-1133)", () => {
+    it("logs export batch size in verbose mode", () => {
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      const delegate = createMockDelegate();
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => TEST_API_KEY,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+        verbose: true,
+      });
+
+      exporter.export([createMockSpan(), createMockSpan()], vi.fn());
+
+      const batchLog = infoSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("[glasstrace:diag] Export batch: 2 spans"),
+      );
+      expect(batchLog).toBeDefined();
+    });
+
+    it("logs export success in verbose mode", () => {
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      const delegate = createMockDelegate();
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => TEST_API_KEY,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+        verbose: true,
+      });
+
+      exporter.export([createMockSpan()], vi.fn());
+
+      const successLog = infoSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("[glasstrace:diag] Export success: 1 spans delivered"),
+      );
+      expect(successLog).toBeDefined();
+    });
+
+    it("logs flush export success in verbose mode", () => {
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      const delegate = createMockDelegate();
+      let currentKey = API_KEY_PENDING;
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => currentKey,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+        verbose: true,
+      });
+
+      exporter.export([createMockSpan(), createMockSpan()], vi.fn());
+
+      currentKey = TEST_API_KEY;
+      exporter.notifyKeyResolved();
+
+      const flushLog = infoSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("[glasstrace:diag] Flush export success: 2 spans delivered"),
+      );
+      expect(flushLog).toBeDefined();
+    });
+
+    it("does NOT log diagnostics when verbose is off", () => {
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      const delegate = createMockDelegate();
+
+      const exporter = new GlasstraceExporter({
+        getApiKey: () => TEST_API_KEY,
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://api.glasstrace.dev/v1/traces",
+        createDelegate: () => delegate,
+        verbose: false,
+      });
+
+      exporter.export([createMockSpan()], vi.fn());
+
+      const diagLogs = infoSpy.mock.calls.filter(
+        (call) => typeof call[0] === "string" && call[0].includes("[glasstrace:diag]"),
+      );
+      expect(diagLogs).toHaveLength(0);
     });
   });
 });
