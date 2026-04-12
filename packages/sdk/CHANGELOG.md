@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.12.2
+
+### Patch Changes
+
+- fce4407: Add SDK health report collection to init call. Each `POST /v1/sdk/init` request now includes span export/drop counts, init failure counts, and config staleness metrics, enabling the backend to surface SDK health issues in the dashboard.
+
 ## 0.12.1
 
 ### Patch Changes
