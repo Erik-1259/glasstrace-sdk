@@ -123,6 +123,10 @@ packages and resolves the target Next.js app directory automatically.
 If multiple Next.js apps are found, run init from the specific app
 directory instead.
 
+If any scaffolding step fails, all previously completed steps are
+automatically rolled back so you are never left with a half-configured
+project.
+
 In CI environments (`CI=true`), only a generic
 `.glasstrace/mcp.json` is written.
 

@@ -11,7 +11,7 @@ import {
   scaffoldMcpMarker,
   addCoverageMapEnv,
 } from "../../../packages/sdk/src/cli/scaffolder.js";
-import { runInit, meetsNodeVersion } from "../../../packages/sdk/src/cli/init.js";
+import { runInit, meetsNodeVersion, rollbackSteps } from "../../../packages/sdk/src/cli/init.js";
 
 let tmpDir: string;
 
@@ -973,5 +973,352 @@ describe("meetsNodeVersion", () => {
 
   it("returns true when minimum is exactly 0", () => {
     expect(meetsNodeVersion(0)).toBe(true);
+  });
+});
+
+// --- Rollback tests ---
+
+describe("rollbackSteps", () => {
+  it("reverses instrumentation step — deletes init-created file", async () => {
+    // Simulate what scaffoldInstrumentation("created") produces
+    const instrContent = [
+      'import { registerGlasstrace } from "@glasstrace/sdk";',
+      "",
+      "export async function register() {",
+      "  // Glasstrace must be registered before Prisma instrumentation",
+      "  // to ensure all ORM spans are captured correctly.",
+      "  // If you use @prisma/instrumentation, import it after this call.",
+      "  registerGlasstrace();",
+      "}",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), instrContent);
+
+    await rollbackSteps(["instrumentation"], tmpDir);
+
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(false);
+  });
+
+  it("reverses instrumentation step — removes injected call from existing file", async () => {
+    // Simulate what scaffoldInstrumentation("injected") produces when
+    // user already had their own code in the register function
+    const content = [
+      'import { registerGlasstrace } from "@glasstrace/sdk";',
+      'import { something } from "some-lib";',
+      "",
+      "export function register() {",
+      "  registerGlasstrace();",
+      "  something();",
+      "}",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), content);
+
+    await rollbackSteps(["instrumentation"], tmpDir);
+
+    const result = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
+    expect(result).not.toContain("registerGlasstrace");
+    expect(result).not.toContain("@glasstrace/sdk");
+    expect(result).toContain("something()");
+  });
+
+  it("reverses instrumentation step — restores original content when originalInstrumentationContent provided", async () => {
+    // Simulate an injected file where the user already had their own imports
+    const originalContent = [
+      'import { something } from "some-lib";',
+      "",
+      "export function register() {",
+      "  something();",
+      "}",
+      "",
+    ].join("\n");
+    // The file on disk has been modified by scaffoldInstrumentation
+    const injectedContent = [
+      'import { registerGlasstrace } from "@glasstrace/sdk";',
+      'import { something } from "some-lib";',
+      "",
+      "export function register() {",
+      "  registerGlasstrace();",
+      "  something();",
+      "}",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), injectedContent);
+
+    // Pass originalInstrumentationContent to restore exact pre-init state
+    await rollbackSteps(["instrumentation"], tmpDir, {
+      originalInstrumentationContent: originalContent,
+    });
+
+    const result = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
+    expect(result).toBe(originalContent);
+    expect(result).not.toContain("registerGlasstrace");
+    expect(result).not.toContain("@glasstrace/sdk");
+    expect(result).toContain("something()");
+  });
+
+  it("reverses next-config step — unwraps ESM withGlasstraceConfig", async () => {
+    const content = [
+      'import { withGlasstraceConfig } from "@glasstrace/sdk";',
+      "",
+      "const nextConfig = {};",
+      "export default withGlasstraceConfig(nextConfig);",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(tmpDir, "next.config.ts"), content);
+
+    await rollbackSteps(["next-config"], tmpDir);
+
+    const result = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
+    expect(result).not.toContain("withGlasstraceConfig");
+    expect(result).not.toContain("@glasstrace/sdk");
+    expect(result).toContain("export default nextConfig;");
+  });
+
+  it("reverses next-config step — unwraps CJS withGlasstraceConfig", async () => {
+    const content = [
+      'const { withGlasstraceConfig } = require("@glasstrace/sdk");',
+      "",
+      "const nextConfig = {};",
+      "module.exports = withGlasstraceConfig(nextConfig);",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(tmpDir, "next.config.js"), content);
+
+    await rollbackSteps(["next-config"], tmpDir);
+
+    const result = fs.readFileSync(path.join(tmpDir, "next.config.js"), "utf-8");
+    expect(result).not.toContain("withGlasstraceConfig");
+    expect(result).not.toContain("@glasstrace/sdk");
+    expect(result).toContain("module.exports = nextConfig;");
+  });
+
+  it("reverses env-local step — removes only GLASSTRACE_API_KEY lines", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, ".env.local"),
+      "OTHER_KEY=value\n# GLASSTRACE_API_KEY=your_key_here\n",
+    );
+
+    await rollbackSteps(["env-local"], tmpDir);
+
+    const result = fs.readFileSync(path.join(tmpDir, ".env.local"), "utf-8");
+    expect(result).toContain("OTHER_KEY=value");
+    expect(result).not.toContain("GLASSTRACE_API_KEY");
+  });
+
+  it("reverses env-local step — preserves pre-existing GLASSTRACE_COVERAGE_MAP", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, ".env.local"),
+      "GLASSTRACE_COVERAGE_MAP=true\n# GLASSTRACE_API_KEY=your_key_here\n",
+    );
+
+    await rollbackSteps(["env-local"], tmpDir);
+
+    const result = fs.readFileSync(path.join(tmpDir, ".env.local"), "utf-8");
+    expect(result).toContain("GLASSTRACE_COVERAGE_MAP=true");
+    expect(result).not.toContain("GLASSTRACE_API_KEY");
+  });
+
+  it("reverses env-local step — deletes file when only GLASSTRACE entries remain", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, ".env.local"),
+      "# GLASSTRACE_API_KEY=your_key_here\n",
+    );
+
+    await rollbackSteps(["env-local"], tmpDir);
+
+    expect(fs.existsSync(path.join(tmpDir, ".env.local"))).toBe(false);
+  });
+
+  it("reverses gitignore step — removes .glasstrace/ line", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, ".gitignore"),
+      "node_modules/\n.glasstrace/\n",
+    );
+
+    await rollbackSteps(["gitignore"], tmpDir);
+
+    const result = fs.readFileSync(path.join(tmpDir, ".gitignore"), "utf-8");
+    expect(result).toContain("node_modules/");
+    expect(result).not.toContain(".glasstrace/");
+  });
+
+  it("reverses multiple steps in reverse order", async () => {
+    // Set up: instrumentation (init-created) + env-local + gitignore
+    const instrContent = [
+      'import { registerGlasstrace } from "@glasstrace/sdk";',
+      "",
+      "export async function register() {",
+      "  registerGlasstrace();",
+      "}",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), instrContent);
+    fs.writeFileSync(
+      path.join(tmpDir, ".env.local"),
+      "# GLASSTRACE_API_KEY=your_key_here\n",
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, ".gitignore"),
+      "node_modules/\n.glasstrace/\n",
+    );
+
+    await rollbackSteps(
+      ["instrumentation", "env-local", "gitignore"],
+      tmpDir,
+    );
+
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".env.local"))).toBe(false);
+    const gitignore = fs.readFileSync(path.join(tmpDir, ".gitignore"), "utf-8");
+    expect(gitignore).not.toContain(".glasstrace/");
+  });
+
+  it("is best-effort — continues when individual rollback steps fail", async () => {
+    // Make instrumentation.ts a directory so the rollback for it fails,
+    // but gitignore rollback should still succeed
+    fs.mkdirSync(path.join(tmpDir, "instrumentation.ts"));
+    fs.writeFileSync(
+      path.join(tmpDir, ".gitignore"),
+      "node_modules/\n.glasstrace/\n",
+    );
+
+    // Should not throw even though instrumentation rollback fails
+    await rollbackSteps(["instrumentation", "gitignore"], tmpDir);
+
+    // Gitignore should still be cleaned up
+    const gitignore = fs.readFileSync(path.join(tmpDir, ".gitignore"), "utf-8");
+    expect(gitignore).not.toContain(".glasstrace/");
+    // The directory is still there (rollback failed for this step)
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(true);
+  });
+
+  it("handles empty steps array", async () => {
+    // Should not throw
+    await rollbackSteps([], tmpDir);
+  });
+});
+
+describe("runInit — rollback on failure", () => {
+  beforeEach(() => {
+    if (!fs.existsSync(path.join(tmpDir, "next.config.ts"))) {
+      fs.writeFileSync(path.join(tmpDir, "next.config.ts"), "export default {};\n");
+    }
+  });
+
+  it("rolls back instrumentation when scaffoldEnvLocal fails", async () => {
+    // Create .env.local as a directory — causes fs.readFileSync to throw EISDIR
+    fs.mkdirSync(path.join(tmpDir, ".env.local"));
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.some((e: string) => e.includes(".env.local"))).toBe(true);
+
+    // Instrumentation should be rolled back — the init-created file should be deleted
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(false);
+
+    // Next config should be rolled back — unwrapped back to original
+    const configContent = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
+    expect(configContent).not.toContain("withGlasstraceConfig");
+  });
+
+  it("rolls back instrumentation and next-config when scaffoldGitignore fails", async () => {
+    // Create .gitignore as a directory — causes fs.readFileSync to throw EISDIR
+    fs.mkdirSync(path.join(tmpDir, ".gitignore"));
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.some((e: string) => e.includes(".gitignore"))).toBe(true);
+
+    // Instrumentation should be rolled back
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(false);
+
+    // Next config should be rolled back
+    const configContent = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
+    expect(configContent).not.toContain("withGlasstraceConfig");
+
+    // .env.local should be rolled back (GLASSTRACE_API_KEY removed)
+    if (fs.existsSync(path.join(tmpDir, ".env.local"))) {
+      const envContent = fs.readFileSync(path.join(tmpDir, ".env.local"), "utf-8");
+      expect(envContent).not.toContain("GLASSTRACE_API_KEY");
+    }
+  });
+
+  it("preserves original error when init fails after instrumentation step", async () => {
+    // Create .env.local as a directory to trigger the original failure
+    // in scaffoldEnvLocal, after instrumentation has already been written.
+    fs.mkdirSync(path.join(tmpDir, ".env.local"));
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(1);
+    // The original error about .env.local should be present
+    expect(result.errors.some((e: string) => e.includes(".env.local"))).toBe(true);
+  });
+
+  it("does NOT roll back on non-fatal warnings", async () => {
+    // Set up: instrumentation with unrecognized pattern generates a WARNING, not an error
+    fs.writeFileSync(
+      path.join(tmpDir, "instrumentation.ts"),
+      "// custom content without register()",
+    );
+    fs.writeFileSync(path.join(tmpDir, ".env.local"), "GLASSTRACE_API_KEY=my-key\n");
+    fs.writeFileSync(path.join(tmpDir, ".gitignore"), ".glasstrace/\n");
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(0);
+    // Warnings were generated but no rollback happened
+    expect(result.warnings.length).toBeGreaterThan(0);
+    // Files should remain (not rolled back)
+    const gitignore = fs.readFileSync(path.join(tmpDir, ".gitignore"), "utf-8");
+    expect(gitignore).toContain(".glasstrace/");
+  });
+
+  it("does not roll back steps that were skipped (already present)", async () => {
+    // Pre-configure everything so nothing is actually modified
+    fs.writeFileSync(
+      path.join(tmpDir, "instrumentation.ts"),
+      'import { registerGlasstrace } from "@glasstrace/sdk";\nexport async function register() { registerGlasstrace(); }\n',
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "next.config.ts"),
+      'import { withGlasstraceConfig } from "@glasstrace/sdk";\nexport default withGlasstraceConfig({});\n',
+    );
+    fs.writeFileSync(path.join(tmpDir, ".env.local"), "GLASSTRACE_API_KEY=my-key\n");
+    // Now make .gitignore a directory to trigger failure
+    fs.mkdirSync(path.join(tmpDir, ".gitignore"));
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(1);
+    // Instrumentation was "already-registered" — should NOT be touched by rollback
+    const instrContent = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
+    expect(instrContent).toContain("registerGlasstrace");
+    // Next config was "already-wrapped" — should NOT be touched by rollback
+    const configContent = fs.readFileSync(path.join(tmpDir, "next.config.ts"), "utf-8");
+    expect(configContent).toContain("withGlasstraceConfig");
   });
 });
