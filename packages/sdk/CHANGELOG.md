@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.13.2
+
+### Patch Changes
+
+- b0b9e37: Fix trace context propagation — switch from BasicTracerProvider to NodeTracerProvider so spans from the same HTTP request share a traceId and have proper parent-child relationships (DISC-1183).
+
 ## 0.13.1
 
 ### Patch Changes
