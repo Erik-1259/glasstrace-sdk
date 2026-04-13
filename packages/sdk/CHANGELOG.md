@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.13.4
+
+### Patch Changes
+
+- 84eb43e: Fix ESM context manager installation — use `createRequire` from `node:module` instead of `Function("require")` which fails in ESM global scope (DISC-1183).
+
 ## 0.13.3
 
 ### Patch Changes
