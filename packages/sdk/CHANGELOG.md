@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.13.3
+
+### Patch Changes
+
+- 1fa0fc8: Fix context manager timing — register AsyncLocalStorage context manager synchronously in registerGlasstrace() before configureOtel() runs, so Next.js spans created during async OTel setup inherit trace context (DISC-1183).
+
 ## 0.13.2
 
 ### Patch Changes
