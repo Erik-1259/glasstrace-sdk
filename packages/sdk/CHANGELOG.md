@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.13.5
+
+### Patch Changes
+
+- 0280d36: Fix context manager race condition — use static import of AsyncLocalStorage instead of async dynamic import that resolved after installContextManager() was called (DISC-1183).
+
 ## 0.13.4
 
 ### Patch Changes
