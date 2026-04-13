@@ -9,6 +9,7 @@ import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig, getL
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
 import { installContextManager } from "./context-manager.js";
+import * as otelApi from "@opentelemetry/api";
 import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
@@ -117,13 +118,34 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     isRegistered = true;
     const currentGeneration = registrationGeneration;
 
-    // Register the context manager SYNCHRONOUSLY before any spans are
-    // created. Without this, each span starts a new root trace with a
-    // fresh traceId because there's no parent context to inherit from.
-    // Must happen before configureOtel (which is async) — Next.js may
-    // create spans between registerGlasstrace() returning and
-    // configureOtel() completing (DISC-1183).
-    installContextManager();
+    // Check for an existing OTel provider BEFORE installing the context
+    // manager. If another tracing tool (Datadog, Sentry, New Relic) has
+    // already registered a provider, the SDK must NOT claim the global
+    // context manager slot — doing so would break the other tool's
+    // context propagation. The ProxyTracer check is synchronous.
+    const existingProbe = otelApi.trace.getTracerProvider().getTracer("glasstrace-probe");
+    const anotherProviderRegistered = existingProbe.constructor.name !== "ProxyTracer";
+
+    if (anotherProviderRegistered) {
+      if (config.verbose) {
+        console.info("[glasstrace] Another OTel provider detected — using existing context manager.");
+      }
+    } else {
+      // Register the context manager SYNCHRONOUSLY before any spans are
+      // created. Without this, each span starts a new root trace with a
+      // fresh traceId because there's no parent context to inherit from.
+      // Must happen before configureOtel (which is async) — Next.js may
+      // create spans between registerGlasstrace() returning and
+      // configureOtel() completing (DISC-1183).
+      const contextManagerInstalled = installContextManager();
+      if (config.verbose) {
+        console.info(
+          contextManagerInstalled
+            ? "[glasstrace] Context manager installed."
+            : "[glasstrace] Context manager not available — trace context propagation disabled.",
+        );
+      }
+    }
 
     // Configure OTel IMMEDIATELY in all modes.
     // OTel is registered before the anon key resolves so that
