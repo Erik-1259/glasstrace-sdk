@@ -226,43 +226,9 @@ export async function configureOtel(
     spanProcessors: [processor],
   });
 
-  // Register an AsyncLocalStorage-based context manager so trace context
-  // propagates across async boundaries. Without this, each span starts a
-  // new root trace with a fresh traceId (DISC-1183).
-  // Uses Node.js built-in AsyncLocalStorage directly to avoid importing
-  // @opentelemetry/context-async-hooks (which uses require("async_hooks")
-  // and breaks when bundled as ESM by tsup). Dynamic import keeps
-  // node:async_hooks out of the module graph for browser bundlers.
-  const asyncHooks = await tryImport("node:async_hooks") as { AsyncLocalStorage: typeof import("node:async_hooks").AsyncLocalStorage } | null;
-  if (!asyncHooks) {
-    // Cannot set up context propagation without async_hooks (non-Node env).
-    // Spans will still be captured but without parent-child relationships.
-    otelApi.trace.setGlobalTracerProvider(provider);
-    registerShutdownHooks(provider);
-    return;
-  }
-  const { AsyncLocalStorage } = asyncHooks;
-  const als = new AsyncLocalStorage<otelApi.Context>();
-  const contextManager: otelApi.ContextManager = {
-    active: () => als.getStore() ?? otelApi.ROOT_CONTEXT,
-    with: <A extends unknown[], F extends (...args: A) => ReturnType<F>>(
-      context: otelApi.Context,
-      fn: F,
-      thisArg?: ThisParameterType<F>,
-      ...args: A
-    ): ReturnType<F> => als.run(context, () => fn.apply(thisArg, args)),
-    bind: <T>(context: otelApi.Context, target: T): T => {
-      if (typeof target === "function") {
-        const bound = (...args: unknown[]) =>
-          als.run(context, () => (target as (...a: unknown[]) => unknown)(...args));
-        return bound as T;
-      }
-      return target;
-    },
-    enable: () => contextManager,
-    disable: () => contextManager,
-  };
-  otelApi.context.setGlobalContextManager(contextManager);
+  // Context manager is registered synchronously in registerGlasstrace()
+  // before configureOtel() is called (DISC-1183). By this point, it's
+  // already active and propagating trace context across async boundaries.
 
   otelApi.trace.setGlobalTracerProvider(provider);
   registerShutdownHooks(provider);
