@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.12.6
+
+### Patch Changes
+
+- fd22187: Remove DISC-1133 diagnostic logging — investigation confirmed the trace drop issue is backend-side (DISC-1157), not SDK-side.
+
 ## 0.12.5
 
 ### Patch Changes
