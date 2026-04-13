@@ -8,6 +8,7 @@ import { getOrCreateAnonKey, readAnonKey } from "./anon-key.js";
 import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig, getLinkedAccountId, getClaimResult, didLastInitSucceed } from "./init-client.js";
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
+import { installContextManager } from "./context-manager.js";
 import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
@@ -115,6 +116,14 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     isRegistered = true;
     const currentGeneration = registrationGeneration;
+
+    // Register the context manager SYNCHRONOUSLY before any spans are
+    // created. Without this, each span starts a new root trace with a
+    // fresh traceId because there's no parent context to inherit from.
+    // Must happen before configureOtel (which is async) — Next.js may
+    // create spans between registerGlasstrace() returning and
+    // configureOtel() completing (DISC-1183).
+    installContextManager();
 
     // Configure OTel IMMEDIATELY in all modes.
     // OTel is registered before the anon key resolves so that
