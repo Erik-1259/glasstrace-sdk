@@ -1,33 +1,56 @@
 import * as otelApi from "@opentelemetry/api";
 
 /**
+ * Cached AsyncLocalStorage constructor, loaded eagerly at module
+ * evaluation time via dynamic import. Available by the time
+ * registerGlasstrace() runs because the module is imported at the
+ * top of register.ts.
+ */
+let AsyncLocalStorageCtor: (new <T>() => {
+  getStore: () => T | undefined;
+  run: <R>(store: T, fn: () => R) => R;
+}) | null = null;
+
+// Load AsyncLocalStorage eagerly via dynamic import at module evaluation.
+// This runs when register.ts imports this module — before registerGlasstrace()
+// is called. The dynamic import resolves in one microtask on Node.js built-ins.
+// Uses Function("id", "return import(id)") to hide from static analysis
+// (same pattern as tryImport in otel-config.ts).
+try {
+  const importFn = Function("id", "return import(id)") as (id: string) => Promise<Record<string, unknown>>;
+  importFn("node:async_hooks").then(
+    (mod) => {
+      AsyncLocalStorageCtor = mod.AsyncLocalStorage as typeof AsyncLocalStorageCtor;
+    },
+    () => { /* non-Node environment */ },
+  );
+} catch {
+  // Function constructor not available — non-standard environment
+}
+
+/**
  * Registers an AsyncLocalStorage-based context manager with the OTel API.
  *
- * This MUST be called synchronously before any spans are created —
- * otherwise, spans created before registration have no parent context
- * and each gets a fresh traceId (DISC-1183).
+ * This MUST be called synchronously in registerGlasstrace() before any
+ * spans are created. The AsyncLocalStorage constructor is loaded eagerly
+ * at module import time (above) via dynamic import. By the time
+ * registerGlasstrace() is called from instrumentation.ts's register()
+ * hook, the microtask has resolved and AsyncLocalStorageCtor is available.
  *
- * Uses `Function("id", "return require(id)")` to load `node:async_hooks`
- * without a static import, keeping it out of the module graph for
- * browser bundlers. This is the same pattern used by `tryImport` in
- * `otel-config.ts` for optional peer dependencies.
+ * If AsyncLocalStorage is not yet available (extremely unlikely — would
+ * require registerGlasstrace() to be called in the same microtask as the
+ * module import), falls back gracefully with no context propagation.
  *
- * No-ops silently if `AsyncLocalStorage` is unavailable (non-Node env).
+ * @returns `true` if the context manager was installed, `false` if it
+ * could not be installed (non-Node env or another tool registered first).
  */
-export function installContextManager(): void {
-  try {
-    // Dynamic require hidden from bundlers (same pattern as tryImport
-    // but synchronous — context manager must be registered before the
-    // first span is created, not after an async tick).
-    const req = Function("id", "return require(id)") as (id: string) => Record<string, unknown>;
-    const asyncHooks = req("node:async_hooks") as {
-      AsyncLocalStorage: new <T>() => {
-        getStore: () => T | undefined;
-        run: <R>(store: T, fn: () => R) => R;
-      };
-    };
+export function installContextManager(): boolean {
+  if (!AsyncLocalStorageCtor) {
+    return false;
+  }
 
-    const als = new asyncHooks.AsyncLocalStorage<otelApi.Context>();
+  try {
+    const als = new AsyncLocalStorageCtor<otelApi.Context>();
 
     const contextManager: otelApi.ContextManager = {
       active: () => als.getStore() ?? otelApi.ROOT_CONTEXT,
@@ -49,9 +72,15 @@ export function installContextManager(): void {
       disable: () => contextManager,
     };
 
-    otelApi.context.setGlobalContextManager(contextManager);
+    const success = otelApi.context.setGlobalContextManager(contextManager);
+    if (!success) {
+      console.warn(
+        "[glasstrace] Another context manager is already registered. " +
+        "Trace context propagation may not work as expected.",
+      );
+    }
+    return success;
   } catch {
-    // AsyncLocalStorage not available (non-Node environment).
-    // Spans will still be captured but without parent-child relationships.
+    return false;
   }
 }
