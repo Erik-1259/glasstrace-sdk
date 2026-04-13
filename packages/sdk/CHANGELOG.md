@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.13.1
+
+### Patch Changes
+
+- 29b8d80: Add per-span trace context diagnostics in verbose mode for traceId/parentSpanId propagation analysis.
+
 ## 0.13.0
 
 ### Minor Changes
