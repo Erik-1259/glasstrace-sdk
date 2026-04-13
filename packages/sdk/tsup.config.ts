@@ -7,6 +7,7 @@ export default defineConfig({
     "cli/init": "src/cli/init.ts",
     "cli/uninit": "src/cli/uninit.ts",
     "cli/mcp-add": "src/cli/mcp-add.ts",
+    "cli/status": "src/cli/status.ts",
     "adapters/drizzle": "src/adapters/drizzle.ts",
   },
   format: ["esm", "cjs"],

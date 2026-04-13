@@ -641,12 +641,54 @@ if (isDirectExecution) {
         );
         process.exit(1);
       });
+  } else if (subcommand === "status") {
+    const remainingArgs = process.argv.slice(3);
+    const json = remainingArgs.includes("--json");
+
+    Promise.all([import("./status.js"), import("./monorepo.js")])
+      .then(([{ runStatus }, { resolveProjectRoot: resolve }]) => {
+        let projectRoot = process.cwd();
+        try {
+          projectRoot = resolve(projectRoot).projectRoot;
+        } catch {
+          // Fall back to cwd if monorepo resolution fails
+        }
+        const result = runStatus({ projectRoot });
+        if (json) {
+          process.stdout.write(JSON.stringify(result) + "\n");
+        } else {
+          const checks = [
+            ["Installed", result.installed],
+            ["Initialized", result.initialized],
+            ["Instrumentation", result.instrumentation],
+            ["Config wrapped", result.configWrapped],
+            ["Anon key", result.anonKey],
+            ["MCP configured", result.mcpConfigured],
+          ] as const;
+          for (const [label, ok] of checks) {
+            process.stderr.write(`  ${ok ? "+" : "-"} ${label}\n`);
+          }
+          if (result.agents.length > 0) {
+            process.stderr.write(`  + Agents: ${result.agents.join(", ")}\n`);
+          } else {
+            process.stderr.write("  - Agents\n");
+          }
+        }
+        process.exit(0);
+      })
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        process.exit(1);
+      });
   } else {
     process.stderr.write(
       `Unknown command: ${subcommand}\n\n` +
         "Usage:\n" +
         "  glasstrace init [--yes] [--coverage-map]\n" +
         "  glasstrace uninit [--dry-run]\n" +
+        "  glasstrace status [--json]\n" +
         "  glasstrace mcp add [--force] [--dry-run]\n",
     );
     process.exit(1);
