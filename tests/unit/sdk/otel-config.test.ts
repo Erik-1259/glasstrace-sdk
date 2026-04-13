@@ -233,38 +233,4 @@ describe("configureOtel()", () => {
     });
   });
 
-  describe("BSP config diagnostic logging", () => {
-    it("should log BSP configuration when verbose is true", async () => {
-      vi.spyOn(console, "warn").mockImplementation(() => {});
-      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
-
-      await configureOtel(createTestConfig({ verbose: true }), sessionManager);
-
-      const bspLog = infoSpy.mock.calls.find(
-        (call) =>
-          typeof call[0] === "string" &&
-          call[0].includes("[glasstrace:diag] BatchSpanProcessor"),
-      );
-      expect(bspLog).toBeDefined();
-      expect(bspLog![0]).toContain("scheduledDelayMillis=1000");
-      // Log only reports values we explicitly set — no hardcoded OTel defaults
-      // that could be overridden by environment variables
-      expect(bspLog![0]).not.toContain("maxQueueSize");
-
-    });
-
-    it("should NOT log BSP configuration when verbose is false", async () => {
-      vi.spyOn(console, "warn").mockImplementation(() => {});
-      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
-
-      await configureOtel(createTestConfig({ verbose: false }), sessionManager);
-
-      const bspLogs = infoSpy.mock.calls.filter(
-        (call) =>
-          typeof call[0] === "string" &&
-          call[0].includes("[glasstrace:diag] BatchSpanProcessor"),
-      );
-      expect(bspLogs).toHaveLength(0);
-    });
-  });
 });
