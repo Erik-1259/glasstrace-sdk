@@ -1,56 +1,26 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as otelApi from "@opentelemetry/api";
-
-/**
- * Cached AsyncLocalStorage constructor, loaded eagerly at module
- * evaluation time via dynamic import. Available by the time
- * registerGlasstrace() runs because the module is imported at the
- * top of register.ts.
- */
-let AsyncLocalStorageCtor: (new <T>() => {
-  getStore: () => T | undefined;
-  run: <R>(store: T, fn: () => R) => R;
-}) | null = null;
-
-// Load AsyncLocalStorage eagerly via dynamic import at module evaluation.
-// This runs when register.ts imports this module — before registerGlasstrace()
-// is called. The dynamic import resolves in one microtask on Node.js built-ins.
-// Uses Function("id", "return import(id)") to hide from static analysis
-// (same pattern as tryImport in otel-config.ts).
-try {
-  const importFn = Function("id", "return import(id)") as (id: string) => Promise<Record<string, unknown>>;
-  importFn("node:async_hooks").then(
-    (mod) => {
-      AsyncLocalStorageCtor = mod.AsyncLocalStorage as typeof AsyncLocalStorageCtor;
-    },
-    () => { /* non-Node environment */ },
-  );
-} catch {
-  // Function constructor not available — non-standard environment
-}
 
 /**
  * Registers an AsyncLocalStorage-based context manager with the OTel API.
  *
- * This MUST be called synchronously in registerGlasstrace() before any
- * spans are created. The AsyncLocalStorage constructor is loaded eagerly
- * at module import time (above) via dynamic import. By the time
- * registerGlasstrace() is called from instrumentation.ts's register()
- * hook, the microtask has resolved and AsyncLocalStorageCtor is available.
+ * This MUST be called synchronously before any spans are created —
+ * otherwise, spans created before registration have no parent context
+ * and each gets a fresh traceId (DISC-1183).
  *
- * If AsyncLocalStorage is not yet available (extremely unlikely — would
- * require registerGlasstrace() to be called in the same microtask as the
- * module import), falls back gracefully with no context propagation.
+ * Uses a static import of `node:async_hooks` (synchronous, no race
+ * condition). This means the module cannot be evaluated in non-Node
+ * environments (Edge Runtime, browser) — but the SDK is a server-side
+ * package and non-Node environments are guarded by the `sideEffects: false`
+ * flag in package.json (browser bundlers tree-shake it) and the browser
+ * import check CI step externalizes `async_hooks`.
  *
- * @returns `true` if the context manager was installed, `false` if it
- * could not be installed (non-Node env or another tool registered first).
+ * @returns `true` if the context manager was installed, `false` if
+ * another tool already registered a context manager.
  */
 export function installContextManager(): boolean {
-  if (!AsyncLocalStorageCtor) {
-    return false;
-  }
-
   try {
-    const als = new AsyncLocalStorageCtor<otelApi.Context>();
+    const als = new AsyncLocalStorage<otelApi.Context>();
 
     const contextManager: otelApi.ContextManager = {
       active: () => als.getStore() ?? otelApi.ROOT_CONTEXT,
