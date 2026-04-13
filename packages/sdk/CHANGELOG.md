@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.13.0
+
+### Minor Changes
+
+- 4f0798e: Add `glasstrace status` CLI command for machine-readable SDK configuration state (DISC-1179). Reports whether the SDK is installed, initialized, and fully configured — designed for AI agents to determine what action to take.
+
 ## 0.12.6
 
 ### Patch Changes
