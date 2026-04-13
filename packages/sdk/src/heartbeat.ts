@@ -159,7 +159,7 @@ function registerShutdownHandlers(
 
   let shutdownFired = false;
 
-  const handler = (signal: NodeJS.Signals) => {
+  const handler = () => {
     if (shutdownFired) return;
     shutdownFired = true;
 
@@ -169,16 +169,15 @@ function registerShutdownHandlers(
       heartbeatTimer = null;
     }
 
-    // Send final health report, then re-raise the signal so the process
-    // exits. Without re-raising, Node suppresses default termination
-    // when a signal handler is present, which can cause stuck pods.
+    // Send final health report (best-effort). Signal re-raising is handled
+    // by otel-config's shutdown handler — the heartbeat must NOT re-raise
+    // to avoid a race where the first handler's re-raise terminates the
+    // process before the second handler completes (DISC-1146).
     const healthReport = collectHealthReport(sdkVersion);
     void performInit(config, anonKey, sdkVersion, healthReport)
       .catch(() => { /* best-effort */ })
       .finally(() => {
-        // Remove our handlers before re-raising to avoid re-entry
         removeShutdownHandlers();
-        process.kill(process.pid, signal);
       });
   };
 

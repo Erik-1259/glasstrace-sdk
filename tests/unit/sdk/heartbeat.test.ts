@@ -368,7 +368,7 @@ describe("heartbeat", () => {
       expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
     });
 
-    it("shutdown handler sends final health report and re-raises signal", async () => {
+    it("shutdown handler sends final health report but does not re-raise signal", async () => {
       const collectSpy = vi.spyOn(healthCollector, "collectHealthReport");
       const performSpy = vi.spyOn(initClient, "performInit").mockResolvedValue(null);
       vi.spyOn(initClient, "consumeRateLimitFlag").mockReturnValue(false);
@@ -386,8 +386,8 @@ describe("heartbeat", () => {
       expect(collectSpy).toHaveBeenCalled();
       expect(performSpy).toHaveBeenCalled();
 
-      // Should re-raise SIGTERM so the process exits
-      expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGTERM");
+      // Should NOT re-raise signal — otel-config owns signal re-raising (DISC-1146)
+      expect(killSpy).not.toHaveBeenCalled();
 
       killSpy.mockRestore();
     });
