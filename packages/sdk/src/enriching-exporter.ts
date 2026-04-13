@@ -32,6 +32,7 @@ export interface GlasstraceExporterOptions {
   environment: string | undefined;
   endpointUrl: string;
   createDelegate: ((url: string, headers: Record<string, string>) => SpanExporter) | null;
+  /** @deprecated No-op retained for backward compatibility. Will be removed in a future major. */
   verbose?: boolean;
 }
 
@@ -59,7 +60,6 @@ export class GlasstraceExporter implements SpanExporter {
   private readonly environment: string | undefined;
   private readonly endpointUrl: string;
   private readonly createDelegateFn: ((url: string, headers: Record<string, string>) => SpanExporter) | null;
-  private readonly verbose: boolean;
 
   private delegate: SpanExporter | null = null;
   private delegateKey: string | null = null;
@@ -74,7 +74,6 @@ export class GlasstraceExporter implements SpanExporter {
     this.environment = options.environment;
     this.endpointUrl = options.endpointUrl;
     this.createDelegateFn = options.createDelegate;
-    this.verbose = options.verbose ?? false;
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -84,16 +83,6 @@ export class GlasstraceExporter implements SpanExporter {
       // so session IDs are computed with the resolved key, not "pending".
       this.bufferSpans(spans, resultCallback);
       return;
-    }
-
-    // Log raw span trace context before enrichment for diagnostics
-    if (this.verbose) {
-      for (const span of spans) {
-        const ctx = span.spanContext();
-        sdkLog("info",
-          `[glasstrace:span-diag] name=${span.name} traceId=${ctx.traceId} spanId=${ctx.spanId} parentSpanId=${(span as unknown as { parentSpanId?: string }).parentSpanId ?? "root"}`,
-        );
-      }
     }
 
     // Key is available — enrich and export
@@ -411,16 +400,6 @@ export class GlasstraceExporter implements SpanExporter {
     this.pendingSpanCount = 0;
 
     for (const batch of batches) {
-      // Log raw span trace context before enrichment for diagnostics
-      if (this.verbose) {
-        for (const span of batch.spans) {
-          const ctx = span.spanContext();
-          sdkLog("info",
-            `[glasstrace:span-diag] name=${span.name} traceId=${ctx.traceId} spanId=${ctx.spanId} parentSpanId=${(span as unknown as { parentSpanId?: string }).parentSpanId ?? "root"}`,
-          );
-        }
-      }
-
       // Enrich at flush time with the now-resolved key
       const enriched = batch.spans.map((span) => this.enrichSpan(span));
       exporter.export(enriched, (result) => {

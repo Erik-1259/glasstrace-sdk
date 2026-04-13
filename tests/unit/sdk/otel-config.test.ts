@@ -43,6 +43,8 @@ describe("configureOtel()", () => {
     // Clean up signal listeners before disabling trace to prevent leaks
     resetOtelConfigForTesting();
     otelApi.trace.disable();
+    otelApi.context.disable();
+    otelApi.propagation.disable();
     otelApi.diag.disable();
   });
 
@@ -205,6 +207,22 @@ describe("configureOtel()", () => {
       const configArg = bspSpy.mock.calls[0][1];
       expect(configArg).toBeDefined();
       expect(configArg?.scheduledDelayMillis).toBe(1000);
+    });
+  });
+
+  describe("Context propagation", () => {
+    it("should register a real tracer provider (not ProxyTracer) via provider.register()", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // After register(), creating a tracer and starting a span should
+      // use the real context manager (not the no-op ProxyTracer default).
+      // We verify by checking that the global tracer provider is set.
+      const provider = otelApi.trace.getTracerProvider();
+      const tracer = provider.getTracer("test");
+      // A real tracer (not ProxyTracer) means register() ran successfully
+      expect(tracer.constructor.name).not.toBe("ProxyTracer");
     });
   });
 
