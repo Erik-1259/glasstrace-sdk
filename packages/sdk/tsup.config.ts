@@ -32,8 +32,9 @@ export default defineConfig({
     "@opentelemetry/exporter-trace-otlp-http",
     "@opentelemetry/core",
   ] },
-  // Provides import.meta.url shim for CJS output so that
-  // createRequire(import.meta.url) works in both ESM and CJS.
+  // Provides CJS compatibility shims (require, __filename, import.meta.url)
+  // for the ESM output. Required because some SDK modules use synchronous
+  // require() for optional features (e.g., loadFsSyncOrNull, getHashFn).
   shims: true,
   sourcemap: true,
   clean: true,

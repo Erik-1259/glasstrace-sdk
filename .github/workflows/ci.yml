@@ -92,6 +92,7 @@ jobs:
             --external:os --external:http --external:https \
             --external:net --external:tls --external:events \
             --external:buffer --external:url --external:querystring \
+            --external:async_hooks --external:module \
             entry.mjs
           echo "Browser import check passed"
 
