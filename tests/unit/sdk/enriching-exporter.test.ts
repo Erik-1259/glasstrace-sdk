@@ -7,6 +7,7 @@ import type { CaptureConfig } from "@glasstrace/protocol";
 import { GlasstraceExporter, API_KEY_PENDING } from "../../../packages/sdk/src/enriching-exporter.js";
 import { SessionManager } from "../../../packages/sdk/src/session.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
+import * as consoleCapture from "../../../packages/sdk/src/console-capture.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -31,6 +32,7 @@ function createMockSpan(overrides?: {
   endTime?: [number, number];
   instrumentationScope?: { name: string; version?: string };
   status?: { code: SpanStatusCode; message?: string };
+  events?: Array<{ time: [number, number]; name: string; attributes?: Record<string, string | number | boolean> }>;
 }): ReadableSpan {
   return {
     name: overrides?.name ?? "GET /api/users",
@@ -50,7 +52,7 @@ function createMockSpan(overrides?: {
       "http.status_code": 200,
     },
     links: [],
-    events: [],
+    events: overrides?.events ?? [],
     duration: [0, 150_000_000],
     ended: true,
     resource: { attributes: {} },
@@ -60,6 +62,23 @@ function createMockSpan(overrides?: {
     droppedEventsCount: 0,
     droppedLinksCount: 0,
   } as unknown as ReadableSpan; // Mock object — ReadableSpan interface is too wide to satisfy without cast
+}
+
+/**
+ * Creates a mock exception event matching OTel's recordException() output.
+ */
+function createExceptionEvent(
+  type?: string,
+  message?: string,
+): { time: [number, number]; name: string; attributes: Record<string, string> } {
+  const attributes: Record<string, string> = {};
+  if (type) attributes["exception.type"] = type;
+  if (message) attributes["exception.message"] = message;
+  return {
+    time: [1700000000, 50_000_000],
+    name: "exception",
+    attributes,
+  };
 }
 
 /**
@@ -87,6 +106,7 @@ function createExporter(overrides?: {
   apiKey?: string | (() => string);
   environment?: string;
   delegate?: SpanExporter;
+  verbose?: boolean;
 }): {
   exporter: GlasstraceExporter;
   delegate: ReturnType<typeof createMockDelegate>;
@@ -111,6 +131,7 @@ function createExporter(overrides?: {
     environment: overrides?.environment,
     endpointUrl: "https://api.glasstrace.dev/v1/traces",
     createDelegate: () => delegate,
+    verbose: overrides?.verbose,
   });
 
   return { exporter, delegate, sessionManager, getApiKey };
@@ -1297,6 +1318,236 @@ describe("GlasstraceExporter", () => {
       const enriched = delegate.exportedSpans[0][0];
       // Non-HTTP span should NOT get an inferred HTTP status code
       expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBeUndefined();
+    });
+  });
+
+  describe("Error detection via exception events (DISC-1204)", () => {
+    it("infers 500 when exception event present and status is UNSET with status_code 200", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("TypeError", "Cannot read properties of undefined")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("infers 500 when exception event present and no http.status_code", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+        },
+        events: [createExceptionEvent("Error", "boom")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("uses error.type numeric value when exception event triggers inference", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "error.type": "503",
+        },
+        events: [createExceptionEvent("Error", "service unavailable")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(503);
+    });
+
+    it("does NOT override existing 4xx/5xx status code when exception event present", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 422,
+        },
+        events: [createExceptionEvent("ValidationError", "invalid input")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(422);
+    });
+
+    it("does NOT inject status code on non-HTTP span with exception event", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "db.operation": "SELECT",
+          "db.sql.table": "users",
+        },
+        events: [createExceptionEvent("Error", "query failed")],
+        instrumentationScope: { name: "@prisma/instrumentation" },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBeUndefined();
+    });
+
+    it("infers 500 from exception attributes on span (without events)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "exception.type": "TypeError",
+          "exception.message": "Cannot read properties of undefined",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("extracts error details from exception event when not in span attributes", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("TypeError", "Cannot read properties of undefined (reading 'trim')")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ERROR_MESSAGE]).toBe("Cannot read properties of undefined (reading 'trim')");
+      expect(enriched.attributes[ATTR.ERROR_CODE]).toBe("TypeError");
+      expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("internal");
+    });
+
+    it("prefers span attributes over event attributes for error details", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "exception.type": "ZodError",
+          "exception.message": "validation failed",
+        },
+        events: [createExceptionEvent("TypeError", "different error message")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ERROR_MESSAGE]).toBe("validation failed");
+      expect(enriched.attributes[ATTR.ERROR_CODE]).toBe("ZodError");
+      expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("validation");
+    });
+
+    it("does NOT trigger inference when status is explicitly OK", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("Error", "handled error")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      // Error details from events should NOT be extracted for OK spans
+      expect(enriched.attributes[ATTR.ERROR_MESSAGE]).toBeUndefined();
+      expect(enriched.attributes[ATTR.ERROR_CODE]).toBeUndefined();
+    });
+  });
+
+  describe("Verbose logging (DISC-1204)", () => {
+    it("logs error detection signals when verbose is enabled", () => {
+      const spy = vi.spyOn(consoleCapture, "sdkLog").mockImplementation(() => {});
+      const { exporter } = createExporter({ verbose: true });
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("TypeError", "boom")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const calls = spy.mock.calls.map((c) => c[1]);
+      expect(calls.some((msg) => msg.includes("isErrorByEvent=true"))).toBe(true);
+      expect(calls.some((msg) => msg.includes("isErrorByStatus=false"))).toBe(true);
+
+      spy.mockRestore();
+    });
+
+    it("does not log inferred status_code when no inference occurs and verbose is enabled", () => {
+      const spy = vi.spyOn(consoleCapture, "sdkLog").mockImplementation(() => {});
+      const { exporter } = createExporter({ verbose: true });
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const calls = spy.mock.calls.map((c) => c[1]);
+      // Should log the detection signals line (always logged for HTTP spans in verbose)
+      // but should NOT log the "inferred status_code" line (no inference happened)
+      expect(calls.some((msg) => msg.includes("inferred status_code"))).toBe(false);
+
+      spy.mockRestore();
+    });
+
+    it("does not log enrichment details when verbose is disabled", () => {
+      const spy = vi.spyOn(consoleCapture, "sdkLog").mockImplementation(() => {});
+      const { exporter } = createExporter({ verbose: false });
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("TypeError", "boom")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const calls = spy.mock.calls.map((c) => c[1]);
+      expect(calls.some((msg) => msg.includes("enrichSpan"))).toBe(false);
+
+      spy.mockRestore();
     });
   });
 
