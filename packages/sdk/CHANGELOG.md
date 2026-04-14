@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.13.6
+
+### Patch Changes
+
+- 06ed0b5: Detect error traces via exception events when span status is UNSET — the Next.js dev server timing race can export spans before closeSpanWithError runs, but exception events from recordException are still present (DISC-1204).
+
 ## 0.13.5
 
 ### Patch Changes
