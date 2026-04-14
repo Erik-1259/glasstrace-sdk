@@ -32,7 +32,7 @@ export interface GlasstraceExporterOptions {
   environment: string | undefined;
   endpointUrl: string;
   createDelegate: ((url: string, headers: Record<string, string>) => SpanExporter) | null;
-  /** @deprecated No-op retained for backward compatibility. Will be removed in a future major. */
+  /** When true, logs diagnostic details about enrichment decisions via sdkLog. */
   verbose?: boolean;
 }
 
@@ -60,6 +60,7 @@ export class GlasstraceExporter implements SpanExporter {
   private readonly environment: string | undefined;
   private readonly endpointUrl: string;
   private readonly createDelegateFn: ((url: string, headers: Record<string, string>) => SpanExporter) | null;
+  private readonly verbose: boolean;
 
   private delegate: SpanExporter | null = null;
   private delegateKey: string | null = null;
@@ -74,6 +75,7 @@ export class GlasstraceExporter implements SpanExporter {
     this.environment = options.environment;
     this.endpointUrl = options.endpointUrl;
     this.createDelegateFn = options.createDelegate;
+    this.verbose = options.verbose ?? false;
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -214,11 +216,29 @@ export class GlasstraceExporter implements SpanExporter {
       }
 
       // Infer error status when Next.js timing race reports 200 on error spans.
-      // Only triggers when: span is an HTTP span (has method) with ERROR status
-      // AND http status is 200, 0, or missing. Does NOT override valid error
-      // codes (404, 500, etc.) — only fixes the "200 on error" timing race
-      // from Next.js dev server (DISC-1134).
-      if (method && span.status?.code === SpanStatusCode.ERROR) {
+      // Three signals indicate an error span:
+      //   1. span.status.code === ERROR (explicit, most reliable)
+      //   2. span.events contains an "exception" event (recordException fired)
+      //   3. span attributes contain exception.type or exception.message
+      // The timing race in Next.js dev server (DISC-1134) can cause span
+      // export before closeSpanWithError runs, leaving status.code as UNSET.
+      // Exception events from recordException may still be present (DISC-1204).
+      // Does NOT trigger when status is explicitly OK (handler recovered).
+      const isErrorByStatus = span.status?.code === SpanStatusCode.ERROR;
+      const isErrorByEvent = hasExceptionEvent(span);
+      const isErrorByAttrs = typeof attrs["exception.type"] === "string"
+                          || typeof attrs["exception.message"] === "string";
+      const statusNotExplicitlyOK = span.status?.code !== SpanStatusCode.OK;
+
+      if (this.verbose && method) {
+        sdkLog("info",
+          `[glasstrace] enrichSpan "${name}": status.code=${span.status?.code}, ` +
+          `http.status_code=${statusCode}, isErrorByStatus=${isErrorByStatus}, ` +
+          `isErrorByEvent=${isErrorByEvent}, isErrorByAttrs=${isErrorByAttrs}`,
+        );
+      }
+
+      if (method && statusNotExplicitlyOK && (isErrorByStatus || isErrorByEvent || isErrorByAttrs)) {
         if (statusCode === undefined || statusCode === 0 || statusCode === 200) {
           const httpErrorType = attrs["error.type"];
           if (typeof httpErrorType === "string") {
@@ -230,6 +250,13 @@ export class GlasstraceExporter implements SpanExporter {
             }
           } else {
             extra[ATTR.HTTP_STATUS_CODE] = 500;
+          }
+
+          if (this.verbose) {
+            sdkLog("info",
+              `[glasstrace] enrichSpan "${name}": inferred status_code=${extra[ATTR.HTTP_STATUS_CODE]} ` +
+              `(was ${statusCode}), error.type=${attrs["error.type"]}`,
+            );
           }
         }
         // If statusCode is already >= 400, leave it alone (correct value)
@@ -246,19 +273,43 @@ export class GlasstraceExporter implements SpanExporter {
         }
       }
 
-      // glasstrace.error.message
+      // glasstrace.error.message + glasstrace.error.code + glasstrace.error.category
+      // Primary source: span attributes. Fallback: exception event attributes.
+      // OTel's recordException() stores exception info in events, not span
+      // attributes, so the fallback is needed for most error spans (DISC-1204).
+      // Event fallback is gated on statusNotExplicitlyOK to avoid labeling
+      // recovered OK spans with error metadata from handled exceptions.
+      const eventDetails = statusNotExplicitlyOK
+        ? getExceptionEventDetails(span)
+        : { type: undefined, message: undefined };
+
       const errorMessage = attrs["exception.message"];
       if (typeof errorMessage === "string") {
         extra[ATTR.ERROR_MESSAGE] = errorMessage;
+      } else if (eventDetails.message) {
+        extra[ATTR.ERROR_MESSAGE] = eventDetails.message;
       }
 
-      // glasstrace.error.code + glasstrace.error.category
       // Guard against non-string attribute values (OTel attributes can be
       // string | number | boolean | Array) to prevent toLowerCase() throws.
       const errorType = attrs["exception.type"];
       if (typeof errorType === "string") {
         extra[ATTR.ERROR_CODE] = errorType;
         extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(errorType);
+      } else if (eventDetails.type) {
+        extra[ATTR.ERROR_CODE] = eventDetails.type;
+        extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(eventDetails.type);
+      }
+
+      if (this.verbose && (extra[ATTR.ERROR_MESSAGE] || extra[ATTR.ERROR_CODE])) {
+        const msgSource = typeof errorMessage === "string" ? "attrs"
+          : eventDetails.message ? "event" : "none";
+        const typeSource = typeof errorType === "string" ? "attrs"
+          : eventDetails.type ? "event" : "none";
+        sdkLog("info",
+          `[glasstrace] enrichSpan "${name}": error.message source=${msgSource}, ` +
+          `error.code source=${typeSource}`,
+        );
       }
 
       // glasstrace.error.field
@@ -430,6 +481,41 @@ function createEnrichedSpan(
       enumerable: true,
     },
   }) as ReadableSpan;
+}
+
+/**
+ * Returns true if the span has at least one "exception" event.
+ * This signals that `span.recordException()` was called, even if
+ * `span.setStatus(ERROR)` was not yet applied due to the timing race
+ * in Next.js dev server (DISC-1204).
+ */
+function hasExceptionEvent(span: ReadableSpan): boolean {
+  return span.events?.some((e) => e.name === "exception") ?? false;
+}
+
+/**
+ * Extracts exception.type and exception.message from the first "exception"
+ * event on the span. Returns undefined values if not found.
+ *
+ * OTel's `recordException()` stores error details in event attributes, not
+ * span attributes. The enrichment code needs this fallback to populate
+ * glasstrace.error.message and glasstrace.error.code when the standard
+ * span attributes are absent.
+ */
+function getExceptionEventDetails(span: ReadableSpan): {
+  type: string | undefined;
+  message: string | undefined;
+} {
+  const event = span.events?.find((e) => e.name === "exception");
+  if (!event?.attributes) {
+    return { type: undefined, message: undefined };
+  }
+  const type = event.attributes["exception.type"];
+  const message = event.attributes["exception.message"];
+  return {
+    type: typeof type === "string" ? type : undefined,
+    message: typeof message === "string" ? message : undefined,
+  };
 }
 
 /**

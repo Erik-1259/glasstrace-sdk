@@ -154,6 +154,7 @@ export async function configureOtel(
     environment: config.environment,
     endpointUrl: exporterUrl,
     createDelegate: createOtlpExporter,
+    verbose: config.verbose,
   });
   _activeExporter = glasstraceExporter;
 
