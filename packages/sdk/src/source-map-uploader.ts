@@ -219,7 +219,6 @@ export async function uploadSourceMaps(
   }
 
   const body = {
-    apiKey,
     buildHash,
     files,
   };

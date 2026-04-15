@@ -163,7 +163,6 @@ export async function sendInitRequest(
 
   // Build the request payload
   const payload: Record<string, unknown> = {
-    apiKey: effectiveKey,
     sdkVersion,
   };
 

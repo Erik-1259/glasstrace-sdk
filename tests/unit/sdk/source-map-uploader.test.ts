@@ -332,6 +332,32 @@ describe("uploadSourceMaps", () => {
     expect(result.fileCount).toBe(1);
   });
 
+  it("does not include apiKey in the request body (DISC-1017)", async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        success: true,
+        buildHash: "abc123",
+        fileCount: 1,
+        totalSizeBytes: 100,
+      }),
+    };
+    vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
+
+    await uploadSourceMaps(
+      "gt_dev_" + "a".repeat(48),
+      "https://api.glasstrace.dev",
+      "abc123",
+      [{ filePath: "main.js.map", content: '{"version":3}' }],
+    );
+
+    const [, options] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse((options as RequestInit).body as string);
+    expect(body.apiKey).toBeUndefined();
+    expect(body.buildHash).toBe("abc123");
+    expect(body.files).toHaveLength(1);
+  });
+
   it("strips trailing slashes from endpoint URL", async () => {
     const mockResponse = {
       ok: true,
