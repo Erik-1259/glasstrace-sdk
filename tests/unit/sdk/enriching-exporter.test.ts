@@ -1551,4 +1551,246 @@ describe("GlasstraceExporter", () => {
     });
   });
 
+  describe("tRPC procedure extraction (DISC-1215)", () => {
+    it("extracts procedure name from standard tRPC URL", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/polls.modify?batch=1",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("polls.modify");
+    });
+
+    it("extracts dotted procedure name", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/user.settings.get",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("user.settings.get");
+    });
+
+    it("captures batched procedure names as comma-separated string", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/polls.list,polls.count?batch=1",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("polls.list,polls.count");
+    });
+
+    it("does not set TRPC_PROCEDURE for non-tRPC URLs", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/users",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBeUndefined();
+    });
+
+    it("strips query parameters from procedure name", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/polls.get?input=%7B%22id%22%3A1%7D",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("polls.get");
+    });
+
+    it("trims trailing slashes from procedure name", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/polls.modify/",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("polls.modify");
+    });
+
+    it("does not set attribute for empty procedure name", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBeUndefined();
+    });
+
+    it("does not override glasstrace.route (keeps HTTP path)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/api/trpc/[trpc]",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/polls.modify",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ROUTE]).toBe("/api/trpc/[trpc]");
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("polls.modify");
+    });
+
+    it("falls back to url.full when http.url is absent", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+          "url.full": "http://localhost:3000/api/trpc/polls.delete",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("polls.delete");
+    });
+
+    it("falls back to raw match on malformed percent encoding", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+          "http.url": "http://localhost:3000/api/trpc/polls.%E0%A4%A",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.TRPC_PROCEDURE]).toBe("polls.%E0%A4%A");
+    });
+  });
+
+  describe("Error response body passthrough (DISC-1216)", () => {
+    it("promotes glasstrace.internal.response_body to glasstrace attribute when config enabled", () => {
+      const config = { ...DEFAULT_CONFIG, errorResponseBodies: true };
+      const { exporter, delegate } = createExporter();
+      Object.defineProperty(exporter, "getConfig", { value: () => config });
+
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 403,
+          "glasstrace.internal.response_body": '{"error":{"code":"FORBIDDEN","message":"Not allowed"}}',
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe(
+        '{"error":{"code":"FORBIDDEN","message":"Not allowed"}}',
+      );
+    });
+
+    it("does NOT enrich response body when config disabled", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 403,
+          "glasstrace.internal.response_body": '{"error":"forbidden"}',
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+    });
+
+    it("truncates response body to 500 characters", () => {
+      const config = { ...DEFAULT_CONFIG, errorResponseBodies: true };
+      const { exporter, delegate } = createExporter();
+      Object.defineProperty(exporter, "getConfig", { value: () => config });
+
+      const longBody = "x".repeat(1000);
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 500,
+          "glasstrace.internal.response_body": longBody,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe("x".repeat(500));
+    });
+
+    it("ignores non-string response body", () => {
+      const config = { ...DEFAULT_CONFIG, errorResponseBodies: true };
+      const { exporter, delegate } = createExporter();
+      Object.defineProperty(exporter, "getConfig", { value: () => config });
+
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 500,
+          "glasstrace.internal.response_body": 42 as unknown as string,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+    });
+  });
+
 });

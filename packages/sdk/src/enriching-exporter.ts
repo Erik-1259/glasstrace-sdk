@@ -199,6 +199,27 @@ export class GlasstraceExporter implements SpanExporter {
         extra[ATTR.ROUTE] = route;
       }
 
+      // glasstrace.trpc.procedure
+      // Extract tRPC procedure name from URL path (DISC-1215).
+      // Pattern: /api/trpc/{procedure} where procedure is a single path segment
+      // that may contain dots (polls.modify) or commas (batched: proc1,proc2).
+      const rawUrl = attrs["http.url"] ?? attrs["url.full"] ?? attrs["http.target"];
+      const trpcUrl = typeof rawUrl === "string" ? rawUrl : undefined;
+      if (trpcUrl) {
+        const trpcMatch = trpcUrl.match(/\/api\/trpc\/([^/?#]+)/);
+        if (trpcMatch) {
+          let procedure: string;
+          try {
+            procedure = decodeURIComponent(trpcMatch[1]);
+          } catch {
+            procedure = trpcMatch[1];
+          }
+          if (procedure) {
+            extra[ATTR.TRPC_PROCEDURE] = procedure;
+          }
+        }
+      }
+
       // glasstrace.http.method
       const method =
         (attrs["http.method"] as string | undefined) ??
@@ -316,6 +337,18 @@ export class GlasstraceExporter implements SpanExporter {
       const errorField = attrs["error.field"];
       if (typeof errorField === "string") {
         extra[ATTR.ERROR_FIELD] = errorField;
+      }
+
+      // glasstrace.error.response_body (DISC-1216 Phase 1 — passthrough)
+      // Adapters (e.g., future tRPC handler wrapper) should set error response
+      // body data on `glasstrace.internal.response_body` — a Glasstrace-internal
+      // attribute that is only promoted to the public namespace when the config
+      // flag is enabled. This prevents response body leakage when disabled.
+      if (this.getConfig().errorResponseBodies) {
+        const responseBody = attrs["glasstrace.internal.response_body"];
+        if (typeof responseBody === "string") {
+          extra[ATTR.ERROR_RESPONSE_BODY] = responseBody.slice(0, 500);
+        }
       }
 
       // glasstrace.orm.*
