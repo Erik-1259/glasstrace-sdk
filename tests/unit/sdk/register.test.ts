@@ -200,16 +200,24 @@ describe("registerGlasstrace() Orchestrator", () => {
   describe("Checkpoint 4: OTel configuration", () => {
     it("should configure OTel without throwing", async () => {
       process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
 
       const result = registerGlasstrace();
       expect(result).toBeUndefined();
 
-      await waitForBackgroundWork();
+      // Wait for configureOtel() to complete — it yields one tick via
+      // setImmediate before probing (DISC-1202). Poll deterministically
+      // until the tracer provider is non-proxy instead of using a fixed delay.
+      const { trace } = await import("@opentelemetry/api");
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        const tracer = trace.getTracerProvider().getTracer("test");
+        if (tracer.constructor.name !== "ProxyTracer") break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
 
-      // Verify initialization completed by checking that console.warn was called
-      // (dev-key mode always warns about dev-key usage)
-      expect(warnSpy).toHaveBeenCalled();
+      const tracer = trace.getTracerProvider().getTracer("test");
+      expect(tracer.constructor.name).not.toBe("ProxyTracer");
     });
 
     it("should log OTel configuration step in verbose mode", async () => {

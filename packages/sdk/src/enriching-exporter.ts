@@ -76,6 +76,10 @@ export class GlasstraceExporter implements SpanExporter {
     this.endpointUrl = options.endpointUrl;
     this.createDelegateFn = options.createDelegate;
     this.verbose = options.verbose ?? false;
+
+    // Brand for coexistence detection — allows isGlasstraceProcessorPresent()
+    // to detect our exporter across bundled copies via a global symbol registry.
+    (this as unknown as Record<symbol, boolean>)[Symbol.for("glasstrace.exporter")] = true;
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {

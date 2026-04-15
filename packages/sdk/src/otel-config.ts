@@ -16,6 +16,12 @@ let _activeExporter: GlasstraceExporter | null = null;
 /** Registered shutdown handler, tracked so it can be removed on reset. */
 let _shutdownHandler: ((signal: NodeJS.Signals) => void) | null = null;
 
+/** Registered beforeExit handler for coexistence mode, tracked for cleanup. */
+let _beforeExitHandler: (() => void) | null = null;
+
+/** Injected BatchSpanProcessor in coexistence mode, tracked for flush on exit. */
+let _injectedProcessor: BatchSpanProcessor | null = null;
+
 /**
  * Sets the resolved API key for OTel export authentication.
  * Called once the anonymous key or dev key is available.
@@ -47,10 +53,15 @@ export function notifyApiKeyResolved(): void {
 export function resetOtelConfigForTesting(): void {
   _resolvedApiKey = API_KEY_PENDING;
   _activeExporter = null;
+  _injectedProcessor = null;
   if (_shutdownHandler && typeof process !== "undefined") {
     process.removeListener("SIGTERM", _shutdownHandler);
     process.removeListener("SIGINT", _shutdownHandler);
     _shutdownHandler = null;
+  }
+  if (_beforeExitHandler && typeof process !== "undefined") {
+    process.removeListener("beforeExit", _beforeExitHandler);
+    _beforeExitHandler = null;
   }
 }
 
@@ -125,15 +136,157 @@ function registerShutdownHooks(provider: { shutdown: () => Promise<void> }): voi
 }
 
 /**
+ * Attempts to inject a BatchSpanProcessor into an existing provider's
+ * processor pipeline. Uses a tiered approach:
+ *   1. Feature-detect `addSpanProcessor` (OTel v1 public API)
+ *   2. Feature-detect `_activeSpanProcessor._spanProcessors` (OTel v2 internal)
+ *
+ * Returns true if the processor was successfully added, false otherwise.
+ * Fully defensive — any error returns false.
+ */
+function tryInjectProcessor(
+  tracerProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
+  glasstraceExporter: GlasstraceExporter,
+): boolean {
+  try {
+    // Unwrap the ProxyTracerProvider to get the delegate.
+    const proxy = tracerProvider as unknown as { getDelegate?: () => unknown };
+    const delegate = typeof proxy.getDelegate === "function"
+      ? proxy.getDelegate()
+      : tracerProvider;
+
+    // Attempt 1: OTel v1 public API (addSpanProcessor)
+    const withAdd = delegate as unknown as {
+      addSpanProcessor?: (p: unknown) => void;
+      getActiveSpanProcessor?: () => { _spanProcessors?: Array<{ _exporter?: unknown }> };
+    };
+    if (typeof withAdd.addSpanProcessor === "function") {
+      // Guard against duplicate injection: v1 providers expose
+      // getActiveSpanProcessor() which may let us check for an existing
+      // Glasstrace processor before adding another.
+      if (typeof withAdd.getActiveSpanProcessor === "function") {
+        const active = withAdd.getActiveSpanProcessor();
+        const brand = Symbol.for("glasstrace.exporter");
+        const processors = active?._spanProcessors;
+        if (Array.isArray(processors) && processors.some((p) => {
+          const exp = p._exporter as Record<symbol, unknown> | undefined;
+          return exp?.[brand] === true;
+        })) {
+          return true; // Already present — skip injection
+        }
+      }
+
+      const processor = new BatchSpanProcessor(glasstraceExporter, {
+        scheduledDelayMillis: 1000,
+      });
+      withAdd.addSpanProcessor(processor);
+      _injectedProcessor = processor;
+      return true;
+    }
+
+    // Attempt 2: OTel v2 internals (_activeSpanProcessor._spanProcessors)
+    // This accesses a private field — justified in the design doc
+    // (sdk-otel-coexistence.md Section 4). Same pattern Sentry uses.
+    const provider = delegate as unknown as {
+      _activeSpanProcessor?: {
+        _spanProcessors?: unknown[];
+      };
+    };
+    const multiProcessor = provider._activeSpanProcessor;
+    if (!multiProcessor || !Array.isArray(multiProcessor._spanProcessors)) {
+      return false;
+    }
+
+    const processor = new BatchSpanProcessor(glasstraceExporter, {
+      scheduledDelayMillis: 1000,
+    });
+    multiProcessor._spanProcessors.push(processor);
+    _injectedProcessor = processor;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if a Glasstrace processor is already present in the existing
+ * provider's processor list. Uses the branded Symbol to detect our exporter
+ * across bundled copies.
+ */
+function isGlasstraceProcessorPresent(
+  tracerProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
+): boolean {
+  try {
+    const proxy = tracerProvider as unknown as { getDelegate?: () => unknown };
+    const delegate = typeof proxy.getDelegate === "function"
+      ? proxy.getDelegate()
+      : tracerProvider;
+
+    const provider = delegate as unknown as {
+      _activeSpanProcessor?: {
+        _spanProcessors?: Array<{ _exporter?: unknown }>;
+      };
+    };
+    const processors = provider._activeSpanProcessor?._spanProcessors;
+    if (!Array.isArray(processors)) {
+      return false;
+    }
+
+    const brand = Symbol.for("glasstrace.exporter");
+    return processors.some((p) => {
+      const exporter = p._exporter as Record<symbol, unknown> | undefined;
+      return exporter?.[brand] === true;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Registers a `beforeExit` handler that flushes the injected
+ * BatchSpanProcessor (which in turn flushes the GlasstraceExporter).
+ *
+ * In coexistence mode, the existing provider owns shutdown hooks (SIGTERM,
+ * SIGINT). This handler fires when the event loop drains, giving us a
+ * chance to flush buffered spans without interfering with signal-based
+ * shutdown from the other tool.
+ *
+ * Flushes the BSP (not just the exporter) because spans are queued in
+ * the BSP before reaching the exporter. If the host provider doesn't call
+ * shutdown on exit, those queued spans would otherwise be lost.
+ */
+function registerCoexistenceFlushOnExit(): void {
+  if (typeof process === "undefined" || typeof process.once !== "function") {
+    return;
+  }
+
+  // Remove any previously registered handler
+  if (_beforeExitHandler) {
+    process.removeListener("beforeExit", _beforeExitHandler);
+  }
+
+  const handler = () => {
+    if (_injectedProcessor) {
+      void _injectedProcessor.forceFlush().catch((err: unknown) => {
+        console.warn(
+          `[glasstrace] Error flushing processor on exit: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }
+  };
+
+  _beforeExitHandler = handler;
+  process.once("beforeExit", handler);
+}
+
+/**
  * Configures OpenTelemetry with the GlasstraceExporter.
- * The exporter handles all span enrichment (glasstrace.* attributes) at
- * export time, solving buffering, no-onEnding,
- * and session-ID-uses-resolved-key concerns.
  *
- * Attempts to use `@vercel/otel` first, falls back to bare OTel SDK.
- *
- * @param config - The resolved SDK configuration (endpoint, environment, etc.).
- * @param sessionManager - Provides session IDs for span enrichment.
+ * Detection flow (per sdk-otel-coexistence.md v8):
+ *   1. Yield one tick (let synchronous Sentry.init() complete)
+ *   2. Probe for existing provider
+ *   3. If provider exists → shared coexistence path
+ *   4. If no provider → registration path (Vercel or bare)
  */
 export async function configureOtel(
   config: ResolvedConfig,
@@ -158,7 +311,64 @@ export async function configureOtel(
   });
   _activeExporter = glasstraceExporter;
 
-  // Try @vercel/otel first
+  // Step 1: Yield one tick to let synchronous Sentry.init() (or other tools)
+  // complete before probing for an existing provider (DISC-1202).
+  await new Promise<void>((resolve) => {
+    if (typeof setImmediate === "function") {
+      setImmediate(resolve);
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+
+  // Step 2: Probe for an existing OTel provider BEFORE the Vercel/bare split.
+  // This unified detection ensures coexistence works regardless of whether
+  // @vercel/otel is installed (sdk-otel-coexistence.md Section 2.4).
+  const existingProvider = otelApi.trace.getTracerProvider();
+  const probeTracer = existingProvider.getTracer("glasstrace-probe");
+  const anotherProviderRegistered = probeTracer.constructor.name !== "ProxyTracer";
+
+  // Step 3: If another provider exists → shared coexistence path
+  if (anotherProviderRegistered) {
+    // Check if our processor is already present (Scenario B-clean)
+    if (isGlasstraceProcessorPresent(existingProvider)) {
+      if (config.verbose) {
+        sdkLog("info", "[glasstrace] Existing provider detected — Glasstrace processor already present.");
+      }
+      // The newly created exporter is unused — the existing one handles spans.
+      _activeExporter = null;
+      return;
+    }
+
+    // Attempt to inject our processor (Scenarios D1, B-auto/D2)
+    const injected = tryInjectProcessor(existingProvider, glasstraceExporter);
+
+    if (injected) {
+      if (config.verbose) {
+        sdkLog("info", "[glasstrace] Existing provider detected — auto-attaching Glasstrace processor.");
+      }
+      // Register beforeExit handler to flush the injected processor.
+      // Do NOT register SIGTERM/SIGINT — existing provider owns those.
+      registerCoexistenceFlushOnExit();
+      return;
+    }
+
+    // Injection failed (Scenario C/F) — emit guidance
+    if (config.verbose) {
+      sdkLog("info", "[glasstrace] Existing provider detected — could not auto-attach.");
+    }
+    console.warn(
+      "[glasstrace] An existing OpenTelemetry TracerProvider is registered but Glasstrace " +
+      "could not auto-attach its span processor. To use Glasstrace alongside another " +
+      "tracing tool, add a Glasstrace span processor to your provider configuration.",
+    );
+    _activeExporter = null;
+    return;
+  }
+
+  // Step 4: No existing provider → registration path
+
+  // Try @vercel/otel first (Scenario E)
   const vercelOtel = await tryImport("@vercel/otel");
   if (vercelOtel && typeof vercelOtel.registerOTel === "function") {
     const otelConfig: Record<string, unknown> = {
@@ -180,31 +390,11 @@ export async function configureOtel(
     return;
   }
 
-  // Fallback: bare OTel SDK with BasicTracerProvider + manual context manager
-  // Check for an existing OTel provider before registering.
-  // If another tool (Datadog, Sentry, New Relic) already registered a provider,
-  // skip Glasstrace registration to avoid silently breaking their tracing.
-  // OTel wraps the global provider in a ProxyTracerProvider, so we probe for a
-  // real provider by requesting a tracer and checking if it's a "ProxyTracer"
-  // (the no-op default) or a real Tracer from a registered provider.
-  const existingProvider = otelApi.trace.getTracerProvider();
-  const probeTracer = existingProvider.getTracer("glasstrace-probe");
-  if (probeTracer.constructor.name !== "ProxyTracer") {
-    console.warn(
-      "[glasstrace] An existing OpenTelemetry TracerProvider is already registered. " +
-      "Glasstrace will not overwrite it. To use Glasstrace alongside another " +
-      "tracing tool, add GlasstraceExporter as an additional span processor " +
-      "on your existing provider.",
-    );
-    _activeExporter = null;
-    return;
-  }
+  // Bare OTel SDK fallback (Scenario A)
 
   // Enable OTel diagnostic logging in verbose mode so OTLP exporter
   // errors (auth failures, network issues) are surfaced to the developer.
-  // Set AFTER coexistence check to avoid mutating global diag state when
-  // Glasstrace is not the active tracer. Routes through sdkLog to avoid
-  // console-capture recording OTel internals as user span events.
+  // Routes through sdkLog to avoid console-capture recording OTel internals.
   if (config.verbose) {
     otelApi.diag.setLogger(
       {
@@ -218,8 +408,6 @@ export async function configureOtel(
     );
   }
 
-  // Use BatchSpanProcessor for production OTLP exports to avoid blocking
-  // the event loop on every span.end() call.
   const processor = new BatchSpanProcessor(glasstraceExporter, {
     scheduledDelayMillis: 1000,
   });

@@ -4,6 +4,8 @@ import {
   resetOtelConfigForTesting,
 } from "../../../packages/sdk/src/otel-config.js";
 import { SessionManager } from "../../../packages/sdk/src/session.js";
+import { GlasstraceExporter } from "../../../packages/sdk/src/enriching-exporter.js";
+import { DEFAULT_CAPTURE_CONFIG } from "@glasstrace/protocol";
 import type { ResolvedConfig } from "../../../packages/sdk/src/env-detection.js";
 import * as otelApi from "@opentelemetry/api";
 import * as otelSdk from "@opentelemetry/sdk-trace-base";
@@ -48,42 +50,8 @@ describe("configureOtel()", () => {
     otelApi.diag.disable();
   });
 
-  describe("Provider coexistence", () => {
-    it("should skip registration when a non-proxy provider is already registered", async () => {
-      // Register a provider before Glasstrace runs
-      const existingProvider = new otelSdk.BasicTracerProvider();
-      otelApi.trace.setGlobalTracerProvider(existingProvider);
-
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      await configureOtel(createTestConfig(), sessionManager);
-
-      // Should warn about existing provider
-      const coexistenceWarning = warnSpy.mock.calls.find(
-        (call) =>
-          typeof call[0] === "string" &&
-          call[0].includes("already registered"),
-      );
-      expect(coexistenceWarning).toBeDefined();
-    });
-
-    it("should detect collision via ProxyTracer check and not add signal handlers", async () => {
-      // Pre-register a real provider
-      const existingProvider = new otelSdk.BasicTracerProvider();
-      otelApi.trace.setGlobalTracerProvider(existingProvider);
-
-      vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      const sigTermBefore = process.listenerCount("SIGTERM");
-
-      await configureOtel(createTestConfig(), sessionManager);
-
-      // No new shutdown handlers should be registered when collision detected
-      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
-    });
-
-    it("should register normally when only the default ProxyTracer is present", async () => {
-      // Default state: no provider registered, OTel returns ProxyTracer
+  describe("Provider coexistence (DISC-1202)", () => {
+    it("Scenario A: registers normally when no existing provider", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
       const sigTermBefore = process.listenerCount("SIGTERM");
@@ -92,6 +60,134 @@ describe("configureOtel()", () => {
 
       // Should register and add shutdown handlers
       expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore + 1);
+    });
+
+    it("Scenario B-auto: injects processor into existing v2 provider", async () => {
+      const existingProvider = new otelSdk.BasicTracerProvider();
+      otelApi.trace.setGlobalTracerProvider(existingProvider);
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // Verify the processor was injected by checking _spanProcessors
+      const multi = (existingProvider as unknown as {
+        _activeSpanProcessor: { _spanProcessors: unknown[] };
+      })._activeSpanProcessor;
+      expect(multi._spanProcessors.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("Scenario B-auto: does not add SIGTERM/SIGINT handlers", async () => {
+      const existingProvider = new otelSdk.BasicTracerProvider();
+      otelApi.trace.setGlobalTracerProvider(existingProvider);
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const sigTermBefore = process.listenerCount("SIGTERM");
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // No SIGTERM/SIGINT handlers — existing provider owns those
+      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
+    });
+
+    it("Scenario B-auto: registers beforeExit handler for exporter flush", async () => {
+      const existingProvider = new otelSdk.BasicTracerProvider();
+      otelApi.trace.setGlobalTracerProvider(existingProvider);
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const beforeExitBefore = process.listenerCount("beforeExit");
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore + 1);
+    });
+
+    it("Scenario B-clean: skips injection when branded processor already present", async () => {
+      // Create a provider with a Glasstrace-branded processor already in it
+      const brandedExporter = new GlasstraceExporter({
+        getApiKey: () => "test",
+        sessionManager: new SessionManager(),
+        getConfig: () => DEFAULT_CAPTURE_CONFIG,
+        environment: undefined,
+        endpointUrl: "https://test/v1/traces",
+        createDelegate: null,
+      });
+      const brandedProcessor = new otelSdk.BatchSpanProcessor(brandedExporter);
+      const existingProvider = new otelSdk.BasicTracerProvider({
+        spanProcessors: [brandedProcessor],
+      });
+      otelApi.trace.setGlobalTracerProvider(existingProvider);
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig({ verbose: true }), sessionManager);
+
+      // Should NOT inject a second processor
+      const multi = (existingProvider as unknown as {
+        _activeSpanProcessor: { _spanProcessors: unknown[] };
+      })._activeSpanProcessor;
+      expect(multi._spanProcessors).toHaveLength(1);
+    });
+
+    it("Scenario D1: uses addSpanProcessor when available (v1-style provider)", async () => {
+      const addSpy = vi.fn();
+      const v1Provider = {
+        getTracer: () => ({ constructor: { name: "Tracer" } }),
+        addSpanProcessor: addSpy,
+      };
+      // Wrap in ProxyTracerProvider by registering globally
+      otelApi.trace.setGlobalTracerProvider(
+        v1Provider as unknown as otelApi.TracerProvider,
+      );
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // Should have called addSpanProcessor with a BatchSpanProcessor
+      expect(addSpy).toHaveBeenCalledTimes(1);
+      expect(addSpy.mock.calls[0][0]).toBeInstanceOf(otelSdk.BatchSpanProcessor);
+    });
+
+    it("Scenario C/F: emits guidance when provider internals are inaccessible", async () => {
+      // Create a minimal provider that does NOT have _activeSpanProcessor
+      const minimalProvider = {
+        getTracer: () => ({ constructor: { name: "SomeTracer" } }),
+      };
+      otelApi.trace.setGlobalTracerProvider(
+        minimalProvider as unknown as otelApi.TracerProvider,
+      );
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      const guidanceWarning = warnSpy.mock.calls.find(
+        (call) =>
+          typeof call[0] === "string" &&
+          call[0].includes("could not auto-attach"),
+      );
+      expect(guidanceWarning).toBeDefined();
+    });
+
+    it("Scenario E regression: Vercel path skipped when existing provider present", async () => {
+      // Even if @vercel/otel is installed (mocked), the Vercel path should
+      // NOT run when an existing provider is detected — coexistence path
+      // runs instead.
+      const existingProvider = new otelSdk.BasicTracerProvider();
+      otelApi.trace.setGlobalTracerProvider(existingProvider);
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // Verify coexistence injection happened (not Vercel registration)
+      const multi = (existingProvider as unknown as {
+        _activeSpanProcessor: { _spanProcessors: unknown[] };
+      })._activeSpanProcessor;
+      expect(multi._spanProcessors.length).toBeGreaterThanOrEqual(1);
     });
   });
 
