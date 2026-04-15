@@ -32,6 +32,8 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   SOURCE_FILE: "glasstrace.source.file",
   SOURCE_LINE: "glasstrace.source.line",
   SOURCE_MAPPED: "glasstrace.source.mapped",
+  TRPC_PROCEDURE: "glasstrace.trpc.procedure",
+  ERROR_RESPONSE_BODY: "glasstrace.error.response_body",
 
   // Client-side attributes
   PLATFORM: "glasstrace.platform",
@@ -50,4 +52,5 @@ export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
   fullConsoleOutput: false,
   importGraph: false,
   consoleErrors: false,
+  errorResponseBodies: false,
 };
