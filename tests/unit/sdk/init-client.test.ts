@@ -212,7 +212,23 @@ describe("Init Client + Config Cache", () => {
       await sendInitRequest(config, anonKey, "0.1.0");
       const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
       expect(body.anonKey).toBe(anonKey);
-      expect(body.apiKey).toBe(config.apiKey);
+      expect(body.apiKey).toBeUndefined();
+    });
+
+    it("does not include apiKey in the request body (DISC-1017)", async () => {
+      const config = makeResolvedConfig();
+      const responseBody = makeInitResponse();
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(responseBody),
+      }));
+
+      await sendInitRequest(config, null, "0.1.0");
+      const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+      expect(body.apiKey).toBeUndefined();
+      expect(body.sdkVersion).toBe("0.1.0");
     });
 
     it("throws on non-OK response", async () => {
