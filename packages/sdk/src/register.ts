@@ -13,7 +13,13 @@ import * as otelApi from "@opentelemetry/api";
 import { installConsoleCapture, uninstallConsoleCapture, sdkLog } from "./console-capture.js";
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
-import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, resetLifecycleForTesting } from "./lifecycle.js";
+import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, setAuthState, emitLifecycleEvent, resetLifecycleForTesting } from "./lifecycle.js";
+
+/** Mask an API key for safe event emission — shows prefix + last 4 chars. */
+function maskKey(key: string): string {
+  if (key.length <= 12) return key.slice(0, 4) + "...";
+  return key.slice(0, 8) + "..." + key.slice(-4);
+}
 
 /** Whether console capture has been installed in this registration cycle. */
 let consoleCaptureInstalled = false;
@@ -97,6 +103,10 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     if (effectiveKey) {
       setResolvedApiKey(effectiveKey);
+      emitLifecycleEvent("auth:key_resolved", {
+        key: maskKey(effectiveKey),
+        mode: anonymous ? "anonymous" : "dev",
+      });
     }
 
     if (config.verbose) {
@@ -216,6 +226,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             resolvedAnonKey = anonKey;
             setResolvedApiKey(anonKey);
             notifyApiKeyResolved();
+            emitLifecycleEvent("auth:key_resolved", { key: maskKey(anonKey), mode: "anonymous" });
             effectiveKey = anonKey;
 
             if (currentGeneration !== registrationGeneration) return;
@@ -244,6 +255,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
             const anonKey = await getOrCreateAnonKey();
             setResolvedApiKey(anonKey);
             notifyApiKeyResolved();
+            emitLifecycleEvent("auth:key_resolved", { key: maskKey(anonKey), mode: "anonymous" });
             effectiveKey = anonKey;
 
             if (currentGeneration !== registrationGeneration) return;
@@ -333,8 +345,13 @@ async function backgroundInit(
   // If the backend reported an account claim, update the exporter
   // key so subsequent span exports authenticate with the dev key.
   if (initResult?.claimResult) {
-    setResolvedApiKey(initResult.claimResult.newApiKey);
+    const { newApiKey, accountId } = initResult.claimResult;
+    setAuthState(AuthState.CLAIMING);
+    emitLifecycleEvent("auth:claim_started", { accountId });
+    setResolvedApiKey(newApiKey);
     notifyApiKeyResolved();
+    setAuthState(AuthState.CLAIMED);
+    emitLifecycleEvent("auth:claim_completed", { newKey: maskKey(newApiKey), accountId });
   }
 
   // Re-check consoleErrors with the authoritative init response config
@@ -344,9 +361,13 @@ async function backgroundInit(
   // The heartbeat re-calls performInit every 5 minutes to report health
   // metrics and refresh config. Only starts after first successful init.
   if (didLastInitSucceed()) {
-    startHeartbeat(config, anonKeyForInit, __SDK_VERSION__, generation, (newApiKey) => {
+    startHeartbeat(config, anonKeyForInit, __SDK_VERSION__, generation, (newApiKey, accountId) => {
+      setAuthState(AuthState.CLAIMING);
+      emitLifecycleEvent("auth:claim_started", { accountId });
       setResolvedApiKey(newApiKey);
       notifyApiKeyResolved();
+      setAuthState(AuthState.CLAIMED);
+      emitLifecycleEvent("auth:claim_completed", { newKey: maskKey(newApiKey), accountId });
     });
   }
 }

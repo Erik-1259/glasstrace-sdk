@@ -36,7 +36,7 @@ export function startHeartbeat(
   anonKey: AnonApiKey | null,
   sdkVersion: string,
   generation: number,
-  onClaimTransition: (newApiKey: string) => void,
+  onClaimTransition: (newApiKey: string, accountId: string) => void,
 ): void {
   // Prevent double-start
   if (heartbeatTimer !== null) return;
@@ -87,7 +87,7 @@ async function heartbeatTick(
   anonKey: AnonApiKey | null,
   sdkVersion: string,
   generation: number,
-  onClaimTransition: (newApiKey: string) => void,
+  onClaimTransition: (newApiKey: string, accountId: string) => void,
 ): Promise<void> {
   // Prevent concurrent ticks (setInterval doesn't await async callbacks)
   if (tickInProgress) return;
@@ -135,7 +135,7 @@ async function heartbeatTick(
 
     // Handle claim transition via callback (no otel-config import needed)
     if (initResult?.claimResult) {
-      onClaimTransition(initResult.claimResult.newApiKey);
+      onClaimTransition(initResult.claimResult.newApiKey, initResult.claimResult.accountId);
     }
 
     if (config.verbose) {
