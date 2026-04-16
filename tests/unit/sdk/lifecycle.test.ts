@@ -20,6 +20,7 @@ import {
   getStatus,
   registerShutdownHook,
   executeShutdown,
+  registerBeforeExitTrigger,
   resetLifecycleForTesting,
 } from "../../../packages/sdk/src/lifecycle.js";
 
@@ -720,6 +721,16 @@ describe("SDK Lifecycle State Machine", () => {
       await executeShutdown();
 
       expect(callCount).toBe(1);
+    });
+
+    it("registerBeforeExitTrigger is idempotent", () => {
+      const beforeExitBefore = process.listenerCount("beforeExit");
+
+      registerBeforeExitTrigger();
+      registerBeforeExitTrigger();
+
+      // Only one handler registered despite two calls
+      expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore + 1);
     });
   });
 });

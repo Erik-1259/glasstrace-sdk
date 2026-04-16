@@ -90,17 +90,22 @@ describe("configureOtel()", () => {
       expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
     });
 
-    it("Scenario B-auto: registers beforeExit handler for coexistence flush", async () => {
+    it("Scenario B-auto: registers coexistence flush hook and beforeExit trigger via coordinator", async () => {
       const existingProvider = new otelSdk.BasicTracerProvider();
       otelApi.trace.setGlobalTracerProvider(existingProvider);
 
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      const beforeExitBefore = process.listenerCount("beforeExit");
+      const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
+      const triggerSpy = vi.spyOn(lifecycle, "registerBeforeExitTrigger");
 
       await configureOtel(createTestConfig(), sessionManager);
 
-      // beforeExit handler registered as safety net (not via lifecycle coordinator)
-      expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore + 1);
+      // Hook registered via coordinator
+      expect(hookSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "coexistence-flush", priority: 5 }),
+      );
+      // beforeExit trigger wired via coordinator (not direct handler)
+      expect(triggerSpy).toHaveBeenCalledTimes(1);
     });
 
     it("Scenario B-clean: skips injection when branded processor already present", async () => {
@@ -191,10 +196,11 @@ describe("configureOtel()", () => {
   });
 
   describe("Shutdown hooks (lifecycle coordinator)", () => {
-    it("should register OTel shutdown hook and signal handlers for bare provider (Scenario A)", async () => {
+    it("should register OTel shutdown hook, signal handlers, and beforeExit trigger for bare provider (Scenario A)", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
       const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
       const signalSpy = vi.spyOn(lifecycle, "registerSignalHandlers");
+      const triggerSpy = vi.spyOn(lifecycle, "registerBeforeExitTrigger");
 
       await configureOtel(createTestConfig(), sessionManager);
 
@@ -204,19 +210,25 @@ describe("configureOtel()", () => {
       expect(otelHook).toBeDefined();
       expect(otelHook![0].priority).toBe(0);
       expect(signalSpy).toHaveBeenCalledTimes(1);
+      expect(triggerSpy).toHaveBeenCalledTimes(1);
     });
 
-    it("should register beforeExit handler for coexistence flush (Scenario B-auto)", async () => {
+    it("should register coexistence flush hook + beforeExit trigger for coexistence (Scenario B-auto)", async () => {
       const existingProvider = new otelSdk.BasicTracerProvider();
       otelApi.trace.setGlobalTracerProvider(existingProvider);
 
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      const beforeExitBefore = process.listenerCount("beforeExit");
+      const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
+      const triggerSpy = vi.spyOn(lifecycle, "registerBeforeExitTrigger");
 
       await configureOtel(createTestConfig(), sessionManager);
 
-      // Direct beforeExit handler as safety net (not via lifecycle coordinator)
-      expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore + 1);
+      // Both hook and trigger registered via coordinator
+      const flushHook = hookSpy.mock.calls.find(
+        (call) => call[0].name === "coexistence-flush",
+      );
+      expect(flushHook).toBeDefined();
+      expect(triggerSpy).toHaveBeenCalledTimes(1);
     });
 
     it("should NOT register any hooks when coexistence fails (Scenario C/F)", async () => {
