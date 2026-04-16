@@ -6,7 +6,7 @@ import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
-import { setOtelState, OtelState } from "./lifecycle.js";
+import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerSignalHandlers } from "./lifecycle.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let _resolvedApiKey: string = API_KEY_PENDING;
@@ -14,14 +14,11 @@ let _resolvedApiKey: string = API_KEY_PENDING;
 /** Module-level reference to the active exporter for key-resolution notification. */
 let _activeExporter: GlasstraceExporter | null = null;
 
-/** Registered shutdown handler, tracked so it can be removed on reset. */
-let _shutdownHandler: ((signal: NodeJS.Signals) => void) | null = null;
-
-/** Registered beforeExit handler for coexistence mode, tracked for cleanup. */
-let _beforeExitHandler: (() => void) | null = null;
-
 /** Injected BatchSpanProcessor in coexistence mode, tracked for flush on exit. */
 let _injectedProcessor: BatchSpanProcessor | null = null;
+
+/** Tracked beforeExit handler for coexistence flush safety net. */
+let _beforeExitHandler: (() => void) | null = null;
 
 /**
  * Sets the resolved API key for OTel export authentication.
@@ -55,15 +52,12 @@ export function resetOtelConfigForTesting(): void {
   _resolvedApiKey = API_KEY_PENDING;
   _activeExporter = null;
   _injectedProcessor = null;
-  if (_shutdownHandler && typeof process !== "undefined") {
-    process.removeListener("SIGTERM", _shutdownHandler);
-    process.removeListener("SIGINT", _shutdownHandler);
-    _shutdownHandler = null;
-  }
   if (_beforeExitHandler && typeof process !== "undefined") {
     process.removeListener("beforeExit", _beforeExitHandler);
     _beforeExitHandler = null;
   }
+  // Signal handler cleanup is now handled by resetLifecycleForTesting()
+  // via the shutdown coordinator.
 }
 
 /**
@@ -93,48 +87,6 @@ async function tryImport(moduleId: string): Promise<Record<string, unknown> | nu
   }
 }
 
-/**
- * Registers process shutdown hooks that flush and shut down the OTel provider.
- * Uses `process.once()` to avoid stacking handlers on repeated calls.
- * Guarded for non-Node environments where `process` may not exist.
- */
-function registerShutdownHooks(provider: { shutdown: () => Promise<void> }): void {
-  if (typeof process === "undefined" || typeof process.once !== "function") {
-    return;
-  }
-
-  // Remove any previously registered handler before adding a new one
-  if (_shutdownHandler) {
-    process.removeListener("SIGTERM", _shutdownHandler);
-    process.removeListener("SIGINT", _shutdownHandler);
-  }
-
-  let shutdownCalled = false;
-
-  const shutdown = (signal: string) => {
-    if (shutdownCalled) return;
-    shutdownCalled = true;
-
-    void provider.shutdown()
-      .catch((err: unknown) => {
-        console.warn(
-          `[glasstrace] Error during OTel shutdown: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      })
-      .finally(() => {
-        // Re-raise the signal so Node's default termination behavior proceeds.
-        // Remove our listeners first to avoid re-entering this handler.
-        process.removeListener("SIGTERM", _shutdownHandler!);
-        process.removeListener("SIGINT", _shutdownHandler!);
-        process.kill(process.pid, signal);
-      });
-  };
-
-  const handler = (signal: NodeJS.Signals) => shutdown(signal);
-  _shutdownHandler = handler;
-  process.once("SIGTERM", handler);
-  process.once("SIGINT", handler);
-}
 
 /**
  * Attempts to inject a BatchSpanProcessor into an existing provider's
@@ -142,13 +94,14 @@ function registerShutdownHooks(provider: { shutdown: () => Promise<void> }): voi
  *   1. Feature-detect `addSpanProcessor` (OTel v1 public API)
  *   2. Feature-detect `_activeSpanProcessor._spanProcessors` (OTel v2 internal)
  *
- * Returns true if the processor was successfully added, false otherwise.
- * Fully defensive — any error returns false.
+ * Returns the method used ("v1_public" | "v2_private"), "already_present" if
+ * the branded processor was found, or null if injection failed.
+ * Fully defensive — any error returns null.
  */
 function tryInjectProcessor(
   tracerProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
   glasstraceExporter: GlasstraceExporter,
-): boolean {
+): "v1_public" | "v2_private" | "already_present" | null {
   try {
     // Unwrap the ProxyTracerProvider to get the delegate.
     const proxy = tracerProvider as unknown as { getDelegate?: () => unknown };
@@ -173,7 +126,7 @@ function tryInjectProcessor(
           const exp = p._exporter as Record<symbol, unknown> | undefined;
           return exp?.[brand] === true;
         })) {
-          return true; // Already present — skip injection
+          return "already_present"; // Skip injection — branded processor found
         }
       }
 
@@ -182,7 +135,7 @@ function tryInjectProcessor(
       });
       withAdd.addSpanProcessor(processor);
       _injectedProcessor = processor;
-      return true;
+      return "v1_public";
     }
 
     // Attempt 2: OTel v2 internals (_activeSpanProcessor._spanProcessors)
@@ -195,7 +148,7 @@ function tryInjectProcessor(
     };
     const multiProcessor = provider._activeSpanProcessor;
     if (!multiProcessor || !Array.isArray(multiProcessor._spanProcessors)) {
-      return false;
+      return null;
     }
 
     const processor = new BatchSpanProcessor(glasstraceExporter, {
@@ -203,9 +156,9 @@ function tryInjectProcessor(
     });
     multiProcessor._spanProcessors.push(processor);
     _injectedProcessor = processor;
-    return true;
+    return "v2_private";
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -243,42 +196,6 @@ function isGlasstraceProcessorPresent(
   }
 }
 
-/**
- * Registers a `beforeExit` handler that flushes the injected
- * BatchSpanProcessor (which in turn flushes the GlasstraceExporter).
- *
- * In coexistence mode, the existing provider owns shutdown hooks (SIGTERM,
- * SIGINT). This handler fires when the event loop drains, giving us a
- * chance to flush buffered spans without interfering with signal-based
- * shutdown from the other tool.
- *
- * Flushes the BSP (not just the exporter) because spans are queued in
- * the BSP before reaching the exporter. If the host provider doesn't call
- * shutdown on exit, those queued spans would otherwise be lost.
- */
-function registerCoexistenceFlushOnExit(): void {
-  if (typeof process === "undefined" || typeof process.once !== "function") {
-    return;
-  }
-
-  // Remove any previously registered handler
-  if (_beforeExitHandler) {
-    process.removeListener("beforeExit", _beforeExitHandler);
-  }
-
-  const handler = () => {
-    if (_injectedProcessor) {
-      void _injectedProcessor.forceFlush().catch((err: unknown) => {
-        console.warn(
-          `[glasstrace] Error flushing processor on exit: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
-    }
-  };
-
-  _beforeExitHandler = handler;
-  process.once("beforeExit", handler);
-}
 
 /**
  * Configures OpenTelemetry with the GlasstraceExporter.
@@ -341,20 +258,49 @@ export async function configureOtel(
       // The newly created exporter is unused — the existing one handles spans.
       _activeExporter = null;
       setOtelState(OtelState.PROCESSOR_PRESENT);
+      emitLifecycleEvent("otel:configured", { state: OtelState.PROCESSOR_PRESENT, scenario: "B-clean" });
       return;
     }
 
     // Attempt to inject our processor (Scenarios D1, B-auto/D2)
-    const injected = tryInjectProcessor(existingProvider, glasstraceExporter);
+    const injectionMethod = tryInjectProcessor(existingProvider, glasstraceExporter);
 
-    if (injected) {
+    if (injectionMethod === "already_present") {
+      // Found via v1 getActiveSpanProcessor — same as B-clean
+      if (config.verbose) {
+        sdkLog("info", "[glasstrace] Existing provider detected — Glasstrace processor already present (v1 check).");
+      }
+      _activeExporter = null;
+      setOtelState(OtelState.PROCESSOR_PRESENT);
+      emitLifecycleEvent("otel:configured", { state: OtelState.PROCESSOR_PRESENT, scenario: "B-clean" });
+      return;
+    }
+
+    if (injectionMethod) {
       if (config.verbose) {
         sdkLog("info", "[glasstrace] Existing provider detected — auto-attaching Glasstrace processor.");
       }
-      // Register beforeExit handler to flush the injected processor.
-      // Do NOT register SIGTERM/SIGINT — existing provider owns those.
-      registerCoexistenceFlushOnExit();
+      // Register a beforeExit safety net to flush the injected processor.
+      // The existing provider handles signal-based shutdown (its MultiSpanProcessor
+      // propagates shutdown() to our injected BSP). This handler covers the edge
+      // case where the process exits without signals (event loop drains).
+      // NOT registered via lifecycle coordinator — the coordinator's executeShutdown()
+      // is only triggered by signal handlers which aren't registered in coexistence mode.
+      if (typeof process !== "undefined" && typeof process.once === "function") {
+        if (_beforeExitHandler) {
+          process.removeListener("beforeExit", _beforeExitHandler);
+        }
+        _beforeExitHandler = () => {
+          if (_injectedProcessor) {
+            void _injectedProcessor.forceFlush().catch(() => {});
+          }
+        };
+        process.once("beforeExit", _beforeExitHandler);
+      }
+      const scenario = injectionMethod === "v1_public" ? "D1" : "B-auto";
       setOtelState(OtelState.AUTO_ATTACHED);
+      emitLifecycleEvent("otel:configured", { state: OtelState.AUTO_ATTACHED, scenario });
+      emitLifecycleEvent("otel:injection_succeeded", { method: injectionMethod });
       return;
     }
 
@@ -369,6 +315,14 @@ export async function configureOtel(
     );
     _activeExporter = null;
     setOtelState(OtelState.COEXISTENCE_FAILED);
+    emitLifecycleEvent("otel:configured", { state: OtelState.COEXISTENCE_FAILED, scenario: "C/F" });
+    emitLifecycleEvent("otel:injection_failed", { reason: "provider internals inaccessible" });
+    // Cross-layer effect: trigger ACTIVE_DEGRADED if core state permits it
+    // (per DISC-1247, KEY_PENDING → ACTIVE_DEGRADED is not valid, so we guard)
+    const coreState = getCoreState();
+    if (coreState === CoreState.ACTIVE || coreState === CoreState.KEY_RESOLVED) {
+      setCoreState(CoreState.ACTIVE_DEGRADED);
+    }
     return;
   }
 
@@ -394,6 +348,7 @@ export async function configureOtel(
 
     (vercelOtel.registerOTel as (opts: Record<string, unknown>) => void)(otelConfig);
     setOtelState(OtelState.OWNS_PROVIDER);
+    emitLifecycleEvent("otel:configured", { state: OtelState.OWNS_PROVIDER, scenario: "E" });
     return;
   }
 
@@ -427,6 +382,38 @@ export async function configureOtel(
   // already active and propagating trace context across async boundaries.
 
   otelApi.trace.setGlobalTracerProvider(provider);
-  registerShutdownHooks(provider);
+
+  // Register OTel shutdown via lifecycle coordinator instead of direct signal handlers.
+  // Also register signal handlers since the SDK owns this provider (Scenario A).
+  // In coexistence mode, the existing provider owns signals — we don't register there.
+  registerShutdownHook({
+    name: "otel-provider-shutdown",
+    priority: 0,
+    fn: async () => {
+      await provider.shutdown();
+    },
+  });
+  registerSignalHandlers();
+
+  // Register Prisma instrumentation on the bare path (DISC-1223).
+  // The Vercel path handles this via registerOTel({ instrumentations: [...] }).
+  // The coexistence path gets Prisma from the existing provider (e.g., Sentry).
+  // Only the bare path was missing it.
+  const prismaModule = await tryImport("@prisma/instrumentation");
+  if (prismaModule) {
+    const PrismaInstrumentation = prismaModule.PrismaInstrumentation as
+      (new () => unknown & { setTracerProvider: (p: unknown) => void; enable: () => void }) | undefined;
+    if (PrismaInstrumentation) {
+      try {
+        const inst = new PrismaInstrumentation();
+        inst.setTracerProvider(provider);
+        inst.enable();
+      } catch {
+        // Prisma instrumentation is optional — failure is not fatal
+      }
+    }
+  }
+
   setOtelState(OtelState.OWNS_PROVIDER);
+  emitLifecycleEvent("otel:configured", { state: OtelState.OWNS_PROVIDER, scenario: "A" });
 }
