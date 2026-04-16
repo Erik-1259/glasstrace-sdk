@@ -6,7 +6,7 @@ import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
-import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerSignalHandlers } from "./lifecycle.js";
+import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerSignalHandlers, registerBeforeExitTrigger } from "./lifecycle.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let _resolvedApiKey: string = API_KEY_PENDING;
@@ -16,9 +16,6 @@ let _activeExporter: GlasstraceExporter | null = null;
 
 /** Injected BatchSpanProcessor in coexistence mode, tracked for flush on exit. */
 let _injectedProcessor: BatchSpanProcessor | null = null;
-
-/** Tracked beforeExit handler for coexistence flush safety net. */
-let _beforeExitHandler: (() => void) | null = null;
 
 /**
  * Sets the resolved API key for OTel export authentication.
@@ -52,11 +49,7 @@ export function resetOtelConfigForTesting(): void {
   _resolvedApiKey = API_KEY_PENDING;
   _activeExporter = null;
   _injectedProcessor = null;
-  if (_beforeExitHandler && typeof process !== "undefined") {
-    process.removeListener("beforeExit", _beforeExitHandler);
-    _beforeExitHandler = null;
-  }
-  // Signal handler cleanup is now handled by resetLifecycleForTesting()
+  // Signal and beforeExit handler cleanup is handled by resetLifecycleForTesting()
   // via the shutdown coordinator.
 }
 
@@ -280,23 +273,23 @@ export async function configureOtel(
       if (config.verbose) {
         sdkLog("info", "[glasstrace] Existing provider detected — auto-attaching Glasstrace processor.");
       }
-      // Register a beforeExit safety net to flush the injected processor.
+      // Register coexistence flush hook via the lifecycle coordinator, and
+      // wire the beforeExit trigger so the coordinator runs on event loop drain.
       // The existing provider handles signal-based shutdown (its MultiSpanProcessor
-      // propagates shutdown() to our injected BSP). This handler covers the edge
-      // case where the process exits without signals (event loop drains).
-      // NOT registered via lifecycle coordinator — the coordinator's executeShutdown()
-      // is only triggered by signal handlers which aren't registered in coexistence mode.
-      if (typeof process !== "undefined" && typeof process.once === "function") {
-        if (_beforeExitHandler) {
-          process.removeListener("beforeExit", _beforeExitHandler);
-        }
-        _beforeExitHandler = () => {
+      // propagates shutdown() to our injected BSP). The beforeExit trigger covers
+      // the edge case where the process exits without signals.
+      // Both triggers (signals and beforeExit) call executeShutdown() which is
+      // idempotent — if one already ran, the other is a no-op.
+      registerShutdownHook({
+        name: "coexistence-flush",
+        priority: 5,
+        fn: async () => {
           if (_injectedProcessor) {
-            void _injectedProcessor.forceFlush().catch(() => {});
+            await _injectedProcessor.forceFlush();
           }
-        };
-        process.once("beforeExit", _beforeExitHandler);
-      }
+        },
+      });
+      registerBeforeExitTrigger();
       const scenario = injectionMethod === "v1_public" ? "D1" : "B-auto";
       setOtelState(OtelState.AUTO_ATTACHED);
       emitLifecycleEvent("otel:configured", { state: OtelState.AUTO_ATTACHED, scenario });
@@ -394,6 +387,7 @@ export async function configureOtel(
     },
   });
   registerSignalHandlers();
+  registerBeforeExitTrigger();
 
   // Register Prisma instrumentation on the bare path (DISC-1223).
   // The Vercel path handles this via registerOTel({ instrumentations: [...] }).

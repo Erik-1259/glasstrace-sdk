@@ -523,18 +523,21 @@ export function getStatus(): {
 //
 // IMPORTANT: The shutdown system has two parts that must stay in sync:
 //   1. HOOKS — registered via registerShutdownHook() by each module
-//   2. TRIGGERS — signal handlers (registerSignalHandlers) or direct
-//      beforeExit handlers that call executeShutdown() or flush directly
+//   2. TRIGGERS — registerSignalHandlers() for signal-based exit, or
+//      registerBeforeExitTrigger() for event-loop-drain exit. Both
+//      call executeShutdown() which is idempotent.
 //
 // Rules for agents modifying shutdown behavior:
 //   - When registering a hook, verify its trigger exists in the same PR.
 //     A hook without a trigger is dead code.
 //   - When removing a trigger, verify no hooks depend on it.
 //     A trigger removal without hook cleanup drops spans on exit.
-//   - In coexistence mode, the existing provider owns signals. Use
-//     direct beforeExit handlers (not the coordinator) for safety-net
-//     flush because executeShutdown() is only triggered by OUR signal
-//     handlers, which aren't registered in coexistence mode.
+//   - Scenario A (bare path): register BOTH signal handlers AND
+//     beforeExit trigger. Signals cover SIGTERM/SIGINT, beforeExit
+//     covers clean event loop drain (all timers unref'd).
+//   - Scenario B (coexistence): register ONLY beforeExit trigger.
+//     The existing provider owns signals. beforeExit covers the edge
+//     case where the provider doesn't propagate shutdown on drain.
 // ---------------------------------------------------------------------------
 
 export interface ShutdownHook {
@@ -546,6 +549,8 @@ export interface ShutdownHook {
 let _shutdownHooks: ShutdownHook[] = [];
 let _signalHandlersRegistered = false;
 let _signalHandler: ((signal: NodeJS.Signals) => void) | null = null;
+let _beforeExitRegistered = false;
+let _beforeExitHandler: (() => void) | null = null;
 let _shutdownExecuted = false;
 
 /**
@@ -625,6 +630,32 @@ export function registerSignalHandlers(): void {
   process.once("SIGINT", handler);
 }
 
+/**
+ * Register a beforeExit handler that triggers the shutdown coordinator.
+ * beforeExit fires when the event loop drains (not on signals).
+ *
+ * For Scenario B (coexistence): the existing provider owns SIGTERM/SIGINT.
+ * This trigger covers the edge case where the process exits without signals
+ * (event loop drains naturally). The existing provider's MultiSpanProcessor
+ * handles signal-based shutdown by propagating to our injected processor.
+ *
+ * Both signal handlers and beforeExit triggers call the same executeShutdown(),
+ * which is idempotent — if signals already ran shutdown, beforeExit is a no-op.
+ */
+export function registerBeforeExitTrigger(): void {
+  if (_beforeExitRegistered) return;
+  if (typeof process === "undefined" || typeof process.once !== "function") return;
+
+  _beforeExitRegistered = true;
+
+  const handler = () => {
+    void executeShutdown();
+  };
+
+  _beforeExitHandler = handler;
+  process.once("beforeExit", handler);
+}
+
 // ---------------------------------------------------------------------------
 // Testing
 // ---------------------------------------------------------------------------
@@ -654,4 +685,9 @@ export function resetLifecycleForTesting(): void {
   }
   _signalHandler = null;
   _signalHandlersRegistered = false;
+  if (_beforeExitHandler && typeof process !== "undefined") {
+    process.removeListener("beforeExit", _beforeExitHandler);
+  }
+  _beforeExitHandler = null;
+  _beforeExitRegistered = false;
 }
