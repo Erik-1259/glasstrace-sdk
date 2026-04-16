@@ -14,6 +14,7 @@ import { installConsoleCapture, uninstallConsoleCapture, sdkLog } from "./consol
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
 import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, setAuthState, emitLifecycleEvent, resetLifecycleForTesting } from "./lifecycle.js";
+import { startRuntimeStateWriter, _resetRuntimeStateForTesting } from "./runtime-state.js";
 
 /** Mask an API key for safe event emission — shows prefix + last 4 chars. */
 function maskKey(key: string): string {
@@ -75,6 +76,14 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     }
 
     setCoreState(CoreState.REGISTERING);
+
+    // Start runtime state writer — writes lifecycle state to
+    // .glasstrace/runtime-state.json for CLI status reporting (SDK-026).
+    // Must be after initLifecycle() and Node.js guard.
+    startRuntimeStateWriter({
+      projectRoot: process.cwd(),
+      sdkVersion: __SDK_VERSION__,
+    });
 
     // Resolve config
     const config = resolveConfig(options);
@@ -433,5 +442,6 @@ export function _resetRegistrationForTesting(): void {
   _resetHeartbeatForTesting();
   uninstallConsoleCapture();
   resetOtelConfigForTesting();
+  _resetRuntimeStateForTesting();
   resetLifecycleForTesting();
 }
