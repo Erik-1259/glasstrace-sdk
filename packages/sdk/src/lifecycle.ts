@@ -57,14 +57,16 @@ export type OtelState = (typeof OtelState)[keyof typeof OtelState];
 // ---------------------------------------------------------------------------
 
 const VALID_CORE_TRANSITIONS: Record<CoreState, readonly CoreState[]> = {
-  [CoreState.IDLE]: [CoreState.REGISTERING],
+  [CoreState.IDLE]: [CoreState.REGISTERING, CoreState.REGISTRATION_FAILED, CoreState.SHUTTING_DOWN],
   [CoreState.REGISTERING]: [
     CoreState.KEY_PENDING,
     CoreState.PRODUCTION_DISABLED,
     CoreState.REGISTRATION_FAILED,
+    CoreState.SHUTTING_DOWN,
   ],
   [CoreState.KEY_PENDING]: [
     CoreState.KEY_RESOLVED,
+    CoreState.REGISTRATION_FAILED,
     CoreState.SHUTTING_DOWN,
   ],
   [CoreState.KEY_RESOLVED]: [
@@ -409,6 +411,204 @@ function emitSafe<K extends keyof SdkLifecycleEvents>(
 }
 
 // ---------------------------------------------------------------------------
+// Readiness API
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when the SDK is in ACTIVE or ACTIVE_DEGRADED state.
+ */
+export function isReady(): boolean {
+  return _coreState === CoreState.ACTIVE || _coreState === CoreState.ACTIVE_DEGRADED;
+}
+
+/**
+ * Resolves when the SDK reaches ACTIVE or ACTIVE_DEGRADED.
+ * Rejects on PRODUCTION_DISABLED, REGISTRATION_FAILED, or timeout.
+ *
+ * Checks current state synchronously first — resolves/rejects immediately
+ * if the SDK has already reached a terminal or ready state.
+ */
+export function waitForReady(timeoutMs = 30000): Promise<void> {
+  // Check current state synchronously
+  if (isReady()) {
+    return Promise.resolve();
+  }
+  if (
+    _coreState === CoreState.PRODUCTION_DISABLED ||
+    _coreState === CoreState.REGISTRATION_FAILED ||
+    _coreState === CoreState.SHUTDOWN
+  ) {
+    return Promise.reject(new Error(`SDK is in terminal state: ${_coreState}`));
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const listener = ({ to }: { from: CoreState; to: CoreState }) => {
+      if (settled) return;
+      if (to === CoreState.ACTIVE || to === CoreState.ACTIVE_DEGRADED) {
+        settled = true;
+        offLifecycleEvent("core:state_changed", listener);
+        resolve();
+      } else if (
+        to === CoreState.PRODUCTION_DISABLED ||
+        to === CoreState.REGISTRATION_FAILED ||
+        to === CoreState.SHUTDOWN
+      ) {
+        settled = true;
+        offLifecycleEvent("core:state_changed", listener);
+        reject(new Error(`SDK reached terminal state: ${to}`));
+      }
+    };
+
+    onLifecycleEvent("core:state_changed", listener);
+
+    if (timeoutMs > 0) {
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        offLifecycleEvent("core:state_changed", listener);
+        reject(new Error(`waitForReady timed out after ${timeoutMs}ms (state: ${_coreState})`));
+      }, timeoutMs);
+      // unref() so this timer doesn't prevent process exit
+      if (typeof timer === "object" && "unref" in timer) {
+        timer.unref();
+      }
+    }
+  });
+}
+
+/**
+ * Simplified public state query for external consumers.
+ * Hides implementation details like coexistence scenarios.
+ */
+export function getStatus(): {
+  ready: boolean;
+  mode: "anonymous" | "authenticated" | "claiming" | "disabled";
+  tracing: "active" | "degraded" | "not-configured" | "coexistence";
+} {
+  let mode: "anonymous" | "authenticated" | "claiming" | "disabled";
+  if (_coreState === CoreState.PRODUCTION_DISABLED) {
+    mode = "disabled";
+  } else if (_authState === AuthState.CLAIMING || _authState === AuthState.CLAIMED) {
+    mode = "claiming";
+  } else if (_authState === AuthState.AUTHENTICATED) {
+    mode = "authenticated";
+  } else {
+    mode = "anonymous";
+  }
+
+  let tracing: "active" | "degraded" | "not-configured" | "coexistence";
+  if (_otelState === OtelState.COEXISTENCE_FAILED || _otelState === OtelState.UNCONFIGURED || _otelState === OtelState.CONFIGURING) {
+    tracing = "not-configured";
+  } else if (_coreState === CoreState.ACTIVE_DEGRADED) {
+    tracing = "degraded";
+  } else if (_otelState === OtelState.AUTO_ATTACHED || _otelState === OtelState.PROCESSOR_PRESENT) {
+    tracing = "coexistence";
+  } else {
+    tracing = "active";
+  }
+
+  return {
+    ready: isReady(),
+    mode,
+    tracing,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown Coordinator
+// ---------------------------------------------------------------------------
+
+export interface ShutdownHook {
+  name: string;
+  priority: number;
+  fn: () => Promise<void>;
+}
+
+let _shutdownHooks: ShutdownHook[] = [];
+let _signalHandlersRegistered = false;
+let _signalHandler: ((signal: NodeJS.Signals) => void) | null = null;
+let _shutdownExecuted = false;
+
+/**
+ * Register a shutdown hook. Hooks are executed in priority order
+ * (lower number = earlier execution) during shutdown.
+ */
+export function registerShutdownHook(hook: ShutdownHook): void {
+  _shutdownHooks.push(hook);
+  _shutdownHooks.sort((a, b) => a.priority - b.priority);
+}
+
+/**
+ * Execute all registered shutdown hooks in priority order.
+ * Each hook runs with a timeout. Errors in individual hooks are caught
+ * and logged — remaining hooks still execute.
+ *
+ * Idempotent: calling this multiple times has no effect after the first.
+ */
+export async function executeShutdown(timeoutMs = 5000): Promise<void> {
+  if (_shutdownExecuted) return;
+  _shutdownExecuted = true;
+
+  setCoreState(CoreState.SHUTTING_DOWN);
+
+  for (const hook of _shutdownHooks) {
+    try {
+      // Suppress unhandled rejection on the hook promise if the timeout wins the race.
+      const hookPromise = hook.fn();
+      hookPromise.catch(() => {});
+
+      await Promise.race([
+        hookPromise,
+        new Promise<void>((_, reject) => {
+          const timer = setTimeout(() => reject(new Error(`Shutdown hook "${hook.name}" timed out`)), timeoutMs);
+          if (typeof timer === "object" && "unref" in timer) {
+            timer.unref();
+          }
+        }),
+      ]);
+    } catch (err) {
+      _logger?.(
+        "warn",
+        `[glasstrace] Shutdown hook "${hook.name}" failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  setCoreState(CoreState.SHUTDOWN);
+}
+
+/**
+ * Register SIGTERM and SIGINT handlers that trigger the shutdown
+ * coordinator. Called by the core lifecycle setup, not by individual
+ * layers. Re-raises the signal after shutdown completes.
+ */
+export function registerSignalHandlers(): void {
+  if (_signalHandlersRegistered) return;
+  if (typeof process === "undefined" || typeof process.once !== "function") return;
+
+  _signalHandlersRegistered = true;
+
+  const handler = (signal: NodeJS.Signals) => {
+    void executeShutdown().finally(() => {
+      // Remove our handler and re-raise the signal for default behavior
+      if (_signalHandler) {
+        process.removeListener("SIGTERM", _signalHandler);
+        process.removeListener("SIGINT", _signalHandler);
+      }
+      process.kill(process.pid, signal);
+    });
+  };
+
+  _signalHandler = handler;
+  process.once("SIGTERM", handler);
+  process.once("SIGINT", handler);
+}
+
+// ---------------------------------------------------------------------------
 // Testing
 // ---------------------------------------------------------------------------
 
@@ -429,4 +629,12 @@ export function resetLifecycleForTesting(): void {
   _coreReadyEmitted = false;
   _authInitialized = false;
   _emitting = false;
+  _shutdownHooks = [];
+  _shutdownExecuted = false;
+  if (_signalHandler && typeof process !== "undefined") {
+    process.removeListener("SIGTERM", _signalHandler);
+    process.removeListener("SIGINT", _signalHandler);
+  }
+  _signalHandler = null;
+  _signalHandlersRegistered = false;
 }

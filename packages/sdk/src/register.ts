@@ -10,18 +10,16 @@ import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
 import { installContextManager } from "./context-manager.js";
 import * as otelApi from "@opentelemetry/api";
-import { installConsoleCapture, uninstallConsoleCapture } from "./console-capture.js";
+import { installConsoleCapture, uninstallConsoleCapture, sdkLog } from "./console-capture.js";
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
+import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, resetLifecycleForTesting } from "./lifecycle.js";
 
 /** Whether console capture has been installed in this registration cycle. */
 let consoleCaptureInstalled = false;
 
 /** Module-level state tracking for the registered discovery handler. */
 let discoveryHandler: ((request: Request) => Promise<Response | null>) | null = null;
-
-/** Module-level flag to prevent double registration. */
-let isRegistered = false;
 
 /** Generation counter to invalidate stale background promises after reset. */
 let registrationGeneration = 0;
@@ -44,10 +42,13 @@ let registrationGeneration = 0;
  */
 export function registerGlasstrace(options?: GlasstraceOptions): void {
   try {
-    // Prevent double registration
-    if (isRegistered) {
+    // Prevent double registration (lifecycle state check replaces isRegistered flag)
+    if (getCoreState() !== CoreState.IDLE) {
       return;
     }
+
+    // Initialize lifecycle state machine before any state transitions.
+    initLifecycle({ logger: sdkLog });
 
     // Guard: SDK requires Node.js runtime. Some environments (e.g. Bun,
     // Deno with partial Node compat) resolve node: imports but lack full
@@ -67,6 +68,8 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       return;
     }
 
+    setCoreState(CoreState.REGISTERING);
+
     // Resolve config
     const config = resolveConfig(options);
     if (config.verbose) {
@@ -75,6 +78,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     // Production check
     if (isProductionDisabled(config)) {
+      setCoreState(CoreState.PRODUCTION_DISABLED);
       console.warn(
         "[glasstrace] Disabled in production. Set GLASSTRACE_FORCE_ENABLE=true to override.",
       );
@@ -87,6 +91,9 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // Determine auth mode
     const anonymous = isAnonymousMode(config);
     let effectiveKey: string | undefined = config.apiKey;
+
+    // Set initial auth lifecycle state based on configuration
+    initAuthState(anonymous ? AuthState.ANONYMOUS : AuthState.AUTHENTICATED);
 
     if (effectiveKey) {
       setResolvedApiKey(effectiveKey);
@@ -115,7 +122,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       console.info("[glasstrace] SessionManager created.");
     }
 
-    isRegistered = true;
+    setCoreState(CoreState.KEY_PENDING);
     const currentGeneration = registrationGeneration;
 
     // Check for an existing OTel provider BEFORE installing the context
@@ -278,6 +285,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       console.info("[glasstrace] Import graph building skipped.");
     }
   } catch (err) {
+    setCoreState(CoreState.REGISTRATION_FAILED);
     console.warn(
       `[glasstrace] Registration failed: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -305,6 +313,22 @@ async function backgroundInit(
   const initResult = await performInit(config, anonKeyForInit, __SDK_VERSION__, healthReport);
 
   if (generation !== registrationGeneration) return;
+
+  // Bail if shutdown was initiated while backgroundInit was in flight.
+  const currentState = getCoreState();
+  if (currentState === CoreState.SHUTTING_DOWN || currentState === CoreState.SHUTDOWN) {
+    return;
+  }
+
+  // Advance core lifecycle: KEY_PENDING → KEY_RESOLVED → ACTIVE/ACTIVE_DEGRADED.
+  // In the full lifecycle (SDK-024), KEY_RESOLVED is triggered by auth:key_resolved.
+  // For now, drive both transitions here since the auth layer isn't wired yet.
+  if (currentState === CoreState.KEY_PENDING) {
+    setCoreState(CoreState.KEY_RESOLVED);
+  }
+  if (getCoreState() === CoreState.KEY_RESOLVED) {
+    setCoreState(didLastInitSucceed() ? CoreState.ACTIVE : CoreState.ACTIVE_DEGRADED);
+  }
 
   // If the backend reported an account claim, update the exporter
   // key so subsequent span exports authenticate with the dev key.
@@ -381,7 +405,6 @@ function isDiscoveryEnabled(config: ResolvedConfig): boolean {
  * Resets registration state. For testing only.
  */
 export function _resetRegistrationForTesting(): void {
-  isRegistered = false;
   discoveryHandler = null;
   consoleCaptureInstalled = false;
   registrationGeneration++;
@@ -389,4 +412,5 @@ export function _resetRegistrationForTesting(): void {
   _resetHeartbeatForTesting();
   uninstallConsoleCapture();
   resetOtelConfigForTesting();
+  resetLifecycleForTesting();
 }

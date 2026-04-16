@@ -15,6 +15,11 @@ import {
   onLifecycleEvent,
   offLifecycleEvent,
   emitLifecycleEvent,
+  isReady,
+  waitForReady,
+  getStatus,
+  registerShutdownHook,
+  executeShutdown,
   resetLifecycleForTesting,
 } from "../../../packages/sdk/src/lifecycle.js";
 
@@ -491,6 +496,230 @@ describe("SDK Lifecycle State Machine", () => {
       setCoreState(CoreState.ACTIVE);
 
       expect(readyEvents).toHaveLength(1);
+    });
+  });
+
+  describe("isReady()", () => {
+    it("returns false in IDLE state", () => {
+      expect(isReady()).toBe(false);
+    });
+
+    it("returns false in KEY_PENDING state", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      expect(isReady()).toBe(false);
+    });
+
+    it("returns true in ACTIVE state", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+      expect(isReady()).toBe(true);
+    });
+
+    it("returns true in ACTIVE_DEGRADED state", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE_DEGRADED);
+      expect(isReady()).toBe(true);
+    });
+  });
+
+  describe("waitForReady()", () => {
+    it("resolves immediately if already ACTIVE", async () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+
+      await expect(waitForReady()).resolves.toBeUndefined();
+    });
+
+    it("rejects immediately on PRODUCTION_DISABLED", async () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.PRODUCTION_DISABLED);
+
+      await expect(waitForReady()).rejects.toThrow("terminal state");
+    });
+
+    it("resolves when ACTIVE is reached later", async () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+
+      const promise = waitForReady(5000);
+
+      // Simulate async progression
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+
+      await expect(promise).resolves.toBeUndefined();
+    });
+
+    it("resolves when ACTIVE_DEGRADED is reached later", async () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+
+      const promise = waitForReady(5000);
+
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE_DEGRADED);
+
+      await expect(promise).resolves.toBeUndefined();
+    });
+
+    it("rejects on timeout", async () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+
+      await expect(waitForReady(10)).rejects.toThrow("timed out");
+    });
+
+    it("rejects when REGISTRATION_FAILED reached while waiting", async () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+
+      const promise = waitForReady(5000);
+
+      setCoreState(CoreState.REGISTRATION_FAILED);
+
+      await expect(promise).rejects.toThrow("terminal state");
+    });
+  });
+
+  describe("getStatus()", () => {
+    it("returns not-configured when OTel is UNCONFIGURED", () => {
+      const status = getStatus();
+      expect(status.ready).toBe(false);
+      expect(status.mode).toBe("anonymous");
+      expect(status.tracing).toBe("not-configured");
+    });
+
+    it("returns active when ACTIVE + OWNS_PROVIDER", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+      setOtelState(OtelState.CONFIGURING);
+      setOtelState(OtelState.OWNS_PROVIDER);
+
+      const status = getStatus();
+      expect(status.ready).toBe(true);
+      expect(status.tracing).toBe("active");
+    });
+
+    it("returns coexistence when AUTO_ATTACHED", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+      setOtelState(OtelState.CONFIGURING);
+      setOtelState(OtelState.AUTO_ATTACHED);
+
+      const status = getStatus();
+      expect(status.tracing).toBe("coexistence");
+    });
+
+    it("returns degraded when ACTIVE_DEGRADED", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE_DEGRADED);
+      setOtelState(OtelState.CONFIGURING);
+      setOtelState(OtelState.OWNS_PROVIDER);
+
+      const status = getStatus();
+      expect(status.ready).toBe(true);
+      expect(status.tracing).toBe("degraded");
+    });
+
+    it("returns disabled mode for PRODUCTION_DISABLED", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.PRODUCTION_DISABLED);
+
+      const status = getStatus();
+      expect(status.mode).toBe("disabled");
+    });
+
+    it("returns authenticated mode when auth is AUTHENTICATED", () => {
+      initAuthState(AuthState.AUTHENTICATED);
+      const status = getStatus();
+      expect(status.mode).toBe("authenticated");
+    });
+
+    it("returns not-configured during CONFIGURING state", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setOtelState(OtelState.CONFIGURING);
+
+      const status = getStatus();
+      expect(status.tracing).toBe("not-configured");
+    });
+  });
+
+  describe("Shutdown coordinator", () => {
+    it("executes hooks in priority order", async () => {
+      const order: string[] = [];
+
+      registerShutdownHook({ name: "third", priority: 20, fn: async () => { order.push("third"); } });
+      registerShutdownHook({ name: "first", priority: 0, fn: async () => { order.push("first"); } });
+      registerShutdownHook({ name: "second", priority: 10, fn: async () => { order.push("second"); } });
+
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+
+      await executeShutdown();
+
+      expect(order).toEqual(["first", "second", "third"]);
+      expect(getCoreState()).toBe(CoreState.SHUTDOWN);
+    });
+
+    it("catches and logs hook errors without stopping", async () => {
+      const order: string[] = [];
+
+      registerShutdownHook({ name: "fails", priority: 0, fn: async () => { throw new Error("boom"); } });
+      registerShutdownHook({ name: "still-runs", priority: 10, fn: async () => { order.push("ran"); } });
+
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+
+      await executeShutdown();
+
+      expect(order).toEqual(["ran"]);
+      expect(getCoreState()).toBe(CoreState.SHUTDOWN);
+      expect(mockLogger).toHaveBeenCalledWith(
+        "warn",
+        expect.stringContaining('Shutdown hook "fails" failed'),
+      );
+    });
+
+    it("works from non-ACTIVE state (e.g., KEY_PENDING)", async () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+
+      await executeShutdown();
+
+      expect(getCoreState()).toBe(CoreState.SHUTDOWN);
+    });
+
+    it("is idempotent — second call is no-op", async () => {
+      let callCount = 0;
+      registerShutdownHook({ name: "counter", priority: 0, fn: async () => { callCount++; } });
+
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+
+      await executeShutdown();
+      await executeShutdown();
+
+      expect(callCount).toBe(1);
     });
   });
 });
