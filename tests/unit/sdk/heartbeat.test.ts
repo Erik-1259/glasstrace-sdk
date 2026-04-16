@@ -313,7 +313,7 @@ describe("heartbeat", () => {
       startHeartbeat(config, null, "1.0.0", 1, claimCallback);
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
-      expect(claimCallback).toHaveBeenCalledWith(claimedKey);
+      expect(claimCallback).toHaveBeenCalledWith(claimedKey, "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
     });
   });
 

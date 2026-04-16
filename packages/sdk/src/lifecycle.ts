@@ -90,9 +90,9 @@ const VALID_CORE_TRANSITIONS: Record<CoreState, readonly CoreState[]> = {
 
 const VALID_AUTH_TRANSITIONS: Record<AuthState, readonly AuthState[]> = {
   [AuthState.ANONYMOUS]: [AuthState.CLAIMING],
-  [AuthState.AUTHENTICATED]: [],
+  [AuthState.AUTHENTICATED]: [AuthState.CLAIMING],
   [AuthState.CLAIMING]: [AuthState.CLAIMED],
-  [AuthState.CLAIMED]: [],
+  [AuthState.CLAIMED]: [AuthState.CLAIMING],
 };
 
 const VALID_OTEL_TRANSITIONS: Record<OtelState, readonly OtelState[]> = {
