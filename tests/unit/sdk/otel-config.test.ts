@@ -9,6 +9,7 @@ import { DEFAULT_CAPTURE_CONFIG } from "@glasstrace/protocol";
 import type { ResolvedConfig } from "../../../packages/sdk/src/env-detection.js";
 import * as otelApi from "@opentelemetry/api";
 import * as otelSdk from "@opentelemetry/sdk-trace-base";
+import * as lifecycle from "../../../packages/sdk/src/lifecycle.js";
 
 /** Builds a minimal ResolvedConfig for testing. */
 function createTestConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
@@ -25,24 +26,21 @@ function createTestConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
   };
 }
 
-/** Flushes pending microtasks so promise callbacks run. */
-async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-}
 
 describe("configureOtel()", () => {
   let sessionManager: SessionManager;
 
   beforeEach(() => {
     otelApi.trace.disable();
+    lifecycle.resetLifecycleForTesting();
+    lifecycle.initLifecycle({ logger: vi.fn() });
     resetOtelConfigForTesting();
     vi.restoreAllMocks();
     sessionManager = new SessionManager();
   });
 
   afterEach(() => {
-    // Clean up signal listeners before disabling trace to prevent leaks
+    lifecycle.resetLifecycleForTesting();
     resetOtelConfigForTesting();
     otelApi.trace.disable();
     otelApi.context.disable();
@@ -53,13 +51,14 @@ describe("configureOtel()", () => {
   describe("Provider coexistence (DISC-1202)", () => {
     it("Scenario A: registers normally when no existing provider", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      const sigTermBefore = process.listenerCount("SIGTERM");
+      const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
 
       await configureOtel(createTestConfig(), sessionManager);
 
-      // Should register and add shutdown handlers
-      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore + 1);
+      // Should register a shutdown hook via lifecycle coordinator
+      expect(hookSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "otel-provider-shutdown" }),
+      );
     });
 
     it("Scenario B-auto: injects processor into existing v2 provider", async () => {
@@ -91,16 +90,16 @@ describe("configureOtel()", () => {
       expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
     });
 
-    it("Scenario B-auto: registers beforeExit handler for exporter flush", async () => {
+    it("Scenario B-auto: registers beforeExit handler for coexistence flush", async () => {
       const existingProvider = new otelSdk.BasicTracerProvider();
       otelApi.trace.setGlobalTracerProvider(existingProvider);
 
       vi.spyOn(console, "warn").mockImplementation(() => {});
-
       const beforeExitBefore = process.listenerCount("beforeExit");
 
       await configureOtel(createTestConfig(), sessionManager);
 
+      // beforeExit handler registered as safety net (not via lifecycle coordinator)
       expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore + 1);
     });
 
@@ -191,103 +190,49 @@ describe("configureOtel()", () => {
     });
   });
 
-  describe("Shutdown hooks", () => {
-    it("should register SIGTERM and SIGINT handlers", async () => {
+  describe("Shutdown hooks (lifecycle coordinator)", () => {
+    it("should register OTel shutdown hook and signal handlers for bare provider (Scenario A)", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      const sigTermBefore = process.listenerCount("SIGTERM");
-      const sigIntBefore = process.listenerCount("SIGINT");
+      const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
+      const signalSpy = vi.spyOn(lifecycle, "registerSignalHandlers");
 
       await configureOtel(createTestConfig(), sessionManager);
 
-      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore + 1);
-      expect(process.listenerCount("SIGINT")).toBe(sigIntBefore + 1);
+      const otelHook = hookSpy.mock.calls.find(
+        (call) => call[0].name === "otel-provider-shutdown",
+      );
+      expect(otelHook).toBeDefined();
+      expect(otelHook![0].priority).toBe(0);
+      expect(signalSpy).toHaveBeenCalledTimes(1);
     });
 
-    it("should remove handlers on reset", async () => {
-      vi.spyOn(console, "warn").mockImplementation(() => {});
+    it("should register beforeExit handler for coexistence flush (Scenario B-auto)", async () => {
+      const existingProvider = new otelSdk.BasicTracerProvider();
+      otelApi.trace.setGlobalTracerProvider(existingProvider);
 
-      const sigTermBefore = process.listenerCount("SIGTERM");
-      const sigIntBefore = process.listenerCount("SIGINT");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const beforeExitBefore = process.listenerCount("beforeExit");
 
       await configureOtel(createTestConfig(), sessionManager);
 
-      resetOtelConfigForTesting();
-
-      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
-      expect(process.listenerCount("SIGINT")).toBe(sigIntBefore);
+      // Direct beforeExit handler as safety net (not via lifecycle coordinator)
+      expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore + 1);
     });
 
-    it("should call provider.shutdown() when SIGTERM fires", async () => {
-      vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      const shutdownSpy = vi
-        .spyOn(otelSdk.BasicTracerProvider.prototype, "shutdown")
-        .mockResolvedValue(undefined);
-
-      // Prevent re-raise from actually killing the test process
-      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-
-      try {
-        await configureOtel(createTestConfig(), sessionManager);
-
-        process.emit("SIGTERM", "SIGTERM");
-        await flushMicrotasks();
-
-        expect(shutdownSpy).toHaveBeenCalled();
-      } finally {
-        killSpy.mockRestore();
-      }
-    });
-
-    it("should log a warning when provider.shutdown() rejects", async () => {
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      vi.spyOn(otelSdk.BasicTracerProvider.prototype, "shutdown").mockRejectedValue(
-        new Error("shutdown failed"),
+    it("should NOT register any hooks when coexistence fails (Scenario C/F)", async () => {
+      const minimalProvider = {
+        getTracer: () => ({ constructor: { name: "SomeTracer" } }),
+      };
+      otelApi.trace.setGlobalTracerProvider(
+        minimalProvider as unknown as otelApi.TracerProvider,
       );
 
-      // Prevent re-raise from actually killing the test process
-      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-
-      try {
-        await configureOtel(createTestConfig(), sessionManager);
-
-        process.emit("SIGINT", "SIGINT");
-        await flushMicrotasks();
-
-        const shutdownWarning = warnSpy.mock.calls.find(
-          (call) =>
-            typeof call[0] === "string" &&
-            call[0].includes("Error during OTel shutdown"),
-        );
-        expect(shutdownWarning).toBeDefined();
-      } finally {
-        killSpy.mockRestore();
-      }
-    });
-
-    it("should be idempotent when both SIGTERM and SIGINT fire", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
+      const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
 
-      const shutdownSpy = vi
-        .spyOn(otelSdk.BasicTracerProvider.prototype, "shutdown")
-        .mockResolvedValue(undefined);
+      await configureOtel(createTestConfig(), sessionManager);
 
-      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-
-      try {
-        await configureOtel(createTestConfig(), sessionManager);
-
-        process.emit("SIGTERM", "SIGTERM");
-        process.emit("SIGINT", "SIGINT");
-        await flushMicrotasks();
-
-        // shutdown should only be called once despite both signals
-        expect(shutdownSpy).toHaveBeenCalledTimes(1);
-      } finally {
-        killSpy.mockRestore();
-      }
+      expect(hookSpy).not.toHaveBeenCalled();
     });
   });
 

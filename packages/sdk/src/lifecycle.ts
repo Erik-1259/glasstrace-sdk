@@ -436,6 +436,7 @@ export function waitForReady(timeoutMs = 30000): Promise<void> {
   if (
     _coreState === CoreState.PRODUCTION_DISABLED ||
     _coreState === CoreState.REGISTRATION_FAILED ||
+    _coreState === CoreState.SHUTTING_DOWN ||
     _coreState === CoreState.SHUTDOWN
   ) {
     return Promise.reject(new Error(`SDK is in terminal state: ${_coreState}`));
@@ -453,6 +454,7 @@ export function waitForReady(timeoutMs = 30000): Promise<void> {
       } else if (
         to === CoreState.PRODUCTION_DISABLED ||
         to === CoreState.REGISTRATION_FAILED ||
+        to === CoreState.SHUTTING_DOWN ||
         to === CoreState.SHUTDOWN
       ) {
         settled = true;
@@ -518,6 +520,21 @@ export function getStatus(): {
 
 // ---------------------------------------------------------------------------
 // Shutdown Coordinator
+//
+// IMPORTANT: The shutdown system has two parts that must stay in sync:
+//   1. HOOKS — registered via registerShutdownHook() by each module
+//   2. TRIGGERS — signal handlers (registerSignalHandlers) or direct
+//      beforeExit handlers that call executeShutdown() or flush directly
+//
+// Rules for agents modifying shutdown behavior:
+//   - When registering a hook, verify its trigger exists in the same PR.
+//     A hook without a trigger is dead code.
+//   - When removing a trigger, verify no hooks depend on it.
+//     A trigger removal without hook cleanup drops spans on exit.
+//   - In coexistence mode, the existing provider owns signals. Use
+//     direct beforeExit handlers (not the coordinator) for safety-net
+//     flush because executeShutdown() is only triggered by OUR signal
+//     handlers, which aren't registered in coexistence mode.
 // ---------------------------------------------------------------------------
 
 export interface ShutdownHook {
