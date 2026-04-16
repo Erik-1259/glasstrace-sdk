@@ -40,6 +40,26 @@ const INSTRUMENTATION_FILES = [
  * This interface is the public contract for AI agents — fields may be added
  * but never removed or renamed without a major version bump.
  */
+/** Runtime state snapshot read from .glasstrace/runtime-state.json. */
+export interface RuntimeStateSnapshot {
+  /** Whether the runtime state file exists and was readable. */
+  available: boolean;
+  /** Whether the process that wrote the state is likely still running. */
+  stale: boolean;
+  /** Core lifecycle state (e.g., "ACTIVE", "KEY_PENDING", "SHUTDOWN"). */
+  coreState: string | null;
+  /** Auth lifecycle state (e.g., "ANONYMOUS", "AUTHENTICATED"). */
+  authState: string | null;
+  /** OTel coexistence state (e.g., "OWNS_PROVIDER", "AUTO_ATTACHED"). */
+  otelState: string | null;
+  /** OTel scenario (e.g., "A", "B-auto"). */
+  otelScenario: string | null;
+  /** When the state was last written. */
+  updatedAt: string | null;
+  /** PID of the process that wrote the state. */
+  pid: number | null;
+}
+
 export interface StatusResult {
   /** Whether @glasstrace/sdk is in package.json dependencies or devDependencies. */
   installed: boolean;
@@ -55,6 +75,8 @@ export interface StatusResult {
   mcpConfigured: boolean;
   /** Which agent info files have glasstrace marker sections. */
   agents: string[];
+  /** Runtime state from the running SDK process (if available). */
+  runtime: RuntimeStateSnapshot;
 }
 
 /**
@@ -79,6 +101,7 @@ export function runStatus(options: StatusOptions): StatusResult {
     anonKey: checkAnonKey(root),
     mcpConfigured: checkMcpConfigured(root),
     agents: checkAgents(root),
+    runtime: readRuntimeState(root),
   };
 }
 
@@ -191,4 +214,79 @@ function checkAgents(root: string): string[] {
     }
   }
   return found;
+}
+
+const STALE_THRESHOLD_MS = 30_000; // 30 seconds
+
+function readRuntimeState(root: string): RuntimeStateSnapshot {
+  const empty: RuntimeStateSnapshot = {
+    available: false,
+    stale: false,
+    coreState: null,
+    authState: null,
+    otelState: null,
+    otelScenario: null,
+    updatedAt: null,
+    pid: null,
+  };
+
+  try {
+    const filePath = path.join(root, ".glasstrace", "runtime-state.json");
+    const content = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+
+    const updatedAt = typeof parsed.updatedAt === "string" ? parsed.updatedAt : null;
+    const pid = typeof parsed.pid === "number" ? parsed.pid : null;
+    const core = parsed.core as Record<string, unknown> | undefined;
+    const auth = parsed.auth as Record<string, unknown> | undefined;
+    const otel = parsed.otel as Record<string, unknown> | undefined;
+
+    const coreState = typeof core?.state === "string" ? core.state : null;
+    const authState = typeof auth?.state === "string" ? auth.state : null;
+    const otelState = typeof otel?.state === "string" ? otel.state : null;
+    const otelScenario = typeof otel?.scenario === "string" ? otel.scenario : null;
+
+    // Staleness detection
+    let stale = false;
+    if (coreState === "SHUTDOWN") {
+      stale = false; // Clean shutdown — not stale, just finished
+    } else if (updatedAt) {
+      const updatedMs = new Date(updatedAt).getTime();
+      const age = Number.isFinite(updatedMs) ? Date.now() - updatedMs : Infinity;
+      if (age > STALE_THRESHOLD_MS) {
+        // Check if the process is still running
+        if (pid && pid > 0) {
+          try {
+            process.kill(pid, 0); // Signal 0 = existence check
+            // If we get here, process exists. EPERM would also throw,
+            // but with code "EPERM" — meaning the process exists but
+            // we lack permission. Both mean "not stale."
+            stale = false;
+          } catch (err: unknown) {
+            const code = (err as { code?: string })?.code;
+            if (code === "EPERM") {
+              stale = false; // Process exists, we just can't signal it
+            } else {
+              stale = true; // ESRCH or other — process gone
+            }
+          }
+        } else {
+          stale = true; // No valid PID — can't verify
+        }
+      }
+    }
+
+    return {
+      available: true,
+      stale,
+      coreState,
+      authState,
+      otelState,
+      otelScenario,
+      updatedAt,
+      pid,
+    };
+  } catch {
+    return empty;
+  }
 }
