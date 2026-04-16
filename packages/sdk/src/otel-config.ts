@@ -6,6 +6,7 @@ import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
+import { setOtelState, OtelState } from "./lifecycle.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let _resolvedApiKey: string = API_KEY_PENDING;
@@ -292,6 +293,8 @@ export async function configureOtel(
   config: ResolvedConfig,
   sessionManager: SessionManager,
 ): Promise<void> {
+  setOtelState(OtelState.CONFIGURING);
+
   // Build OTLP exporter configuration
   const exporterUrl = `${config.endpoint}/v1/traces`;
 
@@ -337,6 +340,7 @@ export async function configureOtel(
       }
       // The newly created exporter is unused — the existing one handles spans.
       _activeExporter = null;
+      setOtelState(OtelState.PROCESSOR_PRESENT);
       return;
     }
 
@@ -350,6 +354,7 @@ export async function configureOtel(
       // Register beforeExit handler to flush the injected processor.
       // Do NOT register SIGTERM/SIGINT — existing provider owns those.
       registerCoexistenceFlushOnExit();
+      setOtelState(OtelState.AUTO_ATTACHED);
       return;
     }
 
@@ -363,6 +368,7 @@ export async function configureOtel(
       "tracing tool, add a Glasstrace span processor to your provider configuration.",
     );
     _activeExporter = null;
+    setOtelState(OtelState.COEXISTENCE_FAILED);
     return;
   }
 
@@ -387,6 +393,7 @@ export async function configureOtel(
     }
 
     (vercelOtel.registerOTel as (opts: Record<string, unknown>) => void)(otelConfig);
+    setOtelState(OtelState.OWNS_PROVIDER);
     return;
   }
 
@@ -421,4 +428,5 @@ export async function configureOtel(
 
   otelApi.trace.setGlobalTracerProvider(provider);
   registerShutdownHooks(provider);
+  setOtelState(OtelState.OWNS_PROVIDER);
 }

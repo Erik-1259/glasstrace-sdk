@@ -161,6 +161,19 @@ export {
 export { withGlasstraceConfig } from "./config-wrapper.js";
 
 /**
+ * {@link isReady} returns true when the SDK is in ACTIVE or ACTIVE_DEGRADED state.
+ *
+ * {@link waitForReady} returns a Promise that resolves when the SDK is ready,
+ * or rejects if the SDK enters a terminal state (production disabled, registration
+ * failed) or times out.
+ *
+ * Note: `getStatus()` is not exported yet — it depends on auth and OTel lifecycle
+ * layers being wired (SDK-024, SDK-025). Will be exported once those layers are
+ * integrated and getStatus() returns accurate values.
+ */
+export { isReady, waitForReady } from "./lifecycle.js";
+
+/**
  * {@link discoverSourceMapFiles} walks a build directory and returns metadata
  * for all `.map` files without reading their content into memory.
  *
