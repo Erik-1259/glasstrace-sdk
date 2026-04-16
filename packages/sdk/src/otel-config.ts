@@ -7,12 +7,16 @@ import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
 import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerSignalHandlers, registerBeforeExitTrigger } from "./lifecycle.js";
+import { emitNudgeMessage, emitGuidanceMessage } from "./coexistence.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let _resolvedApiKey: string = API_KEY_PENDING;
 
 /** Module-level reference to the active exporter for key-resolution notification. */
 let _activeExporter: GlasstraceExporter | null = null;
+
+/** Additional exporters that need key-resolution notification (from createGlasstraceSpanProcessor). */
+const _additionalExporters: GlasstraceExporter[] = [];
 
 /** Injected BatchSpanProcessor in coexistence mode, tracked for flush on exit. */
 let _injectedProcessor: BatchSpanProcessor | null = null;
@@ -40,6 +44,19 @@ export function getResolvedApiKey(): string {
  */
 export function notifyApiKeyResolved(): void {
   _activeExporter?.notifyKeyResolved();
+  for (const exporter of _additionalExporters) {
+    exporter.notifyKeyResolved();
+  }
+}
+
+/**
+ * Register an additional exporter for key-resolution notification.
+ * Used by createGlasstraceSpanProcessor() so its exporter gets notified
+ * when the API key resolves (flushing buffered spans immediately rather
+ * than waiting for the next BSP timer tick).
+ */
+export function registerExporterForKeyNotification(exporter: GlasstraceExporter): void {
+  _additionalExporters.push(exporter);
 }
 
 /**
@@ -49,6 +66,7 @@ export function resetOtelConfigForTesting(): void {
   _resolvedApiKey = API_KEY_PENDING;
   _activeExporter = null;
   _injectedProcessor = null;
+  _additionalExporters.length = 0;
   // Signal and beforeExit handler cleanup is handled by resetLifecycleForTesting()
   // via the shutdown coordinator.
 }
@@ -294,6 +312,7 @@ export async function configureOtel(
       setOtelState(OtelState.AUTO_ATTACHED);
       emitLifecycleEvent("otel:configured", { state: OtelState.AUTO_ATTACHED, scenario });
       emitLifecycleEvent("otel:injection_succeeded", { method: injectionMethod });
+      emitNudgeMessage();
       return;
     }
 
@@ -301,11 +320,7 @@ export async function configureOtel(
     if (config.verbose) {
       sdkLog("info", "[glasstrace] Existing provider detected — could not auto-attach.");
     }
-    console.warn(
-      "[glasstrace] An existing OpenTelemetry TracerProvider is registered but Glasstrace " +
-      "could not auto-attach its span processor. To use Glasstrace alongside another " +
-      "tracing tool, add a Glasstrace span processor to your provider configuration.",
-    );
+    emitGuidanceMessage();
     _activeExporter = null;
     setOtelState(OtelState.COEXISTENCE_FAILED);
     emitLifecycleEvent("otel:configured", { state: OtelState.COEXISTENCE_FAILED, scenario: "C/F" });

@@ -167,11 +167,22 @@ export { withGlasstraceConfig } from "./config-wrapper.js";
  * or rejects if the SDK enters a terminal state (production disabled, registration
  * failed) or times out.
  *
- * Note: `getStatus()` is not exported yet — it depends on auth and OTel lifecycle
- * layers being wired (SDK-024, SDK-025). Will be exported once those layers are
- * integrated and getStatus() returns accurate values.
+ * {@link getStatus} returns a simplified public view of the SDK state —
+ * ready/mode/tracing — suitable for display or programmatic checks.
+ * All fields are now backed by real runtime code (auth wired in SDK-024,
+ * OTel wired in SDK-025).
  */
-export { isReady, waitForReady } from "./lifecycle.js";
+export { isReady, waitForReady, getStatus } from "./lifecycle.js";
+
+/**
+ * {@link createGlasstraceSpanProcessor} creates a span processor for manual
+ * integration with an existing OTel provider (e.g., Sentry).
+ *
+ * Use this when another tool owns the OTel provider and you want to add
+ * Glasstrace to their processor list. `registerGlasstrace()` is still
+ * required for init, config sync, session management, and health reporting.
+ */
+export { createGlasstraceSpanProcessor } from "./coexistence.js";
 
 /**
  * {@link discoverSourceMapFiles} walks a build directory and returns metadata

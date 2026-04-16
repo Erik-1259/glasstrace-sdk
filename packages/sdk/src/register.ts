@@ -31,6 +31,17 @@ let discoveryHandler: ((request: Request) => Promise<Response | null>) | null = 
 /** Generation counter to invalidate stale background promises after reset. */
 let registrationGeneration = 0;
 
+/** Module-level session manager, shared with createGlasstraceSpanProcessor(). */
+let _sessionManager: SessionManager | null = null;
+
+/** Returns the shared SessionManager. Creates a new one if registerGlasstrace() hasn't run yet. */
+export function getSessionManager(): SessionManager {
+  if (!_sessionManager) {
+    _sessionManager = new SessionManager();
+  }
+  return _sessionManager;
+}
+
 /**
  * The primary SDK entry point called by developers in their `instrumentation.ts`.
  * Orchestrates OTel setup, span processor, init client, anon key, and discovery endpoint.
@@ -135,8 +146,8 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       );
     }
 
-    // Create SessionManager
-    const sessionManager = new SessionManager();
+    // Create or reuse SessionManager (shared with createGlasstraceSpanProcessor)
+    const sessionManager = getSessionManager();
     if (config.verbose) {
       console.info("[glasstrace] SessionManager created.");
     }
@@ -443,5 +454,6 @@ export function _resetRegistrationForTesting(): void {
   uninstallConsoleCapture();
   resetOtelConfigForTesting();
   _resetRuntimeStateForTesting();
+  _sessionManager = null;
   resetLifecycleForTesting();
 }
