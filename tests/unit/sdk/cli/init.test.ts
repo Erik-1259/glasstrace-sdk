@@ -70,20 +70,26 @@ const SUCCESS_RESPONSE = {
 describe("runInit — blocking anon key verification (DISC-493 Issue 3 / DISC-494)", () => {
   let originalVitest: string | undefined;
   let originalCI: string | undefined;
+  let originalGhActions: string | undefined;
 
   beforeEach(() => {
     _resetConfigForTesting();
     originalVitest = process.env["VITEST"];
     originalCI = process.env["CI"];
-    // Un-set VITEST so the verification step runs. Un-set CI so we hit
-    // the interactive-path code branch.
+    originalGhActions = process.env["GITHUB_ACTIONS"];
+    // Un-set VITEST so the verification step runs. Un-set CI /
+    // GITHUB_ACTIONS so we hit the interactive-path code branch — both
+    // are set in GitHub Actions CI and would otherwise cause isCI=true
+    // and skip verification.
     delete process.env["VITEST"];
     delete process.env["CI"];
+    delete process.env["GITHUB_ACTIONS"];
   });
 
   afterEach(() => {
     if (originalVitest !== undefined) process.env["VITEST"] = originalVitest;
     if (originalCI !== undefined) process.env["CI"] = originalCI;
+    if (originalGhActions !== undefined) process.env["GITHUB_ACTIONS"] = originalGhActions;
     _setTransportForTesting(null);
     for (const dir of tempDirs.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -238,6 +244,29 @@ describe("runInit — blocking anon key verification (DISC-493 Issue 3 / DISC-49
       expect(transport).not.toHaveBeenCalled();
     } finally {
       delete process.env["CI"];
+    }
+  });
+
+  it("skips verification when GITHUB_ACTIONS=true", async () => {
+    const dir = createTmpProject();
+    const transport = vi.fn(async (): Promise<HttpsPostJsonResult> => ({
+      status: 200,
+      body: SUCCESS_RESPONSE,
+      raw: "",
+    }));
+    _setTransportForTesting(transport as never);
+
+    process.env["GITHUB_ACTIONS"] = "true";
+    try {
+      const result = await runInit({
+        projectRoot: dir,
+        yes: true,
+        coverageMap: false,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(transport).not.toHaveBeenCalled();
+    } finally {
+      delete process.env["GITHUB_ACTIONS"];
     }
   });
 });
