@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { NEXT_CONFIG_NAMES } from "./constants.js";
+import { readEnvLocalApiKey, isDevApiKey } from "./scaffolder.js";
 
 /**
  * Options for the uninit command.
@@ -9,6 +10,18 @@ import { NEXT_CONFIG_NAMES } from "./constants.js";
 export interface UninitOptions {
   projectRoot: string;
   dryRun: boolean;
+  /**
+   * When true, skip interactive confirmation before destructive actions
+   * such as removing a claimed developer API key from `.env.local`
+   * (DISC-1247 Scenario 6).
+   */
+  force?: boolean;
+  /**
+   * Optional prompt callback; when omitted, uninit uses a TTY-based
+   * `readline` prompt in interactive mode and defaults to `false`
+   * (abort) when no TTY is attached. Exposed for testing.
+   */
+  prompt?: (question: string, defaultValue: boolean) => Promise<boolean>;
 }
 
 /**
@@ -602,27 +615,125 @@ export function processTomlMcpConfig(content: string): {
 }
 
 /**
+ * Writes the `.glasstrace/shutdown-requested` marker file atomically so
+ * that a running SDK heartbeat tick (or equivalent lifecycle hook) can
+ * detect that uninit has been invoked and trigger shutdown (DISC-1247
+ * Scenario 1).
+ *
+ * Uses write-temp + rename semantics so a mid-write crash cannot leave
+ * a truncated marker that the running process might misread.
+ *
+ * Best-effort: if `.glasstrace/` does not exist or the write fails, the
+ * marker is silently skipped — uninit's cleanup is not blocked by a
+ * missing running process.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function writeShutdownMarker(projectRoot: string): boolean {
+  const dirPath = path.join(projectRoot, ".glasstrace");
+  if (!fs.existsSync(dirPath)) {
+    // No .glasstrace/ directory means no running SDK state is tracked —
+    // nothing to signal. The filesystem removal step will handle any
+    // stray artifacts.
+    return false;
+  }
+  const markerPath = path.join(dirPath, "shutdown-requested");
+  const tmpPath = `${markerPath}.tmp`;
+  const body = JSON.stringify({ requestedAt: new Date().toISOString() });
+  try {
+    fs.writeFileSync(tmpPath, body, { encoding: "utf-8", mode: 0o600 });
+    try {
+      fs.chmodSync(tmpPath, 0o600);
+    } catch {
+      // chmod may be unsupported on some filesystems; proceed with rename.
+    }
+    fs.renameSync(tmpPath, markerPath);
+    return true;
+  } catch {
+    // Best-effort cleanup of the temp file; swallow errors so uninit
+    // itself never fails because of a signal-side-channel write.
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // Ignore — the marker was best-effort to begin with.
+    }
+    return false;
+  }
+}
+
+/**
+ * Simple TTY prompt used when `UninitOptions.prompt` is not provided.
+ * Returns `defaultValue` when stdin is not a TTY.
+ */
+async function defaultPrompt(question: string, defaultValue: boolean): Promise<boolean> {
+  if (!process.stdin.isTTY) return defaultValue;
+  const readline = await import("node:readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise<boolean>((resolve) => {
+    const suffix = defaultValue ? " [Y/n] " : " [y/N] ";
+    rl.question(question + suffix, (answer) => {
+      rl.close();
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === "") {
+        resolve(defaultValue);
+        return;
+      }
+      resolve(trimmed === "y" || trimmed === "yes");
+    });
+  });
+}
+
+/**
  * Reverses every step of `glasstrace init`, cleanly removing all SDK artifacts
  * from a project.
  *
  * Steps (in order):
- * 1. Unwrap `withGlasstraceConfig` from next.config
- * 2. Remove `registerGlasstrace` from instrumentation.ts (or delete if init-created)
- * 3. Remove `.glasstrace/` directory
- * 4. Remove `GLASSTRACE_*` entries from `.env.local`
- * 5. Remove `.glasstrace/` from `.gitignore`
- * 6. Remove MCP config entries
- * 7. Remove info sections from agent files
+ * 1. Write `.glasstrace/shutdown-requested` marker so a running SDK can
+ *    drain and exit cleanly (DISC-1247 Scenario 1)
+ * 2. Unwrap `withGlasstraceConfig` from next.config
+ * 3. Remove `registerGlasstrace` from instrumentation.ts (or delete if init-created)
+ * 4. Remove `.glasstrace/` directory
+ * 5. Remove `GLASSTRACE_*` entries from `.env.local` (with dev-key confirmation)
+ * 6. Remove `.glasstrace/` from `.gitignore`
+ * 7. Remove MCP config entries
+ * 8. Remove info sections from agent files
  *
  * @param options - Configuration for the uninit command.
  * @returns A structured result describing what actions were taken.
  */
 export async function runUninit(options: UninitOptions): Promise<UninitResult> {
   const { projectRoot, dryRun } = options;
+  const force = options.force === true;
+  const prompt = options.prompt ?? defaultPrompt;
   const summary: string[] = [];
   const warnings: string[] = [];
   const errors: string[] = [];
   const prefix = dryRun ? "[dry run] " : "";
+
+  // Step 0: Signal any running SDK to shut down via a marker file.
+  // Placed first so the running process has maximum time to observe
+  // the marker while the remaining cleanup steps execute.
+  try {
+    if (!dryRun) {
+      const markerWritten = writeShutdownMarker(projectRoot);
+      if (markerWritten) {
+        summary.push("Wrote .glasstrace/shutdown-requested marker");
+      }
+    } else {
+      const dirPath = path.join(projectRoot, ".glasstrace");
+      if (fs.existsSync(dirPath)) {
+        summary.push(`${prefix}Would write .glasstrace/shutdown-requested marker`);
+      }
+    }
+  } catch (err) {
+    // Marker is best-effort; failure is not an error for uninit.
+    warnings.push(
+      `Shutdown marker write failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // Step 1: Unwrap withGlasstraceConfig from next.config
   try {
@@ -716,33 +827,79 @@ export async function runUninit(options: UninitOptions): Promise<UninitResult> {
   }
 
   // Step 4: Remove GLASSTRACE entries from .env.local
+  // DISC-1247 Scenario 6: if the file contains a claimed developer key
+  // (`gt_dev_*`), require explicit confirmation before removing it so
+  // users don't silently lose authentication state during uninit.
+  // `--force` bypasses the prompt.
   try {
     const envPath = path.join(projectRoot, ".env.local");
     if (fs.existsSync(envPath)) {
       const content = fs.readFileSync(envPath, "utf-8");
-      const lines = content.split("\n");
-      const filtered = lines.filter((line) => {
-        const trimmed = line.trim();
-        // Match both commented and uncommented GLASSTRACE_ lines
-        return !(
-          /^\s*#?\s*GLASSTRACE_API_KEY\s*=/.test(trimmed) ||
-          /^\s*#?\s*GLASSTRACE_COVERAGE_MAP\s*=/.test(trimmed)
-        );
-      });
+      const existingKey = readEnvLocalApiKey(content);
+      const hasDevKey = isDevApiKey(existingKey);
 
-      if (filtered.length !== lines.length) {
-        const result = filtered.join("\n");
-        // If the file is now empty (only newlines), don't write it
-        if (result.trim().length === 0) {
-          if (!dryRun) {
-            fs.unlinkSync(envPath);
-          }
-          summary.push(`${prefix}Deleted .env.local (no remaining entries)`);
+      // Track how the dev-key path is resolved so the summary reflects
+      // what actually happened: prompt-confirmed, force-bypassed, or
+      // preview-only. Using the literal "(dev key confirmed)" for all
+      // three paths was misleading (Copilot review).
+      let proceed = true;
+      let devKeyPath: "interactive-confirmed" | "force-bypass" | "dry-run-preview" | "none" = "none";
+      if (hasDevKey) {
+        if (dryRun) {
+          devKeyPath = "dry-run-preview";
+        } else if (force) {
+          devKeyPath = "force-bypass";
         } else {
-          if (!dryRun) {
-            fs.writeFileSync(envPath, result, "utf-8");
+          const confirmed = await prompt(
+            ".env.local contains a claimed Glasstrace developer API key (gt_dev_...). " +
+              "Removing it will require you to re-authenticate. Continue?",
+            false,
+          );
+          proceed = confirmed;
+          if (confirmed) devKeyPath = "interactive-confirmed";
+        }
+      }
+
+      if (!proceed) {
+        warnings.push(
+          "Preserved GLASSTRACE_API_KEY in .env.local (claimed dev key; re-run with --force to remove)",
+        );
+      } else {
+        const lines = content.split("\n");
+        const filtered = lines.filter((line) => {
+          const trimmed = line.trim();
+          // Match both commented and uncommented GLASSTRACE_ lines
+          return !(
+            /^\s*#?\s*GLASSTRACE_API_KEY\s*=/.test(trimmed) ||
+            /^\s*#?\s*GLASSTRACE_COVERAGE_MAP\s*=/.test(trimmed)
+          );
+        });
+
+        if (filtered.length !== lines.length) {
+          const result = filtered.join("\n");
+          // If the file is now empty (only newlines), don't write it
+          if (result.trim().length === 0) {
+            if (!dryRun) {
+              fs.unlinkSync(envPath);
+            }
+            summary.push(`${prefix}Deleted .env.local (no remaining entries)`);
+          } else {
+            if (!dryRun) {
+              fs.writeFileSync(envPath, result, "utf-8");
+            }
+            let devKeyAnnotation = "";
+            if (devKeyPath === "interactive-confirmed") {
+              devKeyAnnotation = " (dev key confirmed)";
+            } else if (devKeyPath === "force-bypass") {
+              devKeyAnnotation = " (dev key removed via --force)";
+            } else if (devKeyPath === "dry-run-preview") {
+              devKeyAnnotation =
+                " (dev key would be removed; real run would require confirmation)";
+            }
+            summary.push(
+              `${prefix}Removed GLASSTRACE entries from .env.local${devKeyAnnotation}`,
+            );
           }
-          summary.push(`${prefix}Removed GLASSTRACE entries from .env.local`);
         }
       }
     }

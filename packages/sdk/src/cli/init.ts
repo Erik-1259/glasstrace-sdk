@@ -9,9 +9,12 @@ import {
   scaffoldGitignore,
   scaffoldMcpMarker,
   addCoverageMapEnv,
+  mcpConfigMatches,
+  readEnvLocalApiKey,
+  isDevApiKey,
 } from "./scaffolder.js";
 import { buildImportGraph } from "../import-graph.js";
-import { getOrCreateAnonKey } from "../anon-key.js";
+import { getOrCreateAnonKey, readAnonKey } from "../anon-key.js";
 import { detectAgents } from "../agent-detection/detect.js";
 import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
 import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
@@ -40,6 +43,14 @@ export interface InitOptions {
   projectRoot: string;
   yes: boolean;
   coverageMap: boolean;
+  /**
+   * When true, skip interactive confirmation and overwrite existing
+   * MCP configuration files without prompting. Preservation of the
+   * anonymous key, config cache, and developer API key still applies
+   * regardless of this flag — `--force` only affects the MCP diff
+   * prompt (DISC-1247 Scenario 2c). Defaults to `false`.
+   */
+  force?: boolean;
 }
 
 /** Result of running the init command. */
@@ -48,6 +59,64 @@ export interface InitResult {
   summary: string[];
   warnings: string[];
   errors: string[];
+}
+
+/**
+ * Decides whether the MCP config at `configPath` should be overwritten
+ * during re-init. Returns the action to take.
+ *
+ * - `"write"` — file does not exist, or existing content already matches
+ *   the expected content. Safe to write.
+ * - `"skip"` — existing file differs AND the user chose to keep it, or
+ *   we are in a non-interactive environment without `--force`.
+ * - `"force-overwrite"` — `force === true` (or user accepted the prompt)
+ *   and content differs; overwrite.
+ *
+ * The prompt is skipped entirely when `force` is true (non-interactive
+ * overwrite) or when there is no existing file / content already matches.
+ *
+ * @internal Exported for unit testing only.
+ */
+export async function decideMcpConfigAction(options: {
+  configPath: string | null;
+  expectedContent: string;
+  force: boolean;
+  readFile?: (p: string) => string;
+  existsSync?: (p: string) => boolean;
+  prompt?: (question: string, defaultValue: boolean) => Promise<boolean>;
+}): Promise<"write" | "skip" | "force-overwrite"> {
+  const { configPath, expectedContent, force } = options;
+  if (configPath === null) return "write";
+
+  const exists = options.existsSync ?? fs.existsSync;
+  const read = options.readFile ?? ((p: string) => fs.readFileSync(p, "utf-8"));
+  const prompt = options.prompt ?? promptYesNo;
+
+  if (!exists(configPath)) return "write";
+
+  let existingContent: string;
+  try {
+    existingContent = read(configPath);
+  } catch {
+    // Unreadable — treat as "write" since we can't assess drift.
+    // This preserves the pre-hardening behavior for corrupt or
+    // permission-restricted files.
+    return "write";
+  }
+
+  if (mcpConfigMatches(existingContent, expectedContent)) {
+    return "write";
+  }
+
+  if (force) {
+    return "force-overwrite";
+  }
+
+  const answer = await prompt(
+    `Existing MCP config at ${configPath} differs from Glasstrace's template. Overwrite?`,
+    false,
+  );
+  return answer ? "force-overwrite" : "skip";
 }
 
 /**
@@ -306,11 +375,25 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   }
 
   // Step 5: Update .env.local
+  // DISC-1247 Scenario 6: if .env.local already defines a claimed
+  // developer key (gt_dev_*), scaffoldEnvLocal preserves it and this
+  // step reports the preservation so the user knows re-init did not
+  // overwrite their claim.
   try {
+    const envPathForCheck = path.join(projectRoot, ".env.local");
+    let existingDevKey = false;
+    if (fs.existsSync(envPathForCheck)) {
+      const existingContent = fs.readFileSync(envPathForCheck, "utf-8");
+      existingDevKey = isDevApiKey(readEnvLocalApiKey(existingContent));
+    }
     const envCreated = await scaffoldEnvLocal(projectRoot);
     if (envCreated) {
       summary.push("Updated .env.local with Glasstrace configuration");
       rollbackState.steps.push("env-local");
+    } else if (existingDevKey) {
+      summary.push(
+        "Preserved existing .env.local (GLASSTRACE_API_KEY contains a claimed dev key)",
+      );
     } else {
       summary.push("Skipped .env.local (GLASSTRACE_API_KEY already configured)");
     }
@@ -350,11 +433,24 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     process.env["GITHUB_ACTIONS"] === "true";
 
   try {
+    // DISC-1247 Scenario 2a: preserve any existing anonymous key.
+    // getOrCreateAnonKey already reads an existing key if present, so
+    // re-running init never overwrites a key that may be linked to an
+    // account. We explicitly check first so we can report the preservation
+    // in the summary — without this, users have no feedback that re-init
+    // respected their existing claim linkage.
+    const preExistingAnonKey = await readAnonKey(projectRoot);
     const anonKey = await getOrCreateAnonKey(projectRoot);
+    if (preExistingAnonKey !== null) {
+      summary.push("Preserved existing .glasstrace/anon_key");
+    }
     let anyConfigWritten = false;
 
     if (isCI) {
-      // Non-interactive: write only the generic .glasstrace/mcp.json
+      // Non-interactive: write only the generic .glasstrace/mcp.json.
+      // CI uses `force: true` for MCP diff decisions because there's no
+      // interactive terminal to prompt on — existing configs in CI
+      // workspaces are rare and safe to overwrite.
       const genericAgent: DetectedAgent = {
         name: "generic",
         mcpConfigPath: path.join(projectRoot, ".glasstrace", "mcp.json"),
@@ -363,7 +459,14 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
         registrationCommand: null,
       };
       const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, anonKey);
-      await writeMcpConfig(genericAgent, genericConfig, projectRoot);
+      const decision = await decideMcpConfigAction({
+        configPath: genericAgent.mcpConfigPath,
+        expectedContent: genericConfig,
+        force: true,
+      });
+      if (decision !== "skip") {
+        await writeMcpConfig(genericAgent, genericConfig, projectRoot);
+      }
       if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
         anyConfigWritten = true;
         summary.push("Created .glasstrace/mcp.json (CI mode)");
@@ -398,6 +501,30 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       for (const agent of agents) {
         try {
           const configContent = generateMcpConfig(agent, MCP_ENDPOINT, anonKey);
+
+          // Diff-aware MCP write (DISC-1247 Scenario 2c): if the existing
+          // config differs from what init would write, prompt before
+          // overwriting. `--force` (or --yes in non-interactive mode)
+          // skips the prompt.
+          const decision = await decideMcpConfigAction({
+            configPath: agent.mcpConfigPath,
+            expectedContent: configContent,
+            force: options.force === true || options.yes,
+          });
+
+          if (decision === "skip") {
+            summary.push(
+              `Preserved existing ${agent.mcpConfigPath ?? agent.name} (user declined overwrite)`,
+            );
+            if (agent.mcpConfigPath !== null && fs.existsSync(agent.mcpConfigPath)) {
+              // Count existing user-edited config as "present" so the
+              // marker file still gets written — otherwise nudges would
+              // nag the user about MCP setup they consciously preserved.
+              anyConfigWritten = true;
+            }
+            continue;
+          }
+
           await writeMcpConfig(agent, configContent, projectRoot);
 
           // Verify the config file was actually written (writeMcpConfig
@@ -492,12 +619,15 @@ function parseArgs(argv: string[]): InitOptions {
   const args = argv.slice(2); // skip node + script path
   let yes = false;
   let coverageMap = false;
+  let force = false;
 
   for (const arg of args) {
     if (arg === "--yes" || arg === "-y") {
       yes = true;
     } else if (arg === "--coverage-map") {
       coverageMap = true;
+    } else if (arg === "--force") {
+      force = true;
     }
   }
 
@@ -510,6 +640,7 @@ function parseArgs(argv: string[]): InitOptions {
     projectRoot: process.cwd(),
     yes,
     coverageMap,
+    force,
   };
 }
 
@@ -573,48 +704,90 @@ if (isDirectExecution) {
     }
   } else if (subcommand === undefined || subcommand === "init" || subcommand.startsWith("-")) {
     // Default: run init (handles `glasstrace`, `glasstrace init`, `glasstrace --yes`)
-    const options = parseArgs(process.argv);
+    const forwardedArgs = process.argv.slice(subcommand === "init" ? 3 : 2);
 
-    runInit(options)
-      .then((result) => {
-        if (result.errors.length > 0) {
-          for (const err of result.errors) {
-            process.stderr.write(`Error: ${err}\n`);
-          }
-        }
-        if (result.warnings.length > 0) {
-          for (const warn of result.warnings) {
-            process.stderr.write(`Warning: ${warn}\n`);
-          }
-        }
-        if (result.summary.length > 0) {
-          process.stderr.write("\nGlasstrace initialized successfully!\n\n");
+    // `--validate` is an init sub-mode that checks artifact consistency
+    // without scaffolding (DISC-1247 Scenario 4). We dispatch to a
+    // dedicated module so the main init path stays unburdened.
+    //
+    // Resolve the app root via the same monorepo-aware logic that
+    // `runInit` and `runStatus` use so validation in a monorepo root
+    // inspects the actual Next.js app directory rather than the empty
+    // workspace root (addresses Codex P2 review feedback).
+    if (forwardedArgs.includes("--validate")) {
+      let validateProjectRoot = process.cwd();
+      try {
+        validateProjectRoot = resolveProjectRoot(validateProjectRoot).projectRoot;
+      } catch {
+        // Fall back to cwd if the monorepo resolver can't find an app —
+        // validate can still report orphan-artifact issues at the raw
+        // cwd and will exit non-zero rather than hiding the problem.
+      }
+      import("./validate.js")
+        .then(({ runValidate }) => runValidate({ projectRoot: validateProjectRoot }))
+        .then((result) => {
           for (const line of result.summary) {
-            process.stderr.write(`  - ${line}\n`);
+            process.stderr.write(`${line}\n`);
           }
-          process.stderr.write("\nNext steps:\n");
-          process.stderr.write("  1. Start your Next.js dev server\n");
+          for (const issue of result.issues) {
+            process.stderr.write(`  - ${issue.message}\n`);
+            if (issue.fix) {
+              process.stderr.write(`      Fix: ${issue.fix}\n`);
+            }
+          }
+          process.exit(result.exitCode);
+        })
+        .catch((err: unknown) => {
           process.stderr.write(
-            "  2. Glasstrace works immediately in anonymous mode\n",
+            `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
           );
+          process.exit(1);
+        });
+    } else {
+      const options = parseArgs(process.argv);
+
+      runInit(options)
+        .then((result) => {
+          if (result.errors.length > 0) {
+            for (const err of result.errors) {
+              process.stderr.write(`Error: ${err}\n`);
+            }
+          }
+          if (result.warnings.length > 0) {
+            for (const warn of result.warnings) {
+              process.stderr.write(`Warning: ${warn}\n`);
+            }
+          }
+          if (result.summary.length > 0) {
+            process.stderr.write("\nGlasstrace initialized successfully!\n\n");
+            for (const line of result.summary) {
+              process.stderr.write(`  - ${line}\n`);
+            }
+            process.stderr.write("\nNext steps:\n");
+            process.stderr.write("  1. Start your Next.js dev server\n");
+            process.stderr.write(
+              "  2. Glasstrace works immediately in anonymous mode\n",
+            );
+            process.stderr.write(
+              "  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n",
+            );
+          }
+          process.exit(result.exitCode);
+        })
+        .catch((err: unknown) => {
           process.stderr.write(
-            "  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n",
+            `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
           );
-        }
-        process.exit(result.exitCode);
-      })
-      .catch((err: unknown) => {
-        process.stderr.write(
-          `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
-        process.exit(1);
-      });
+          process.exit(1);
+        });
+    }
   } else if (subcommand === "uninit") {
     const remainingArgs = process.argv.slice(3);
     const dryRun = remainingArgs.includes("--dry-run");
+    const force = remainingArgs.includes("--force");
 
     import("./uninit.js")
-      .then(({ runUninit }) => runUninit({ projectRoot: process.cwd(), dryRun }))
+      .then(({ runUninit }) => runUninit({ projectRoot: process.cwd(), dryRun, force }))
       .then((result) => {
         if (result.errors.length > 0) {
           for (const err of result.errors) {
@@ -686,8 +859,8 @@ if (isDirectExecution) {
     process.stderr.write(
       `Unknown command: ${subcommand}\n\n` +
         "Usage:\n" +
-        "  glasstrace init [--yes] [--coverage-map]\n" +
-        "  glasstrace uninit [--dry-run]\n" +
+        "  glasstrace init [--yes] [--coverage-map] [--force] [--validate]\n" +
+        "  glasstrace uninit [--dry-run] [--force]\n" +
         "  glasstrace status [--json]\n" +
         "  glasstrace mcp add [--force] [--dry-run]\n",
     );

@@ -6,7 +6,7 @@ import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
-import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerSignalHandlers, registerBeforeExitTrigger } from "./lifecycle.js";
+import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger } from "./lifecycle.js";
 import { emitNudgeMessage, emitGuidanceMessage } from "./coexistence.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
@@ -391,9 +391,11 @@ export async function configureOtel(
 
   otelApi.trace.setGlobalTracerProvider(provider);
 
-  // Register OTel shutdown via lifecycle coordinator instead of direct signal handlers.
-  // Also register signal handlers since the SDK owns this provider (Scenario A).
-  // In coexistence mode, the existing provider owns signals — we don't register there.
+  // Register OTel shutdown via lifecycle coordinator.
+  // Signal handlers are installed upfront by registerGlasstrace() so they
+  // exist during this async setup window (DISC-1249). beforeExit is still
+  // wired here because Scenario A owns the provider and the coexistence
+  // path registers its own beforeExit trigger independently.
   registerShutdownHook({
     name: "otel-provider-shutdown",
     priority: 0,
@@ -401,7 +403,6 @@ export async function configureOtel(
       await provider.shutdown();
     },
   });
-  registerSignalHandlers();
   registerBeforeExitTrigger();
 
   // Register Prisma instrumentation on the bare path (DISC-1223).
