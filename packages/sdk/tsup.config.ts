@@ -46,6 +46,21 @@ export default defineConfig({
   // emits an independent `__require()` polyfill (unrelated to this flag) that
   // keeps synchronous `require()` calls working in the ESM output.
   shims: false,
+  // Preserve the `node:` prefix on Node built-in imports in emitted output.
+  //
+  // tsup defaults `removeNodeProtocol` to `true`, which registers its own
+  // esbuild plugin (`node-protocol-plugin`) that intercepts every
+  // `node:*` specifier via `onResolve` and rewrites it to the unprefixed
+  // form (`node:fs/promises` -> `fs/promises`). The unprefixed form is
+  // not resolvable by `next dev --webpack`, which does not externalize
+  // Node built-ins on the dev bundler path (see DISC-1257).
+  //
+  // Setting `removeNodeProtocol: false` disables that plugin so esbuild
+  // emits the original `node:`-prefixed specifier verbatim in both ESM
+  // and CJS output. Node 14.18+/16+ supports the prefix natively, and
+  // `engines.node` in packages/sdk/package.json is `>=20`, so no
+  // downstream consumer on a supported runtime is affected.
+  removeNodeProtocol: false,
   sourcemap: true,
   clean: true,
   define: {

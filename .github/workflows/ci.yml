@@ -88,15 +88,19 @@ jobs:
       #   indirection, so literal `import(...)` calls must never appear in
       #   shipped JS.
       #
-      # - DISC-1257: tsup's stock `esm_shims.js` header, which is the stable
-      #   marker above the injected
-      #     import path from "path";
-      #     import { fileURLToPath } from "url";
-      #   pair used to synthesize `__dirname`/`__filename` in ESM output.
-      #   Those unprefixed Node built-in imports break `next dev --webpack`,
-      #   which does not externalize them on the dev bundler path. The SDK
-      #   ships with `shims: false` in `packages/sdk/tsup.config.ts` and must
-      #   not regress.
+      # - DISC-1257: two independent tsup defaults, both of which break
+      #   `next dev --webpack`:
+      #     (a) the stock `esm_shims.js` header, which marks the injected
+      #         import path from "path";
+      #         import { fileURLToPath } from "url";
+      #         pair used to synthesize `__dirname`/`__filename` in ESM
+      #         output.
+      #     (b) `removeNodeProtocol: true`, which rewrites SDK-source
+      #         `node:fs/promises` imports to `fs/promises` before emit.
+      #   Both forms produce unprefixed Node-builtin specifiers that the
+      #   webpack dev bundler does not externalize. The SDK ships with
+      #   `shims: false` AND `removeNodeProtocol: false` in
+      #   `packages/sdk/tsup.config.ts` and must not regress on either.
       #
       # The check intentionally only scans emitted JS (`.js` / `.cjs`) —
       # source maps and `.d.ts` files legitimately reference the specifiers.
@@ -141,6 +145,33 @@ jobs:
             echo ""
             echo "Offending files:"
             echo "$shim_violations"
+            status=1
+          fi
+
+          # DISC-1257 part two: tsup's `removeNodeProtocol: true` default
+          # rewrites every SDK-source `node:fs/promises` / `node:path` /
+          # etc. import to the unprefixed form, which `next dev --webpack`
+          # cannot resolve. The SDK disables that default. This check
+          # asserts that at least one emitted SDK bundle still contains a
+          # `node:`-prefixed specifier — i.e. the override is in effect
+          # and the SDK source has not been rewritten away from `node:*`.
+          #
+          # We intentionally check for presence rather than the absence
+          # of unprefixed forms: bundled third-party deps (e.g.
+          # `@opentelemetry/resources`) legitimately use unprefixed
+          # `fs`/`util` and we do not want to gate on their internals.
+          node_prefix_hits=$(
+            grep -REl --include='*.js' --include='*.cjs' \
+              -e 'from "node:' -e "from 'node:" \
+              -e 'require\("node:' -e "require\\('node:" \
+              packages/sdk/dist \
+              || true
+          )
+          if [ -z "$node_prefix_hits" ]; then
+            echo "::error::No \`node:\`-prefixed Node built-in imports found in shipped bundle."
+            echo "tsup's \`removeNodeProtocol: true\` default has rewritten SDK-source \`node:\` specifiers"
+            echo "to the unprefixed form, which breaks next dev --webpack. Set \`removeNodeProtocol: false\`"
+            echo "in packages/sdk/tsup.config.ts. See DISC-1257."
             status=1
           fi
 
@@ -189,8 +220,10 @@ jobs:
           # Node.js built-ins are externalized because the SDK is a server-
           # side package — the goal is verifying the module graph resolves,
           # not eliminating all Node.js references.
-          # Both prefixed (node:fs) and unprefixed (fs) forms are needed
-          # because tsup strips the node: prefix during bundling.
+          # Both prefixed (node:fs) and unprefixed (fs) forms are listed:
+          # the SDK's own source uses the `node:`-prefixed form (see
+          # DISC-1257) while bundled third-party dependencies inline their
+          # own unprefixed `fs` / `path` / `util` imports.
           npx esbuild --bundle --platform=browser --outfile=out.js \
             --external:@opentelemetry/* \
             --external:'node:*' \
