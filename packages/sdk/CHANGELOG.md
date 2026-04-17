@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.15.1
+
+### Patch Changes
+
+- 5f8a374: Migrate heartbeat shutdown handlers onto the lifecycle coordinator so OTel flush and final health-report fire in a deterministic order.
+
 ## 0.15.0
 
 ### Minor Changes
