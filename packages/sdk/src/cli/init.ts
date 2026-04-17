@@ -12,6 +12,7 @@ import {
   mcpConfigMatches,
   readEnvLocalApiKey,
   isDevApiKey,
+  resolveInstrumentationTarget,
 } from "./scaffolder.js";
 import { buildImportGraph } from "../import-graph.js";
 import { getOrCreateAnonKey, readAnonKey } from "../anon-key.js";
@@ -160,6 +161,15 @@ type CompletedStep = "instrumentation" | "next-config" | "env-local" | "gitignor
  */
 interface RollbackState {
   steps: CompletedStep[];
+  /**
+   * Absolute path of the instrumentation file that the scaffolder
+   * wrote to. May be either `{root}/instrumentation.ts` or
+   * `{root}/src/instrumentation.ts` depending on the project layout
+   * (DISC-493 Issue 1). When absent, rollback falls back to the
+   * root path for backward compatibility with callers that do not
+   * populate this field.
+   */
+  instrumentationPath?: string;
   /** Original instrumentation.ts content saved before injection.
    *  When present, rollback restores this instead of using removeRegisterGlasstrace. */
   originalInstrumentationContent?: string;
@@ -189,7 +199,12 @@ export async function rollbackSteps(
     try {
       switch (step) {
         case "instrumentation": {
-          const instrPath = path.join(projectRoot, "instrumentation.ts");
+          // Prefer the exact path the scaffolder wrote to — the resolver
+          // may have chosen `src/instrumentation.ts` on Next.js `src/`
+          // layouts (DISC-493 Issue 1). Fall back to the root path for
+          // callers that do not populate `instrumentationPath`.
+          const instrPath =
+            state?.instrumentationPath ?? path.join(projectRoot, "instrumentation.ts");
           if (fs.existsSync(instrPath)) {
             const content = fs.readFileSync(instrPath, "utf-8");
             if (isInitCreatedInstrumentation(content)) {
@@ -314,32 +329,89 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   // (e.g., "already-registered") is never rolled back.
   const rollbackState: RollbackState = { steps: [] };
 
-  // Step 2: Ensure instrumentation.ts has registerGlasstrace()
+  // Step 2: Ensure the instrumentation file has registerGlasstrace().
+  // DISC-493 Issue 1: detect `src/` layout and merge into the existing file
+  // rather than overwriting the project root.
   try {
-    // Save original content before scaffolding modifies the file.
-    // This allows rollback to restore exactly what was there, rather than
-    // relying on surgical removal (which can strip pre-existing imports).
-    const instrPath = path.join(projectRoot, "instrumentation.ts");
-    if (fs.existsSync(instrPath)) {
-      rollbackState.originalInstrumentationContent = fs.readFileSync(instrPath, "utf-8");
+    // Pre-resolve the target so we can save the original content (for
+    // faithful rollback) and record the path for the rollback state.
+    const preResolved = resolveInstrumentationTarget(projectRoot);
+    if (!preResolved.conflict && preResolved.target !== null) {
+      rollbackState.instrumentationPath = preResolved.target;
+      if (fs.existsSync(preResolved.target)) {
+        rollbackState.originalInstrumentationContent = fs.readFileSync(
+          preResolved.target,
+          "utf-8",
+        );
+      }
     }
 
-    const instrResult = await scaffoldInstrumentation(projectRoot);
+    const instrResult = await scaffoldInstrumentation(projectRoot, {
+      // `--yes` implies non-interactive automation and must not hang on a
+      // merge confirmation prompt. `--force` skips the prompt explicitly
+      // (DISC-1247 Scenario 2c parity).
+      force: options.force === true || options.yes,
+    });
+    // Record the exact path the scaffolder wrote to, in case the resolver
+    // and scaffolder ever disagree (symlinks, TOCTOU) — rollback is more
+    // accurate when it targets the file that was actually mutated.
+    if (instrResult.filePath !== undefined) {
+      rollbackState.instrumentationPath = instrResult.filePath;
+    }
+    const relativePath =
+      instrResult.filePath !== undefined
+        ? path.relative(projectRoot, instrResult.filePath)
+        : "instrumentation.ts";
     switch (instrResult.action) {
       case "created":
-        summary.push("Created instrumentation.ts");
+        summary.push(`Created ${relativePath}`);
         rollbackState.steps.push("instrumentation");
         break;
       case "injected":
-        summary.push("Added registerGlasstrace() to existing instrumentation.ts");
+        summary.push(`Added registerGlasstrace() to existing ${relativePath}`);
+        rollbackState.steps.push("instrumentation");
+        break;
+      case "appended":
+        summary.push(
+          `Appended register() with registerGlasstrace() to ${relativePath}`,
+        );
         rollbackState.steps.push("instrumentation");
         break;
       case "already-registered":
-        summary.push("Skipped instrumentation.ts (registerGlasstrace already present)");
+        summary.push(`Skipped ${relativePath} (registerGlasstrace already present)`);
         break;
+      case "skipped":
+        // User declined the merge prompt (DISC-1247 Scenario 2c parity).
+        // Emit a warning so re-init output makes clear nothing changed.
+        // "--force" here only bypasses the confirmation — the scaffolder
+        // merges rather than overwriting, so the wording is deliberate.
+        warnings.push(
+          `Preserved ${relativePath} (merge declined; re-run with --force to apply the merge without prompting)`,
+        );
+        break;
+      case "conflict": {
+        // Both root and src/ instrumentation files exist — Next.js's
+        // loader behavior is undefined (DISC-493 Issue 1). Refuse to
+        // write a third competing file; point the user at the file to
+        // merge into and tell them to remove the other.
+        const primary =
+          instrResult.filePath !== undefined
+            ? path.relative(projectRoot, instrResult.filePath)
+            : "src/instrumentation.ts";
+        const competing =
+          instrResult.conflictingPath !== undefined
+            ? path.relative(projectRoot, instrResult.conflictingPath)
+            : "instrumentation.ts";
+        await rollbackSteps(rollbackState.steps, projectRoot, rollbackState);
+        errors.push(
+          `Both ${primary} and ${competing} exist. Next.js's loader behavior is undefined when both are present.\n` +
+            `Merge your instrumentation into ${primary} and remove ${competing}, then re-run init.`,
+        );
+        return { exitCode: 1, summary, warnings, errors };
+      }
       case "unrecognized":
         warnings.push(
-          "instrumentation.ts exists but has no recognizable register() function.\n" +
+          `${relativePath} exists but has no recognizable register() function.\n` +
             "Add this import at the top of your file:\n\n" +
             '  import { registerGlasstrace } from "@glasstrace/sdk";\n\n' +
             "Then add this as the first statement in your register() function:\n\n" +
@@ -349,7 +421,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     }
   } catch (err) {
     await rollbackSteps(rollbackState.steps, projectRoot, rollbackState);
-    errors.push(`Failed to write instrumentation.ts: ${err instanceof Error ? err.message : String(err)}`);
+    errors.push(`Failed to write instrumentation file: ${err instanceof Error ? err.message : String(err)}`);
     return { exitCode: 1, summary, warnings, errors };
   }
 

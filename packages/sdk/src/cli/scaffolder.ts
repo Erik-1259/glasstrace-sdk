@@ -38,11 +38,63 @@ export interface InjectResult {
 }
 
 /** Result of the instrumentation.ts scaffolding step. */
-export type InstrumentationAction = "created" | "injected" | "already-registered" | "unrecognized";
+export type InstrumentationAction =
+  | "created"
+  | "injected"
+  | "appended"
+  | "already-registered"
+  | "skipped"
+  | "unrecognized"
+  | "conflict";
+
+/**
+ * Layout detected by {@link resolveInstrumentationTarget}. `root` means
+ * the project has no `src/` directory so instrumentation lives at the
+ * project root; `src` means Next.js expects `src/instrumentation.ts`.
+ */
+export type InstrumentationLayout = "root" | "src";
 
 /** Structured result from scaffoldInstrumentation. */
 export interface ScaffoldInstrumentationResult {
   action: InstrumentationAction;
+  /**
+   * The instrumentation file path this scaffold step targeted. Absolute
+   * path (e.g., `/abs/project/instrumentation.ts` or
+   * `/abs/project/src/instrumentation.ts`). Present for every successful
+   * action so callers (init.ts summary lines, rollback state) can report
+   * and unwind without re-detecting the layout.
+   *
+   * For `"conflict"`, this is the recommended merge target — the `src/`
+   * variant when both exist, because that's where Next.js loads from on
+   * modern `src/`-layout projects. The competing path is available via
+   * {@link ScaffoldInstrumentationResult.conflictingPath}.
+   */
+  filePath?: string;
+  /** Layout the resolver chose. Always set for non-conflict actions. */
+  layout?: InstrumentationLayout;
+  /**
+   * When `action === "conflict"`, the path of the other instrumentation
+   * file whose presence Next.js treats as undefined. The recommended merge
+   * target is {@link ScaffoldInstrumentationResult.filePath}.
+   */
+  conflictingPath?: string;
+}
+
+/** Options for {@link scaffoldInstrumentation}. */
+export interface ScaffoldInstrumentationOptions {
+  /**
+   * When `true`, skip the merge-confirmation prompt and write changes
+   * without asking. Matches the DISC-1247 Scenario 2c `--force` behavior
+   * already used for MCP config overwrites. Defaults to `false`.
+   */
+  force?: boolean;
+  /**
+   * Interactive prompt callback. When omitted, `scaffoldInstrumentation`
+   * uses a TTY readline prompt and defaults to `false` (skip the change)
+   * in non-interactive shells — the same pattern `decideMcpConfigAction`
+   * follows. Exposed for testing.
+   */
+  prompt?: (question: string, defaultValue: boolean) => Promise<boolean>;
 }
 
 /** Result of attempting to wrap next.config with withGlasstraceConfig. */
@@ -147,23 +199,316 @@ export function injectRegisterGlasstrace(content: string): InjectResult {
   return { injected: true, content: modified };
 }
 
+/** Instrumentation filename variants Next.js recognizes, in priority order. */
+const INSTRUMENTATION_FILENAMES = [
+  "instrumentation.ts",
+  "instrumentation.js",
+  "instrumentation.mjs",
+] as const;
+
 /**
- * Ensures `instrumentation.ts` exists and contains a `registerGlasstrace()` call.
+ * Result of {@link resolveInstrumentationTarget}. When the project has no
+ * conflict, `target` identifies the file the scaffolder should create or
+ * merge into. When both root and `src/` variants already exist, `target`
+ * is `null` and both detected paths are returned so the caller can surface
+ * a clear error — Next.js's loader behavior is undefined in that state
+ * (DISC-493 Issue 1).
+ */
+export interface InstrumentationTarget {
+  /** Absolute path of the chosen file, or null when a conflict exists. */
+  target: string | null;
+  /** Which layout was chosen. Null mirrors `target === null`. */
+  layout: InstrumentationLayout | null;
+  /**
+   * Absolute paths of any existing instrumentation files detected. Includes
+   * the chosen `target` when it exists, plus the competing file when there
+   * is a conflict. Empty when the project has no instrumentation file yet.
+   */
+  existing: string[];
+  /**
+   * Absolute paths of root-level instrumentation files (e.g.,
+   * `{projectRoot}/instrumentation.ts`). Tracked separately from `existing`
+   * so callers can distinguish root from `src/` without string matching on
+   * paths that may legitimately contain `src` elsewhere in their ancestry
+   * (e.g., `/home/user/src/project/`).
+   */
+  rootExisting: string[];
+  /**
+   * Absolute paths of `src/`-level instrumentation files (e.g.,
+   * `{projectRoot}/src/instrumentation.ts`). See `rootExisting` for the
+   * rationale for tracking these separately.
+   */
+  srcExisting: string[];
+  /**
+   * When both a root and `src/` instrumentation file are present, Next.js's
+   * behavior is not defined. The scaffolder refuses to create a third
+   * competing file and asks the user to merge manually into the preferred
+   * target (the `src/` variant when the project uses `src/` layout).
+   */
+  conflict: boolean;
+}
+
+/**
+ * Detects whether the project uses Next.js's `src/` directory layout and
+ * picks the instrumentation file path the scaffolder should create or
+ * merge into.
  *
- * - If the file does not exist, creates it with the standard template.
- * - If the file exists and already contains `registerGlasstrace`, skips it.
- * - If the file exists without `registerGlasstrace`, attempts to inject the
- *   call into the existing `register()` function.
- * - If injection fails (no recognizable `register()` function), returns
- *   `"unrecognized"` so the caller can display manual instructions.
+ * Selection rules (DISC-493 Issue 1):
+ *
+ * 1. Prefer an existing file. If `src/instrumentation.{ts,js,mjs}` exists,
+ *    it wins; otherwise the root variant wins. This preserves user intent
+ *    (they already chose a location) and matches what Next.js loads.
+ * 2. When no instrumentation file exists yet, use `src/` when the project
+ *    has a `src/` directory at its root — the common Next.js convention.
+ * 3. When both a root and a `src/` instrumentation file exist, return
+ *    `conflict: true`. Next.js's loader behavior is undefined in that
+ *    state and scaffolding a third write would mask whichever file Next.js
+ *    ultimately ignores.
+ *
+ * The resolver is pure: it reads the filesystem but writes nothing and
+ * never throws. Callers can invoke it repeatedly (e.g., for validation).
  *
  * @param projectRoot - Absolute path to the project root directory.
- * @returns A structured result describing what action was taken.
+ */
+export function resolveInstrumentationTarget(
+  projectRoot: string,
+): InstrumentationTarget {
+  const rootExisting: string[] = [];
+  const srcExisting: string[] = [];
+
+  for (const name of INSTRUMENTATION_FILENAMES) {
+    const rootPath = path.join(projectRoot, name);
+    if (isRegularFile(rootPath)) {
+      rootExisting.push(rootPath);
+    }
+    const srcPath = path.join(projectRoot, "src", name);
+    if (isRegularFile(srcPath)) {
+      srcExisting.push(srcPath);
+    }
+  }
+
+  const existing = [...rootExisting, ...srcExisting];
+
+  // Conflict: a file from each layout exists. Next.js's behavior is
+  // undefined (DISC-493 Issue 1). The caller surfaces an error.
+  if (rootExisting.length > 0 && srcExisting.length > 0) {
+    return {
+      target: null,
+      layout: null,
+      existing,
+      rootExisting,
+      srcExisting,
+      conflict: true,
+    };
+  }
+
+  // Prefer whichever layout already has an instrumentation file — the
+  // user has already committed to that location and Next.js loads from it.
+  if (srcExisting.length > 0) {
+    return {
+      target: srcExisting[0],
+      layout: "src",
+      existing,
+      rootExisting,
+      srcExisting,
+      conflict: false,
+    };
+  }
+  if (rootExisting.length > 0) {
+    return {
+      target: rootExisting[0],
+      layout: "root",
+      existing,
+      rootExisting,
+      srcExisting,
+      conflict: false,
+    };
+  }
+
+  // No file exists yet — default to `src/` when a `src/` directory is
+  // present. Many Next.js apps use this layout and the bug in
+  // DISC-493 was scaffolding to the root when Next.js ignores it.
+  const srcDir = path.join(projectRoot, "src");
+  const layout: InstrumentationLayout = isDirectory(srcDir) ? "src" : "root";
+  const target = layout === "src"
+    ? path.join(projectRoot, "src", "instrumentation.ts")
+    : path.join(projectRoot, "instrumentation.ts");
+
+  return {
+    target,
+    layout,
+    existing,
+    rootExisting,
+    srcExisting,
+    conflict: false,
+  };
+}
+
+/** Returns true when `p` is a directory. Never throws. */
+function isDirectory(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true when `p` is a regular file (not a directory, not missing).
+ * Uses `lstatSync` so symlinks are evaluated as-is — a symlink to a file
+ * counts, a symlink to a directory does not. Never throws.
+ */
+function isRegularFile(p: string): boolean {
+  try {
+    const stat = fs.lstatSync(p);
+    if (stat.isSymbolicLink()) {
+      // Follow the symlink so we correctly classify links to real files.
+      return fs.statSync(p).isFile();
+    }
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Appends a new `export async function register()` to a file that has no
+ * recognizable register function. Used when `src/instrumentation.ts`
+ * exists (e.g., Sentry scaffolded it with only a top-level side-effect
+ * import) but has no register hook yet.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function appendRegisterFunction(content: string): string {
+  const importLine = 'import { registerGlasstrace } from "@glasstrace/sdk";\n';
+  const functionBlock =
+    "\n" +
+    "export async function register() {\n" +
+    "  // Glasstrace must be registered before Prisma instrumentation\n" +
+    "  // to ensure all ORM spans are captured correctly.\n" +
+    "  // If you use @prisma/instrumentation, import it after this call.\n" +
+    "  registerGlasstrace();\n" +
+    "}\n";
+
+  // Avoid a duplicate import if the file already pulls from @glasstrace/sdk.
+  // When multiple specifiers are imported, splice registerGlasstrace in
+  // rather than adding a second import line (mirrors injectRegisterGlasstrace).
+  let withImport = content;
+  const hasGlasstraceImport = content.includes("@glasstrace/sdk");
+  if (!hasGlasstraceImport) {
+    withImport = importLine + content;
+  } else {
+    const importRegex = /import\s*\{([^}]+)\}\s*from\s*["']@glasstrace\/sdk["']/;
+    const importMatch = importRegex.exec(content);
+    if (importMatch) {
+      const specifiers = importMatch[1];
+      const alreadyImported = specifiers
+        .split(",")
+        .some((s) => s.trim() === "registerGlasstrace");
+      if (!alreadyImported) {
+        const existingImports = specifiers.trimEnd();
+        const separator = existingImports.endsWith(",") ? " " : ", ";
+        const updatedImport = `import { ${existingImports.trim()}${separator}registerGlasstrace } from "@glasstrace/sdk"`;
+        withImport = content.replace(importMatch[0], updatedImport);
+      }
+    } else {
+      // Non-destructured `import * as sdk from "@glasstrace/sdk"` form —
+      // add a separate destructured import for registerGlasstrace so we
+      // never depend on reading the namespace alias.
+      withImport = importLine + content;
+    }
+  }
+
+  // Ensure the file ends with a single newline before appending.
+  const trailingNewline = withImport.endsWith("\n") ? "" : "\n";
+  return withImport + trailingNewline + functionBlock;
+}
+
+/**
+ * Default `confirm`-style prompt used when `scaffoldInstrumentation` is
+ * called without a `prompt` callback. Mirrors `init.ts#promptYesNo`:
+ * returns the default value when stdin is not a TTY so non-interactive
+ * shells do not hang.
+ */
+async function defaultInstrumentationPrompt(
+  question: string,
+  defaultValue: boolean,
+): Promise<boolean> {
+  if (!process.stdin.isTTY) return defaultValue;
+  const readline = await import("node:readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise<boolean>((resolve) => {
+    const suffix = defaultValue ? " [Y/n] " : " [y/N] ";
+    rl.question(question + suffix, (answer) => {
+      rl.close();
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === "") {
+        resolve(defaultValue);
+        return;
+      }
+      resolve(trimmed === "y" || trimmed === "yes");
+    });
+  });
+}
+
+/**
+ * Ensures an instrumentation file exists and contains a `registerGlasstrace()`
+ * call, merging into the user's existing file rather than overwriting it.
+ *
+ * Behavior (DISC-493 Issue 1):
+ *
+ * - Detects `src/`-layout projects via {@link resolveInstrumentationTarget}
+ *   and targets `src/instrumentation.ts` instead of the root when a `src/`
+ *   directory is present.
+ * - When both `instrumentation.ts` and `src/instrumentation.ts` already
+ *   exist, returns `action: "conflict"` so the caller can emit a clear
+ *   error. Next.js's loader behavior is undefined in that state and
+ *   writing a third file would silently mask the one Next.js ignores.
+ * - When the target does not exist, creates it with the standard template.
+ * - When the target exists but has no `registerGlasstrace()` call:
+ *   - If it exposes an `export function register()`, injects the call as
+ *     the first statement (and imports `registerGlasstrace` if needed).
+ *   - If it has no register function, appends a new `export async function
+ *     register()` that calls `registerGlasstrace()` — this matches the
+ *     Sentry / Datadog / custom-instrumentation case where `register()`
+ *     hasn't been created yet.
+ *   - Before either mutation, prompts the user unless `force: true` is
+ *     passed (DISC-1247 Scenario 2c re-init safety).
+ * - When the target already contains `registerGlasstrace()`, returns
+ *   `action: "already-registered"` (idempotent).
+ *
+ * @param projectRoot - Absolute path to the project root directory.
+ * @param options - Prompt and force flags for merge-safe re-init.
  */
 export async function scaffoldInstrumentation(
   projectRoot: string,
+  options: ScaffoldInstrumentationOptions = {},
 ): Promise<ScaffoldInstrumentationResult> {
-  const filePath = path.join(projectRoot, "instrumentation.ts");
+  const target = resolveInstrumentationTarget(projectRoot);
+
+  if (target.conflict) {
+    return {
+      action: "conflict",
+      // Point the user at the `src/` variant — modern Next.js apps with a
+      // `src/` directory load from there, so that's the merge target. The
+      // competing path is reported separately for the error message.
+      filePath: target.srcExisting[0],
+      conflictingPath: target.rootExisting[0],
+    };
+  }
+
+  const filePath = target.target;
+  const layout = target.layout;
+  // Defensive: resolver always sets these in the non-conflict path.
+  if (filePath === null || layout === null) {
+    return { action: "unrecognized" };
+  }
+
+  const force = options.force === true;
+  const prompt = options.prompt ?? defaultInstrumentationPrompt;
 
   if (!fs.existsSync(filePath)) {
     const content = `import { registerGlasstrace } from "@glasstrace/sdk";
@@ -175,8 +520,11 @@ export async function register() {
   registerGlasstrace();
 }
 `;
+    // Ensure the target directory exists (e.g., `src/` when the project
+    // has the `src/` layout but no src/ folder somehow — defensive).
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, "utf-8");
-    return { action: "created" };
+    return { action: "created", filePath, layout };
   }
 
   // File exists — check whether registerGlasstrace() is already called.
@@ -185,18 +533,37 @@ export async function register() {
   const existing = fs.readFileSync(filePath, "utf-8");
 
   if (hasRegisterGlasstraceCall(existing)) {
-    return { action: "already-registered" };
+    return { action: "already-registered", filePath, layout };
   }
 
-  // Attempt injection into the existing file
-  const result = injectRegisterGlasstrace(existing);
-
-  if (result.injected) {
-    fs.writeFileSync(filePath, result.content, "utf-8");
-    return { action: "injected" };
+  // The file is going to change. Before writing, confirm with the user
+  // unless --force was passed — otherwise a second init on a custom
+  // instrumentation file would silently rewrite it. Non-interactive
+  // shells (no TTY) skip the merge by default; pass `force: true` to
+  // proceed without prompting, which the CLI does for `--yes`/`--force`.
+  if (!force) {
+    const approved = await prompt(
+      `Merge registerGlasstrace() into ${path.relative(projectRoot, filePath)}?`,
+      false,
+    );
+    if (!approved) {
+      return { action: "skipped", filePath, layout };
+    }
   }
 
-  return { action: "unrecognized" };
+  // Attempt injection into the existing register() function first.
+  const injectResult = injectRegisterGlasstrace(existing);
+  if (injectResult.injected) {
+    fs.writeFileSync(filePath, injectResult.content, "utf-8");
+    return { action: "injected", filePath, layout };
+  }
+
+  // No register() function present — append a fresh one. This is the
+  // Sentry/Datadog case where `src/instrumentation.ts` exists with only
+  // a top-level import or empty body.
+  const appended = appendRegisterFunction(existing);
+  fs.writeFileSync(filePath, appended, "utf-8");
+  return { action: "appended", filePath, layout };
 }
 
 /**
