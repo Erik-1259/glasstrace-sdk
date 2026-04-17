@@ -196,7 +196,7 @@ describe("configureOtel()", () => {
   });
 
   describe("Shutdown hooks (lifecycle coordinator)", () => {
-    it("should register OTel shutdown hook, signal handlers, and beforeExit trigger for bare provider (Scenario A)", async () => {
+    it("should register OTel shutdown hook and beforeExit trigger for bare provider (Scenario A)", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
       const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
       const signalSpy = vi.spyOn(lifecycle, "registerSignalHandlers");
@@ -209,7 +209,9 @@ describe("configureOtel()", () => {
       );
       expect(otelHook).toBeDefined();
       expect(otelHook![0].priority).toBe(0);
-      expect(signalSpy).toHaveBeenCalledTimes(1);
+      // Signal handlers are now registered in registerGlasstrace(), not here
+      // (DISC-1249) — configureOtel() must not call registerSignalHandlers().
+      expect(signalSpy).not.toHaveBeenCalled();
       expect(triggerSpy).toHaveBeenCalledTimes(1);
     });
 
