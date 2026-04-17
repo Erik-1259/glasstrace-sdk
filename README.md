@@ -102,6 +102,90 @@ import { drizzle } from "drizzle-orm/node-postgres";
 const db = drizzle(pool, { logger: new GlasstraceDrizzleLogger() });
 ```
 
+## Coexistence with Other OTel Tools
+
+Glasstrace coexists with any tool that owns the OpenTelemetry
+`TracerProvider` — Sentry, Datadog, New Relic, Next.js 16 production
+builds, or a custom setup. If another provider is already registered
+when `registerGlasstrace()` runs, the SDK automatically attaches its
+span processor onto that provider. No manual wiring is required.
+
+### Automatic Attachment (default)
+
+```typescript
+// instrumentation.ts
+import { registerGlasstrace } from "@glasstrace/sdk";
+
+export async function register() {
+  registerGlasstrace();
+
+  // Dynamic imports run after registerGlasstrace(). This is the
+  // recommended order: hoisted ES module imports of Sentry, Datadog,
+  // etc. would register their provider before registerGlasstrace()
+  // runs, which still works (auto-attach) but this order keeps the
+  // provider-claim logic deterministic.
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    await import("@sentry/nextjs");
+    await import("../sentry.server.config");
+  }
+}
+```
+
+When Glasstrace detects a pre-registered provider, it:
+
+1. Checks whether its span processor is already attached (idempotent).
+2. Uses the provider's `addSpanProcessor()` public API when available.
+3. Falls back to injecting into the provider's processor list for
+   OTel SDK v2 (which removed `addSpanProcessor()`).
+4. Emits an informational log message identifying the auto-attach path.
+
+### Manual Integration (recommended for Sentry)
+
+For the cleanest setup with Sentry, pass
+`createGlasstraceSpanProcessor()` directly into Sentry's config:
+
+```typescript
+import * as Sentry from "@sentry/nextjs";
+import {
+  registerGlasstrace,
+  createGlasstraceSpanProcessor,
+} from "@glasstrace/sdk";
+
+Sentry.init({
+  dsn: "...",
+  openTelemetrySpanProcessors: [createGlasstraceSpanProcessor()],
+});
+
+registerGlasstrace();
+```
+
+`registerGlasstrace()` is still required — the processor handles span
+transport, but `registerGlasstrace()` owns init, config sync, session
+management, anonymous key generation, the discovery endpoint, and
+health reporting.
+
+### Generic Provider
+
+For any provider constructed via `BasicTracerProvider`, pass the
+processor in the `spanProcessors` array:
+
+```typescript
+import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import {
+  registerGlasstrace,
+  createGlasstraceSpanProcessor,
+} from "@glasstrace/sdk";
+
+const provider = new BasicTracerProvider({
+  spanProcessors: [
+    // ... your existing processors
+    createGlasstraceSpanProcessor(),
+  ],
+});
+
+registerGlasstrace();
+```
+
 ## CLI
 
 ```bash

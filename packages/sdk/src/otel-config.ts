@@ -2,12 +2,17 @@ import type { ResolvedConfig } from "./env-detection.js";
 import type { SessionManager } from "./session.js";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { BasicTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
 import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger } from "./lifecycle.js";
-import { emitNudgeMessage, emitGuidanceMessage } from "./coexistence.js";
+import {
+  emitNudgeMessage,
+  emitGuidanceMessage,
+  tryAutoAttachGlasstraceProcessor,
+} from "./coexistence.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let _resolvedApiKey: string = API_KEY_PENDING;
@@ -18,8 +23,8 @@ let _activeExporter: GlasstraceExporter | null = null;
 /** Additional exporters that need key-resolution notification (from createGlasstraceSpanProcessor). */
 const _additionalExporters: GlasstraceExporter[] = [];
 
-/** Injected BatchSpanProcessor in coexistence mode, tracked for flush on exit. */
-let _injectedProcessor: BatchSpanProcessor | null = null;
+/** Injected processor in coexistence mode, tracked for flush on exit. */
+let _injectedProcessor: SpanProcessor | null = null;
 
 /**
  * Sets the resolved API key for OTel export authentication.
@@ -98,123 +103,15 @@ async function tryImport(moduleId: string): Promise<Record<string, unknown> | nu
   }
 }
 
-
-/**
- * Attempts to inject a BatchSpanProcessor into an existing provider's
- * processor pipeline. Uses a tiered approach:
- *   1. Feature-detect `addSpanProcessor` (OTel v1 public API)
- *   2. Feature-detect `_activeSpanProcessor._spanProcessors` (OTel v2 internal)
- *
- * Returns the method used ("v1_public" | "v2_private"), "already_present" if
- * the branded processor was found, or null if injection failed.
- * Fully defensive — any error returns null.
- */
-function tryInjectProcessor(
-  tracerProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
-  glasstraceExporter: GlasstraceExporter,
-): "v1_public" | "v2_private" | "already_present" | null {
-  try {
-    // Unwrap the ProxyTracerProvider to get the delegate.
-    const proxy = tracerProvider as unknown as { getDelegate?: () => unknown };
-    const delegate = typeof proxy.getDelegate === "function"
-      ? proxy.getDelegate()
-      : tracerProvider;
-
-    // Attempt 1: OTel v1 public API (addSpanProcessor)
-    const withAdd = delegate as unknown as {
-      addSpanProcessor?: (p: unknown) => void;
-      getActiveSpanProcessor?: () => { _spanProcessors?: Array<{ _exporter?: unknown }> };
-    };
-    if (typeof withAdd.addSpanProcessor === "function") {
-      // Guard against duplicate injection: v1 providers expose
-      // getActiveSpanProcessor() which may let us check for an existing
-      // Glasstrace processor before adding another.
-      if (typeof withAdd.getActiveSpanProcessor === "function") {
-        const active = withAdd.getActiveSpanProcessor();
-        const brand = Symbol.for("glasstrace.exporter");
-        const processors = active?._spanProcessors;
-        if (Array.isArray(processors) && processors.some((p) => {
-          const exp = p._exporter as Record<symbol, unknown> | undefined;
-          return exp?.[brand] === true;
-        })) {
-          return "already_present"; // Skip injection — branded processor found
-        }
-      }
-
-      const processor = new BatchSpanProcessor(glasstraceExporter, {
-        scheduledDelayMillis: 1000,
-      });
-      withAdd.addSpanProcessor(processor);
-      _injectedProcessor = processor;
-      return "v1_public";
-    }
-
-    // Attempt 2: OTel v2 internals (_activeSpanProcessor._spanProcessors)
-    // This accesses a private field — justified in the design doc
-    // (sdk-otel-coexistence.md Section 4). Same pattern Sentry uses.
-    const provider = delegate as unknown as {
-      _activeSpanProcessor?: {
-        _spanProcessors?: unknown[];
-      };
-    };
-    const multiProcessor = provider._activeSpanProcessor;
-    if (!multiProcessor || !Array.isArray(multiProcessor._spanProcessors)) {
-      return null;
-    }
-
-    const processor = new BatchSpanProcessor(glasstraceExporter, {
-      scheduledDelayMillis: 1000,
-    });
-    multiProcessor._spanProcessors.push(processor);
-    _injectedProcessor = processor;
-    return "v2_private";
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Checks if a Glasstrace processor is already present in the existing
- * provider's processor list. Uses the branded Symbol to detect our exporter
- * across bundled copies.
- */
-function isGlasstraceProcessorPresent(
-  tracerProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
-): boolean {
-  try {
-    const proxy = tracerProvider as unknown as { getDelegate?: () => unknown };
-    const delegate = typeof proxy.getDelegate === "function"
-      ? proxy.getDelegate()
-      : tracerProvider;
-
-    const provider = delegate as unknown as {
-      _activeSpanProcessor?: {
-        _spanProcessors?: Array<{ _exporter?: unknown }>;
-      };
-    };
-    const processors = provider._activeSpanProcessor?._spanProcessors;
-    if (!Array.isArray(processors)) {
-      return false;
-    }
-
-    const brand = Symbol.for("glasstrace.exporter");
-    return processors.some((p) => {
-      const exporter = p._exporter as Record<symbol, unknown> | undefined;
-      return exporter?.[brand] === true;
-    });
-  } catch {
-    return false;
-  }
-}
-
-
 /**
  * Configures OpenTelemetry with the GlasstraceExporter.
  *
- * Detection flow (per sdk-otel-coexistence.md v8):
+ * Detection flow (per sdk-otel-coexistence.md v8+):
  *   1. Yield one tick (let synchronous Sentry.init() complete)
  *   2. Probe for existing provider
- *   3. If provider exists → shared coexistence path
+ *   3. If provider exists → shared coexistence path via
+ *      {@link tryAutoAttachGlasstraceProcessor} (resolves DISC-493 Issues 2
+ *      and 4 — Next.js 16 production pre-registration and Sentry hoisting)
  *   4. If no provider → registration path (Vercel or bare)
  */
 export async function configureOtel(
@@ -222,25 +119,6 @@ export async function configureOtel(
   sessionManager: SessionManager,
 ): Promise<void> {
   setOtelState(OtelState.CONFIGURING);
-
-  // Build OTLP exporter configuration
-  const exporterUrl = `${config.endpoint}/v1/traces`;
-
-  // OTLP exporter factory — always available since OTel is bundled.
-  const createOtlpExporter = (url: string, headers: Record<string, string>) =>
-    new OTLPTraceExporter({ url, headers });
-
-  // Create the GlasstraceExporter that enriches + buffers + delegates
-  const glasstraceExporter = new GlasstraceExporter({
-    getApiKey: getResolvedApiKey,
-    sessionManager,
-    getConfig: () => getActiveConfig(),
-    environment: config.environment,
-    endpointUrl: exporterUrl,
-    createDelegate: createOtlpExporter,
-    verbose: config.verbose,
-  });
-  _activeExporter = glasstraceExporter;
 
   // Step 1: Yield one tick to let synchronous Sentry.init() (or other tools)
   // complete before probing for an existing provider (DISC-1202).
@@ -259,82 +137,147 @@ export async function configureOtel(
   const probeTracer = existingProvider.getTracer("glasstrace-probe");
   const anotherProviderRegistered = probeTracer.constructor.name !== "ProxyTracer";
 
-  // Step 3: If another provider exists → shared coexistence path
+  // Step 3: If another provider exists → shared coexistence path.
+  // This is the DISC-493 Issues 2 and 4 fix: instead of silently giving up
+  // when a Next.js 16 production build or a Sentry import has already
+  // registered a provider, auto-attach our span processor onto it.
   if (anotherProviderRegistered) {
-    // Check if our processor is already present (Scenario B-clean)
-    if (isGlasstraceProcessorPresent(existingProvider)) {
-      if (config.verbose) {
-        sdkLog("info", "[glasstrace] Existing provider detected — Glasstrace processor already present.");
-      }
-      // The newly created exporter is unused — the existing one handles spans.
-      _activeExporter = null;
-      setOtelState(OtelState.PROCESSOR_PRESENT);
-      emitLifecycleEvent("otel:configured", { state: OtelState.PROCESSOR_PRESENT, scenario: "B-clean" });
-      return;
-    }
-
-    // Attempt to inject our processor (Scenarios D1, B-auto/D2)
-    const injectionMethod = tryInjectProcessor(existingProvider, glasstraceExporter);
-
-    if (injectionMethod === "already_present") {
-      // Found via v1 getActiveSpanProcessor — same as B-clean
-      if (config.verbose) {
-        sdkLog("info", "[glasstrace] Existing provider detected — Glasstrace processor already present (v1 check).");
-      }
-      _activeExporter = null;
-      setOtelState(OtelState.PROCESSOR_PRESENT);
-      emitLifecycleEvent("otel:configured", { state: OtelState.PROCESSOR_PRESENT, scenario: "B-clean" });
-      return;
-    }
-
-    if (injectionMethod) {
-      if (config.verbose) {
-        sdkLog("info", "[glasstrace] Existing provider detected — auto-attaching Glasstrace processor.");
-      }
-      // Register coexistence flush hook via the lifecycle coordinator, and
-      // wire the beforeExit trigger so the coordinator runs on event loop drain.
-      // The existing provider handles signal-based shutdown (its MultiSpanProcessor
-      // propagates shutdown() to our injected BSP). The beforeExit trigger covers
-      // the edge case where the process exits without signals.
-      // Both triggers (signals and beforeExit) call executeShutdown() which is
-      // idempotent — if one already ran, the other is a no-op.
-      registerShutdownHook({
-        name: "coexistence-flush",
-        priority: 5,
-        fn: async () => {
-          if (_injectedProcessor) {
-            await _injectedProcessor.forceFlush();
-          }
-        },
-      });
-      registerBeforeExitTrigger();
-      const scenario = injectionMethod === "v1_public" ? "D1" : "B-auto";
-      setOtelState(OtelState.AUTO_ATTACHED);
-      emitLifecycleEvent("otel:configured", { state: OtelState.AUTO_ATTACHED, scenario });
-      emitLifecycleEvent("otel:injection_succeeded", { method: injectionMethod });
-      emitNudgeMessage();
-      return;
-    }
-
-    // Injection failed (Scenario C/F) — emit guidance
-    if (config.verbose) {
-      sdkLog("info", "[glasstrace] Existing provider detected — could not auto-attach.");
-    }
-    emitGuidanceMessage();
-    _activeExporter = null;
-    setOtelState(OtelState.COEXISTENCE_FAILED);
-    emitLifecycleEvent("otel:configured", { state: OtelState.COEXISTENCE_FAILED, scenario: "C/F" });
-    emitLifecycleEvent("otel:injection_failed", { reason: "provider internals inaccessible" });
-    // Cross-layer effect: trigger ACTIVE_DEGRADED if core state permits it
-    // (per DISC-1247, KEY_PENDING → ACTIVE_DEGRADED is not valid, so we guard)
-    const coreState = getCoreState();
-    if (coreState === CoreState.ACTIVE || coreState === CoreState.KEY_RESOLVED) {
-      setCoreState(CoreState.ACTIVE_DEGRADED);
-    }
+    await runCoexistencePath(existingProvider, config);
     return;
   }
 
-  // Step 4: No existing provider → registration path
+  // Step 4: No existing provider → registration path.
+  await runRegistrationPath(config, sessionManager);
+}
+
+/**
+ * Shared coexistence path for DISC-493 Issues 2 and 4.
+ *
+ * Used whenever `configureOtel()` detects a pre-registered OTel provider.
+ * Delegates processor construction to {@link tryAutoAttachGlasstraceProcessor}
+ * which reuses the `createGlasstraceSpanProcessor()` public primitive, so
+ * the auto-attach path and the manual integration path stay in lockstep.
+ *
+ * Idempotence: if a Glasstrace-branded processor is already attached (from
+ * a prior `registerGlasstrace()` call or a manual `createGlasstraceSpanProcessor()`
+ * wiring), the auto-attach path returns `"already_present"` and no second
+ * processor is created.
+ */
+async function runCoexistencePath(
+  existingProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
+  config: ResolvedConfig,
+): Promise<void> {
+  // Attempt to auto-attach via the shared primitive.
+  //
+  // tryAutoAttachGlasstraceProcessor() performs its own "already present"
+  // check against the branded Symbol BEFORE constructing an exporter, so
+  // idempotent registration does not create a wasted exporter instance.
+  // It also reuses createGlasstraceSpanProcessor() for construction, so
+  // the processor wiring (branded exporter, key-notification registration,
+  // BSP flush interval) matches the documented manual path exactly.
+  //
+  // Pass through the subset of resolved config that `GlasstraceOptions`
+  // accepts. `environment` is not in `GlasstraceOptions` (it's derived
+  // from env vars inside `resolveConfig`), so the primitive picks it up
+  // from the same environment variables `configureOtel()` sees.
+  const result = tryAutoAttachGlasstraceProcessor(existingProvider, {
+    endpoint: config.endpoint,
+    verbose: config.verbose,
+  });
+
+  if (result === "already_present") {
+    if (config.verbose) {
+      sdkLog("info", "[glasstrace] Existing provider detected — Glasstrace processor already present.");
+    }
+    setOtelState(OtelState.PROCESSOR_PRESENT);
+    emitLifecycleEvent("otel:configured", { state: OtelState.PROCESSOR_PRESENT, scenario: "B-clean" });
+    return;
+  }
+
+  if (result !== null) {
+    // Success: processor was attached. Retain a reference for the
+    // coexistence flush hook (Section 7.2) so beforeExit drains buffered
+    // spans even if the existing provider's shutdown does not propagate.
+    _injectedProcessor = result.processor;
+
+    if (config.verbose) {
+      sdkLog(
+        "info",
+        "[glasstrace] Existing provider detected — auto-attached Glasstrace span processor.",
+      );
+    }
+
+    // Register coexistence flush hook via the lifecycle coordinator, and
+    // wire the beforeExit trigger so the coordinator runs on event loop drain.
+    // The existing provider handles signal-based shutdown (its MultiSpanProcessor
+    // propagates shutdown() to our injected processor). The beforeExit trigger
+    // covers the edge case where the process exits without signals. Both
+    // triggers (signals and beforeExit) call executeShutdown() which is
+    // idempotent — if one already ran, the other is a no-op.
+    registerShutdownHook({
+      name: "coexistence-flush",
+      priority: 5,
+      fn: async () => {
+        if (_injectedProcessor) {
+          await _injectedProcessor.forceFlush();
+        }
+      },
+    });
+    registerBeforeExitTrigger();
+
+    const scenario = result.method === "v1_public" ? "D1" : "B-auto";
+    setOtelState(OtelState.AUTO_ATTACHED);
+    emitLifecycleEvent("otel:configured", { state: OtelState.AUTO_ATTACHED, scenario });
+    emitLifecycleEvent("otel:injection_succeeded", { method: result.method });
+    emitNudgeMessage();
+    return;
+  }
+
+  // Injection failed (Scenario C/F) — emit guidance.
+  if (config.verbose) {
+    sdkLog("info", "[glasstrace] Existing provider detected — could not auto-attach.");
+  }
+  emitGuidanceMessage();
+  setOtelState(OtelState.COEXISTENCE_FAILED);
+  emitLifecycleEvent("otel:configured", { state: OtelState.COEXISTENCE_FAILED, scenario: "C/F" });
+  emitLifecycleEvent("otel:injection_failed", { reason: "provider internals inaccessible" });
+  // Cross-layer effect: trigger ACTIVE_DEGRADED if core state permits it
+  // (per DISC-1247, KEY_PENDING → ACTIVE_DEGRADED is not valid, so we guard).
+  const coreState = getCoreState();
+  if (coreState === CoreState.ACTIVE || coreState === CoreState.KEY_RESOLVED) {
+    setCoreState(CoreState.ACTIVE_DEGRADED);
+  }
+}
+
+/**
+ * Registration path when no existing OTel provider is detected.
+ *
+ * Tries `@vercel/otel` first (Scenario E). Falls back to constructing a
+ * bare `BasicTracerProvider` (Scenario A). In both sub-scenarios,
+ * Glasstrace owns the provider and installs its own shutdown hooks.
+ */
+async function runRegistrationPath(
+  config: ResolvedConfig,
+  sessionManager: SessionManager,
+): Promise<void> {
+  // Build OTLP exporter configuration
+  const exporterUrl = `${config.endpoint}/v1/traces`;
+
+  // OTLP exporter factory — always available since OTel is bundled.
+  const createOtlpExporter = (url: string, headers: Record<string, string>) =>
+    new OTLPTraceExporter({ url, headers });
+
+  // Create the GlasstraceExporter that enriches + buffers + delegates
+  const glasstraceExporter = new GlasstraceExporter({
+    getApiKey: getResolvedApiKey,
+    sessionManager,
+    getConfig: () => getActiveConfig(),
+    environment: config.environment,
+    endpointUrl: exporterUrl,
+    createDelegate: createOtlpExporter,
+    verbose: config.verbose,
+  });
+  _activeExporter = glasstraceExporter;
 
   // Try @vercel/otel first (Scenario E)
   const vercelOtel = await tryImport("@vercel/otel");
