@@ -18,6 +18,9 @@ import {
   submitManifest,
   uploadSourceMapsPresigned,
   uploadSourceMapsAuto,
+  uploadToBlob,
+  _setBlobClientLoaderForTesting,
+  _resetBlobClientLoaderForTesting,
   PRESIGNED_THRESHOLD_BYTES,
 } from "../../../packages/sdk/src/source-map-uploader.js";
 import type { BlobUploader } from "../../../packages/sdk/src/source-map-uploader.js";
@@ -637,16 +640,20 @@ describe("requestPresignedTokens", () => {
 });
 
 describe("uploadToBlob", () => {
+  // The production loader uses `Function("id", "return import(id)")` to hide
+  // `@vercel/blob/client` from static bundlers (DISC-1255). That indirection
+  // bypasses Vitest's module-mock interceptor, so tests inject a fake loader
+  // via the internal `_setBlobClientLoaderForTesting` helper instead of using
+  // `vi.doMock("@vercel/blob/client")`.
+  afterEach(() => {
+    _resetBlobClientLoaderForTesting();
+  });
+
   it("calls @vercel/blob/client put with correct arguments", async () => {
     const mockPut = vi.fn().mockResolvedValue({ url: "https://blob.vercel-storage.com/file.js.map" });
-    vi.doMock("@vercel/blob/client", () => ({ put: mockPut }));
+    _setBlobClientLoaderForTesting(async () => ({ put: mockPut }));
 
-    // Re-import to pick up the mock
-    const { uploadToBlob: uploadToBlobMocked } = await import(
-      "../../../packages/sdk/src/source-map-uploader.js"
-    );
-
-    const result = await uploadToBlobMocked("token-123", "source-maps/main.js", '{"version":3}');
+    const result = await uploadToBlob("token-123", "source-maps/main.js", '{"version":3}');
 
     expect(mockPut).toHaveBeenCalledOnce();
     expect(mockPut).toHaveBeenCalledWith(
@@ -656,26 +663,44 @@ describe("uploadToBlob", () => {
     );
     expect(result.url).toBe("https://blob.vercel-storage.com/file.js.map");
     expect(result.size).toBe(Buffer.byteLength('{"version":3}', "utf-8"));
-
-    vi.doUnmock("@vercel/blob/client");
   });
 
   it("returns correct byte size for multi-byte content", async () => {
     const mockPut = vi.fn().mockResolvedValue({ url: "https://blob.example.com/file" });
-    vi.doMock("@vercel/blob/client", () => ({ put: mockPut }));
-
-    const { uploadToBlob: uploadToBlobMocked } = await import(
-      "../../../packages/sdk/src/source-map-uploader.js"
-    );
+    _setBlobClientLoaderForTesting(async () => ({ put: mockPut }));
 
     // Multi-byte characters: each emoji is 4 bytes in UTF-8
     const content = "hello \u{1F600}";
-    const result = await uploadToBlobMocked("token", "path", content);
+    const result = await uploadToBlob("token", "path", content);
     expect(result.size).toBe(Buffer.byteLength(content, "utf-8"));
     // String length is 8, but byte length is 10 (6 ASCII + 4 for emoji)
     expect(result.size).not.toBe(content.length);
+  });
 
-    vi.doUnmock("@vercel/blob/client");
+  it("throws a helpful error when @vercel/blob is not installed", async () => {
+    // Simulate the Node.js ESM resolver's MODULE_NOT_FOUND shape.
+    _setBlobClientLoaderForTesting(async () => {
+      const err = new Error("Cannot find module '@vercel/blob/client'") as NodeJS.ErrnoException;
+      err.code = "ERR_MODULE_NOT_FOUND";
+      throw err;
+    });
+
+    await expect(
+      uploadToBlob("token", "path", '{"version":3}'),
+    ).rejects.toThrow(
+      "Presigned upload requires @vercel/blob. Install it: npm install @vercel/blob",
+    );
+  });
+
+  it("rethrows unexpected loader errors unchanged", async () => {
+    const unrelated = new Error("network down");
+    _setBlobClientLoaderForTesting(async () => {
+      throw unrelated;
+    });
+
+    await expect(
+      uploadToBlob("token", "path", '{"version":3}'),
+    ).rejects.toBe(unrelated);
   });
 });
 
@@ -1128,11 +1153,12 @@ describe("uploadSourceMapsAuto", () => {
   });
 });
 
-// Note: the "missing @vercel/blob" error path in uploadToBlob cannot be
-// unit tested because @vercel/blob is installed as a devDependency and
-// vitest's mock hoisting prevents simulating a missing module. The
-// ERR_MODULE_NOT_FOUND error-code check is defensive code for end users
-// who don't install the optional peer dependency.
+// The "missing @vercel/blob" error path in uploadToBlob is now covered by
+// injecting a loader that throws ERR_MODULE_NOT_FOUND via the
+// _setBlobClientLoaderForTesting helper (see the uploadToBlob describe block
+// above). The helper was added alongside DISC-1255's dynamic-import evasion
+// fix because `vi.doMock("@vercel/blob/client")` no longer intercepts
+// Function()-based dynamic imports.
 
 describe("uploadSourceMapsPresigned — edge cases", () => {
   beforeEach(() => {
