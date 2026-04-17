@@ -1,5 +1,23 @@
 # @glasstrace/sdk
 
+## 0.15.0
+
+### Minor Changes
+
+- 51b4295: Harden `sdk init` / `sdk uninit` lifecycle across six install/uninstall
+  scenarios: uninit-while-running (shutdown marker file), re-install
+  preservation (anon key, config cache, and diff-aware MCP prompts), npm
+  uninstall warning (`preuninstall` script), partial-uninit validation
+  (`sdk init --validate`), atomic config writes, and dev-key preservation
+  in both `.env.local` and the uninit confirmation flow (DISC-1247,
+  DISC-1251).
+
+### Patch Changes
+
+- 6dcef64: Register SIGTERM/SIGINT handlers earlier so spans are not lost when a signal arrives during OTel setup (DISC-1249).
+
+  Signal handlers are now installed synchronously inside `registerGlasstrace()` (after the production-disabled check and the synchronous OTel provider probe), rather than at the end of the async `configureOtel()` chain. This closes a timing window where a SIGTERM / SIGINT received during the `@vercel/otel` probe or provider registration would be delivered with no handler attached, silently dropping buffered spans. Handlers are installed only when this SDK will own the provider (Scenario A); in coexistence mode the existing provider continues to own signal shutdown unchanged.
+
 ## 0.14.2
 
 ### Patch Changes
