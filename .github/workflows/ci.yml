@@ -3,8 +3,34 @@ name: CI
 on:
   push:
     branches: [main]
+    # Skip CI on pure documentation / metadata changes. Source and
+    # package-lock changes always trigger. The check runs at workflow
+    # level — if ALL paths in the diff match one of the ignored
+    # patterns, the workflow is skipped entirely.
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+
+# Cancel in-progress runs when a new commit is pushed to the same ref
+# (PR branch or main). Previously, a PR with N rapid pushes produced N
+# concurrent full CI runs — wasteful on both minutes and queue slots.
+# Using `github.head_ref || github.ref` so PR runs group by the PR
+# branch (head_ref) instead of the synthetic refs/pull/<n>/merge ref,
+# which does not change between commits on the same PR.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -26,7 +52,9 @@ jobs:
 
       - run: corepack enable
 
-      - run: npm ci
+      # --no-audit: we run `npm audit` as a dedicated step below, no
+      # need for npm ci to also audit during install.
+      - run: npm ci --no-audit
 
       - name: Audit dependencies
         run: npm audit --audit-level=high
@@ -62,7 +90,9 @@ jobs:
 
       - run: corepack enable
 
-      - run: npm ci
+      # --no-audit: the test job (`needs: test`) already gated on npm
+      # audit, so there is no reason to re-audit here.
+      - run: npm ci --no-audit
 
       - run: npm run build
 
@@ -110,7 +140,9 @@ jobs:
 
       - run: corepack enable
 
-      - run: npm ci
+      # --no-audit: the test job (`needs: test`) already gated on npm
+      # audit, so there is no reason to re-audit here.
+      - run: npm ci --no-audit
 
       - name: Build packages
         run: npm run build

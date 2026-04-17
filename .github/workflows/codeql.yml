@@ -8,6 +8,13 @@ on:
   schedule:
     - cron: "0 6 * * 1"
 
+# Cancel in-progress scans when a new commit is pushed to the same
+# ref. Matches the pattern used in ci.yml. The weekly scheduled scan
+# is not affected (it runs on its own cron schedule, not on ref).
+concurrency:
+  group: codeql-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions: {}
 
 jobs:
