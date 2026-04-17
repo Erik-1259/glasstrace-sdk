@@ -110,9 +110,15 @@ export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
 }
 
 /**
- * Persists the init response to `.glasstrace/config`.
- * Silently skipped when `node:fs` is unavailable (non-Node environments).
- * On I/O failure, logs a warning and continues.
+ * Persists the init response to `.glasstrace/config` using atomic
+ * write-temp + rename semantics. Silently skipped when `node:fs` is
+ * unavailable (non-Node environments). On I/O failure, logs a warning.
+ *
+ * Atomicity: the payload is written to `.glasstrace/config.tmp` and then
+ * renamed into place. `rename` is atomic on POSIX filesystems, so readers
+ * either see the previous valid config or the new valid config — never a
+ * truncated or partially-written file (DISC-1247 Scenario 5). If the
+ * rename fails, the temp file is cleaned up on a best-effort basis.
  */
 export async function saveCachedConfig(
   response: SdkInitResponse,
@@ -124,6 +130,7 @@ export async function saveCachedConfig(
   const root = projectRoot ?? process.cwd();
   const dirPath = modules.path.join(root, GLASSTRACE_DIR);
   const configPath = modules.path.join(dirPath, CONFIG_FILE);
+  const tmpPath = `${configPath}.tmp`;
 
   try {
     await modules.fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
@@ -132,7 +139,27 @@ export async function saveCachedConfig(
       response,
       cachedAt: Date.now(),
     };
-    await modules.fs.writeFile(configPath, JSON.stringify(cached), { encoding: "utf-8", mode: 0o600 });
+    // Write to a sibling temp file first, then atomically rename.
+    // Using a sibling (same directory) guarantees the rename stays on
+    // the same filesystem, which is required for atomicity.
+    await modules.fs.writeFile(tmpPath, JSON.stringify(cached), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    try {
+      await modules.fs.chmod(tmpPath, 0o600);
+      await modules.fs.rename(tmpPath, configPath);
+    } catch (renameErr) {
+      // Rename failed — remove the temp file so it doesn't linger.
+      try {
+        await modules.fs.unlink(tmpPath);
+      } catch {
+        // Best-effort cleanup; ignore unlink failures.
+      }
+      throw renameErr;
+    }
+    // chmod the final path to defend against platforms that don't honor
+    // the mode passed to writeFile/rename on first creation.
     await modules.fs.chmod(configPath, 0o600);
   } catch (err) {
     console.warn(
