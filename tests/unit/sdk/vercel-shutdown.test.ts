@@ -37,6 +37,17 @@
  * signal delivery, we'd see the spy fire during the 50 ms settle
  * window at the end of the test.
  *
+ * ## Listener isolation
+ *
+ * We do NOT detach/reattach pre-existing signal listeners. Detaching
+ * and re-attaching a `once()` listener via `process.on()` would
+ * promote it to a persistent `on()` listener, altering vitest worker
+ * shutdown behaviour for subsequent test files. Instead we snapshot
+ * the set of pre-existing listener references in `beforeEach` and,
+ * in `afterEach`, remove only the listeners that appeared during
+ * the test. Pre-existing listeners are never touched. This is the
+ * change Codex requested during DISC-1250 review.
+ *
  * ## Evidence object
  *
  * Every measurement is stashed in `evidence` so the final `afterAll`
@@ -150,43 +161,54 @@ const evidence: Evidence = {
 };
 
 /**
- * Snapshot the current listeners so we can strip them for the
- * duration of a test and restore them afterwards. Without this,
- * vitest's own SIGTERM/SIGINT listeners contaminate the count and
- * `process.emit('SIGTERM')` would terminate the worker.
+ * Snapshot signal-listener state across the three events. We do NOT
+ * detach and re-attach pre-existing listeners — doing so would strip
+ * `once()` semantics off listeners that Node internally wraps,
+ * promoting them to persistent `on()` listeners and altering the
+ * worker's shutdown behaviour for subsequent test files. Instead we
+ * record the set of pre-existing listener references and, in
+ * `afterEach`, remove only the listeners that appeared during the
+ * test. This preserves the baseline worker semantics and avoids
+ * cross-test flakiness (Codex DISC-1250 review feedback).
  */
-interface SavedListeners {
-  sigterm: ((...args: unknown[]) => void)[];
-  sigint: ((...args: unknown[]) => void)[];
-  beforeExit: ((...args: unknown[]) => void)[];
+interface SignalBaseline {
+  sigterm: ReadonlySet<unknown>;
+  sigint: ReadonlySet<unknown>;
+  beforeExit: ReadonlySet<unknown>;
 }
 
-function detachSignalListeners(): SavedListeners {
-  const saved: SavedListeners = {
-    sigterm: process.listeners("SIGTERM") as ((...args: unknown[]) => void)[],
-    sigint: process.listeners("SIGINT") as ((...args: unknown[]) => void)[],
-    beforeExit: process.listeners("beforeExit") as ((...args: unknown[]) => void)[],
+function captureSignalBaseline(): SignalBaseline {
+  return {
+    sigterm: new Set(process.listeners("SIGTERM")),
+    sigint: new Set(process.listeners("SIGINT")),
+    beforeExit: new Set(process.listeners("beforeExit")),
   };
-  for (const l of saved.sigterm) process.removeListener("SIGTERM", l);
-  for (const l of saved.sigint) process.removeListener("SIGINT", l);
-  for (const l of saved.beforeExit) process.removeListener("beforeExit", l);
-  return saved;
 }
 
-function reattachSignalListeners(saved: SavedListeners): void {
-  process.removeAllListeners("SIGTERM");
-  process.removeAllListeners("SIGINT");
-  process.removeAllListeners("beforeExit");
-  for (const l of saved.sigterm) process.on("SIGTERM", l);
-  for (const l of saved.sigint) process.on("SIGINT", l);
-  for (const l of saved.beforeExit) process.on("beforeExit", l);
+/**
+ * Remove listeners that appeared between `captureSignalBaseline` and
+ * this call. Pre-existing listeners are left untouched so their
+ * `once`/`on` mode is preserved.
+ */
+function removeAddedSignalListeners(baseline: SignalBaseline): void {
+  for (const { sig, pre } of [
+    { sig: "SIGTERM" as const, pre: baseline.sigterm },
+    { sig: "SIGINT" as const, pre: baseline.sigint },
+    { sig: "beforeExit" as const, pre: baseline.beforeExit },
+  ]) {
+    for (const l of process.listeners(sig)) {
+      if (!pre.has(l)) {
+        process.removeListener(sig, l as (...args: unknown[]) => void);
+      }
+    }
+  }
 }
 
 describe("DISC-1250: @vercel/otel shutdown verification", () => {
-  let saved: SavedListeners;
+  let baseline: SignalBaseline;
 
   beforeEach(() => {
-    saved = detachSignalListeners();
+    baseline = captureSignalBaseline();
     otelApi.trace.disable();
     otelApi.context.disable();
     otelApi.propagation.disable();
@@ -198,7 +220,7 @@ describe("DISC-1250: @vercel/otel shutdown verification", () => {
     otelApi.context.disable();
     otelApi.propagation.disable();
     otelApi.diag.disable();
-    reattachSignalListeners(saved);
+    removeAddedSignalListeners(baseline);
   });
 
   afterAll(() => {
@@ -243,9 +265,10 @@ describe("DISC-1250: @vercel/otel shutdown verification", () => {
     evidence.beforeExitListenersAfter = process.listenerCount("beforeExit");
 
     // Any delta is fully attributable to @vercel/otel because we
-    // detached vitest's listeners in beforeEach and we're calling
-    // registerOTel() directly (no Glasstrace lifecycle coordinator
-    // involved).
+    // call registerOTel() directly here (no Glasstrace lifecycle
+    // coordinator involved) and measure listenerCount before and
+    // after that single call. Pre-existing vitest listeners sit in
+    // both snapshots and cancel out; only new additions would show.
     expect(evidence.sigtermListenersAfter - evidence.sigtermListenersBefore).toBe(0);
     expect(evidence.sigintListenersAfter - evidence.sigintListenersBefore).toBe(0);
     expect(
