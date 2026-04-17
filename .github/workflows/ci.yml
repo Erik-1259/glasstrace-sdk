@@ -26,6 +26,15 @@ jobs:
 
       - run: corepack enable
 
+      # Align with the declared packageManager (npm@11.6.1). Node 20/22
+      # bundle npm 10.x, and corepack's npm support does not reliably
+      # override the bundled version. Without this step, `npm ci` runs
+      # under npm 10 while the committed lockfile was produced under
+      # npm 11, which produces spurious "out of sync" failures over
+      # optional peer deps (e.g. @emnapi/*).
+      - name: Upgrade npm to declared version
+        run: npm install -g npm@11.6.1
+
       - run: npm ci
 
       - name: Audit dependencies
@@ -61,6 +70,9 @@ jobs:
           cache: npm
 
       - run: corepack enable
+
+      - name: Upgrade npm to declared version
+        run: npm install -g npm@11.6.1
 
       - run: npm ci
 
@@ -109,6 +121,9 @@ jobs:
           cache: npm
 
       - run: corepack enable
+
+      - name: Upgrade npm to declared version
+        run: npm install -g npm@11.6.1
 
       - run: npm ci
 
