@@ -86,7 +86,23 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Canary: snapshot version + publish with @canary tag
+      # Canary: snapshot version + publish with @canary tag.
+      # Guard: require at least one changeset. Without one, --snapshot is a
+      # no-op and publish --tag canary would mis-tag the current stable
+      # semver under "canary" (see 0.14.0 incident).
+      - name: Guard — require changesets for canary
+        if: ${{ inputs.mode == 'canary' }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(.changeset/*.md)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::Canary mode requires at least one changeset in .changeset/."
+            echo "::error::Without one, 'changeset version --snapshot' is a no-op and 'publish --tag canary' would publish the current stable semver under the canary tag."
+            exit 1
+          fi
+          echo "Found ${#files[@]} changeset(s): ${files[*]}"
+
       - name: Snapshot version
         if: ${{ inputs.mode == 'canary' }}
         run: npx changeset version --snapshot canary
