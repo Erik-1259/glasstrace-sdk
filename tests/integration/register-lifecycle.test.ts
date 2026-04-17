@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as otelApi from "@opentelemetry/api";
 import { registerGlasstrace, _resetRegistrationForTesting } from "../../packages/sdk/src/register.js";
-import { _resetConfigForTesting } from "../../packages/sdk/src/init-client.js";
+import { _resetConfigForTesting, _setTransportForTesting } from "../../packages/sdk/src/init-client.js";
+import type { HttpsPostJsonResult } from "../../packages/sdk/src/https-transport.js";
+
+/** Shared transport spy used by tests that assert the init request was issued. */
+let transportSpy: ReturnType<typeof vi.fn>;
 
 /** Valid developer API key for testing. */
 const TEST_DEV_KEY = "gt_dev_" + "a".repeat(48);
@@ -28,11 +32,12 @@ describe("registerGlasstrace lifecycle integration", () => {
     delete process.env.GLASSTRACE_COVERAGE_MAP;
     delete process.env.GLASSTRACE_DISCOVERY_ENABLED;
 
-    // Mock fetch to prevent real network calls
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
+    // Install a transport mock (bypasses node:https) to prevent real
+    // network calls. We mock at the transport layer — not globalThis.fetch
+    // — because the SDK bypasses the global fetch (DISC-493 Issue 3).
+    transportSpy = vi.fn(async (): Promise<HttpsPostJsonResult> => ({
       status: 200,
-      json: () => Promise.resolve({
+      body: {
         config: {
           requestBodies: false,
           queryParamValues: false,
@@ -49,8 +54,10 @@ describe("registerGlasstrace lifecycle integration", () => {
           maxTraceSizeBytes: 512000,
           maxConcurrentSessions: 1,
         },
-      }),
+      },
+      raw: "",
     }));
+    _setTransportForTesting(transportSpy as never);
   });
 
   afterEach(() => {
@@ -106,30 +113,28 @@ describe("registerGlasstrace lifecycle integration", () => {
     // Allow spans to be processed
     await waitForBackgroundWork(100);
 
-    // Verify fetch was called (init request + potentially span export)
-    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    expect(fetchMock).toHaveBeenCalled();
+    // Verify the init transport was called. Span export goes through
+    // an OTLP exporter which may or may not fire within the test
+    // window — init is the deterministic indicator.
+    expect(transportSpy).toHaveBeenCalled();
   });
 
   it("fires background init request with the correct endpoint", async () => {
     process.env.GLASSTRACE_API_KEY = TEST_DEV_KEY;
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
-
     registerGlasstrace();
 
     await waitForBackgroundWork();
 
     // Find the init request (POST to /v1/sdk/init)
-    const initCall = fetchSpy.mock.calls.find(
+    const initCall = transportSpy.mock.calls.find(
       (call) => typeof call[0] === "string" && call[0].includes("/v1/sdk/init"),
     );
     expect(initCall).toBeDefined();
 
     // Verify Authorization header is present
-    const options = initCall![1] as RequestInit;
-    const headers = options.headers as Record<string, string>;
-    expect(headers.Authorization).toBe(`Bearer ${TEST_DEV_KEY}`);
+    const options = initCall![2] as { headers: Record<string, string> };
+    expect(options.headers.Authorization).toBe(`Bearer ${TEST_DEV_KEY}`);
   });
 });

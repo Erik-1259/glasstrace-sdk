@@ -28,6 +28,13 @@ import {
   unwrapCJSExport,
   removeGlasstraceConfigImport,
 } from "./uninit.js";
+import { verifyInitReachable, type VerifyInitResult } from "../init-client.js";
+import { resolveConfig } from "../env-detection.js";
+
+// Declare the tsup-injected SDK version literal. Replaced at build time
+// via `define` in tsup.config.ts. Falls back to "0.0.0-dev" when
+// running tests under vitest (no tsup build step).
+declare const __SDK_VERSION__: string;
 
 /**
  * Returns true if the current Node.js major version meets the minimum requirement.
@@ -609,7 +616,109 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     }
   }
 
+  // Step 10: Blocking verification that the anon key is registered
+  // server-side (DISC-493 Issue 3, DISC-494). Runs last so failures here
+  // surface the exit code without blocking the file scaffolding work.
+  //
+  // Skipped when:
+  //   - `GLASSTRACE_SKIP_INIT_VERIFY=1` is set (offline installs)
+  //   - CI mode is active (CI builds should not reach external networks)
+  //   - Vitest is running (`VITEST` env var) — unit tests that don't
+  //     care about the network path shouldn't be forced to mock the
+  //     transport; tests that DO care use `_setTransportForTesting`
+  //     and explicitly un-set `VITEST` before calling runInit.
+  const skipVerify =
+    process.env["GLASSTRACE_SKIP_INIT_VERIFY"] === "1" ||
+    process.env["GLASSTRACE_SKIP_INIT_VERIFY"] === "true" ||
+    process.env["VITEST"] === "true";
+
+  if (!skipVerify && !isCI) {
+    const verifyResult = await verifyAnonKeyRegistration(projectRoot);
+    if (verifyResult !== null) {
+      errors.push(verifyResult);
+      return { exitCode: 2, summary, warnings, errors };
+    }
+    summary.push("Verified anon key registration with Glasstrace API");
+  }
+
   return { exitCode: 0, summary, warnings, errors };
+}
+
+/**
+ * Verifies that the anonymous key written by init is registered
+ * server-side. Called at the end of the scaffold flow so that when it
+ * fails, the user sees an actionable error rather than a misleading
+ * "initialized successfully" followed by silent MCP authentication
+ * failures (DISC-494).
+ *
+ * Returns `null` on success, or an error message string on failure.
+ * The error message distinguishes three classes:
+ *   - "fetch failed" — transport error (DNS, TCP, TLS, timeout)
+ *   - "server rejected the key" — HTTP 4xx/5xx
+ *   - "server returned malformed response" — HTTP 2xx with unparseable
+ *     body
+ *
+ * The anon key is NEVER included in the returned message. Callers
+ * (the CLI entry point) render it verbatim to stderr via the errors
+ * array and exit non-zero.
+ *
+ * @internal Exported for testability.
+ */
+export async function verifyAnonKeyRegistration(
+  projectRoot: string,
+): Promise<string | null> {
+  // Read env the same way the runtime would — scaffoldEnvLocal may have
+  // written GLASSTRACE_API_KEY=gt_anon_..., so prefer the generated
+  // anon key on disk as the authoritative value to verify.
+  const anonKey = await readAnonKey(projectRoot);
+  if (anonKey === null) {
+    // No anon key on disk means MCP wasn't configured. Silently skip
+    // verification — this is a partial install, not a verification
+    // failure. The init flow already emitted warnings above.
+    return null;
+  }
+
+  // Load the dev key from .env.local if present (for straggler linking)
+  // but fall through to anon-only verification otherwise. Reading is
+  // best-effort: any error leaves devKey undefined and we verify the
+  // anon key in isolation.
+  let devKey: string | undefined;
+  try {
+    const envPath = path.join(projectRoot, ".env.local");
+    if (fs.existsSync(envPath)) {
+      const envContent = fs.readFileSync(envPath, "utf-8");
+      const match = /^GLASSTRACE_API_KEY=(.*)$/m.exec(envContent);
+      if (match !== null) {
+        const value = match[1].trim();
+        // Only send a real dev key in the dev slot — don't double-
+        // count the anon key as both keys.
+        if (value.startsWith("gt_dev_")) {
+          devKey = value;
+        }
+      }
+    }
+  } catch {
+    // Ignore — fall through to anon-only verification.
+  }
+
+  const config = resolveConfig({ apiKey: devKey });
+  const sdkVersion = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
+
+  const result: VerifyInitResult = await verifyInitReachable(config, anonKey, sdkVersion);
+
+  if (result.ok) {
+    return null;
+  }
+
+  const hint = "Run 'npx glasstrace status' or 'npx glasstrace doctor' to diagnose.";
+  switch (result.reason) {
+    case "transport":
+      return `Glasstrace init verification failed: fetch failed (${result.detail}). ${hint}`;
+    case "rejected":
+      return `Glasstrace init verification failed: server rejected the key (HTTP ${result.status}). ${hint}`;
+    case "malformed":
+      return `Glasstrace init verification failed: server returned malformed response. ${hint}`;
+  }
 }
 
 /**
@@ -759,18 +868,28 @@ if (isDirectExecution) {
             }
           }
           if (result.summary.length > 0) {
-            process.stderr.write("\nGlasstrace initialized successfully!\n\n");
+            // Only claim success when exitCode is 0. A non-zero exit
+            // means init scaffolding completed but a later step (e.g.,
+            // verifyAnonKeyRegistration) failed — we must not tell the
+            // user everything is fine (DISC-494 root cause).
+            if (result.exitCode === 0) {
+              process.stderr.write("\nGlasstrace initialized successfully!\n\n");
+            } else {
+              process.stderr.write("\nGlasstrace init completed with errors.\n\n");
+            }
             for (const line of result.summary) {
               process.stderr.write(`  - ${line}\n`);
             }
-            process.stderr.write("\nNext steps:\n");
-            process.stderr.write("  1. Start your Next.js dev server\n");
-            process.stderr.write(
-              "  2. Glasstrace works immediately in anonymous mode\n",
-            );
-            process.stderr.write(
-              "  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n",
-            );
+            if (result.exitCode === 0) {
+              process.stderr.write("\nNext steps:\n");
+              process.stderr.write("  1. Start your Next.js dev server\n");
+              process.stderr.write(
+                "  2. Glasstrace works immediately in anonymous mode\n",
+              );
+              process.stderr.write(
+                "  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n",
+              );
+            }
           }
           process.exit(result.exitCode);
         })

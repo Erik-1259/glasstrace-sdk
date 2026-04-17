@@ -17,7 +17,8 @@ import {
   registerGlasstrace,
   _resetRegistrationForTesting,
 } from "../../packages/sdk/src/register.js";
-import { _resetConfigForTesting } from "../../packages/sdk/src/init-client.js";
+import { _resetConfigForTesting, _setTransportForTesting } from "../../packages/sdk/src/init-client.js";
+import { HttpsTransportError, type HttpsPostJsonResult } from "../../packages/sdk/src/https-transport.js";
 import {
   CoreState,
   AuthState,
@@ -63,6 +64,14 @@ function createMockFetch(): ReturnType<typeof vi.fn> {
   });
 }
 
+function createMockTransport(): ReturnType<typeof vi.fn> {
+  return vi.fn(async (): Promise<HttpsPostJsonResult> => ({
+    status: 200,
+    body: STANDARD_INIT_RESPONSE,
+    raw: "",
+  }));
+}
+
 describe("SDK Lifecycle Integration Tests (SDK-027)", () => {
   const originalEnv = { ...process.env };
 
@@ -80,6 +89,7 @@ describe("SDK Lifecycle Integration Tests (SDK-027)", () => {
     delete process.env.GLASSTRACE_COVERAGE_MAP;
     delete process.env.GLASSTRACE_DISCOVERY_ENABLED;
     vi.stubGlobal("fetch", createMockFetch());
+    _setTransportForTesting(createMockTransport() as never);
   });
 
   afterEach(() => {
@@ -163,8 +173,10 @@ describe("SDK Lifecycle Integration Tests (SDK-027)", () => {
     process.env.GLASSTRACE_API_KEY = TEST_DEV_KEY;
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    // Mock fetch to fail
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network error")));
+    // Mock transport to fail with a transport error.
+    _setTransportForTesting(vi.fn(async () => {
+      throw new HttpsTransportError("fetch failed: network error");
+    }) as never);
 
     registerGlasstrace();
 

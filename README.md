@@ -130,6 +130,43 @@ project.
 In CI environments (`CI=true`), only a generic
 `.glasstrace/mcp.json` is written.
 
+### Blocking Init Verification
+
+Before reporting success, `glasstrace init` contacts the Glasstrace API
+to verify that your anonymous key is registered server-side. Without
+this step, a silent network failure during the runtime SDK's background
+init call leaves your anon key unlinked — and subsequent MCP queries
+fail with "authentication failed" even though `init` claimed success.
+
+The CLI uses Node's built-in `node:https` module directly for this
+request, bypassing any `fetch` patching introduced by Next.js 16's
+caching layer.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Scaffolding succeeded AND the server confirmed the anon key. |
+| `1`  | Scaffolding failed. No verification attempted. |
+| `2`  | Scaffolding succeeded but server verification failed. Safe to re-run. |
+
+**Error classes reported on non-zero exit:**
+
+- `fetch failed: <reason>` — the SDK could not reach the Glasstrace API
+  (DNS failure, TCP reset, TLS error, or 10-second timeout). The
+  request is retried twice with 500ms + 1500ms backoff (20-second
+  total cap) before surfacing the failure.
+- `server rejected the key (HTTP <status>)` — the API responded with
+  a 4xx or 5xx status. Not retried; verify `GLASSTRACE_API_KEY` or
+  check Glasstrace status.
+- `server returned malformed response` — the API responded 2xx but
+  the body was not valid JSON or did not match the expected schema.
+  Usually indicates a mid-rollout schema mismatch.
+
+**Skipping verification.** Set `GLASSTRACE_SKIP_INIT_VERIFY=1` to skip
+the verification step (useful for offline installs). CI mode skips
+verification automatically.
+
 ### Installation State Preservation
 
 `glasstrace init` is safe to re-run. Running it over an existing install:

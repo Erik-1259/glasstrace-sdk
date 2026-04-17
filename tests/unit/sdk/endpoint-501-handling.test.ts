@@ -261,12 +261,15 @@ describe("SDK endpoint targeting (DISC-1074)", () => {
         },
       };
 
-      const fetchSpy = vi.fn().mockResolvedValue({
-        ok: true,
+      const transportSpy = vi.fn(async () => ({
         status: 200,
-        json: () => Promise.resolve(mockResponse),
-      });
-      vi.stubGlobal("fetch", fetchSpy);
+        body: mockResponse,
+        raw: "",
+      }));
+      const { _setTransportForTesting } = await import(
+        "../../../packages/sdk/src/init-client.js"
+      );
+      _setTransportForTesting(transportSpy as never);
 
       try {
         await sendInitRequest(
@@ -284,10 +287,10 @@ describe("SDK endpoint targeting (DISC-1074)", () => {
           "0.1.0",
         );
 
-        const calledUrl = fetchSpy.mock.calls[0][0] as string;
+        const calledUrl = transportSpy.mock.calls[0][0] as string;
         expect(calledUrl).not.toContain("/v1/client/observations");
       } finally {
-        vi.unstubAllGlobals();
+        _setTransportForTesting(null);
       }
     });
   });
