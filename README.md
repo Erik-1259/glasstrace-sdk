@@ -130,6 +130,43 @@ project.
 In CI environments (`CI=true`), only a generic
 `.glasstrace/mcp.json` is written.
 
+### Installation State Preservation
+
+`glasstrace init` is safe to re-run. Running it over an existing install:
+
+- **Preserves the anonymous key** at `.glasstrace/anon_key` so an account
+  claim linkage is never silently invalidated.
+- **Preserves a claimed developer API key** in `.env.local`
+  (`GLASSTRACE_API_KEY=gt_dev_...`) so re-init cannot cost you
+  authentication state.
+- **Preserves the config cache** at `.glasstrace/config` — re-init does
+  not touch the cache, and the runtime uses atomic write-then-rename
+  semantics so a mid-write crash cannot leave it corrupted.
+- **Prompts before overwriting manually-edited MCP config files.** If
+  the existing `.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`,
+  or `.codex/config.toml` differs from the template init would write,
+  init asks for confirmation. Pass `--force` to skip the prompt.
+
+### Validating Install State
+
+```bash
+npx glasstrace init --validate
+```
+
+Checks that the Glasstrace installation artifacts are in a consistent
+state without making any changes. Reports any of the following and
+exits non-zero:
+
+- `.glasstrace/` exists but `instrumentation.ts` is missing the
+  `registerGlasstrace` import
+- `.glasstrace/` is missing but `instrumentation.ts` still imports
+  from `@glasstrace/sdk`
+- The `.glasstrace/mcp-connected` marker exists but no MCP config
+  files are present
+- MCP config files exist but the marker is missing
+
+Each finding includes a suggested fix command.
+
 ### Removing Glasstrace
 
 ```bash
@@ -142,8 +179,33 @@ from `next.config`, removes `registerGlasstrace()` from
 cleans up `.env.local` entries, `.gitignore` entries, MCP configs, and
 agent info sections.
 
+Before cleanup, uninit writes a `.glasstrace/shutdown-requested` marker
+so a running SDK heartbeat can drain and exit cleanly on its next tick
+instead of continuing to buffer traces after the files have been
+removed.
+
+If `.env.local` contains a claimed developer key (`gt_dev_*`), uninit
+requires explicit confirmation before removing it to avoid silently
+losing your authentication state. Pass `--force` to skip the
+confirmation.
+
 Flags:
 - `--dry-run` -- Preview what would be removed without making changes
+- `--force` -- Skip interactive confirmation for dev-key removal
+
+### Uninstalling the package
+
+When you run `npm uninstall @glasstrace/sdk`, a `preuninstall` script
+prints a warning reminding you to run `npx @glasstrace/sdk uninit`
+first. Package-manager lifecycle scripts are unreliable across
+environments (pnpm, yarn, and CI containers), so the warning is
+informational only; Glasstrace does not attempt automatic cleanup
+during `npm uninstall`. For a clean removal:
+
+```bash
+npx glasstrace uninit
+npm uninstall @glasstrace/sdk
+```
 
 ### MCP Registration
 

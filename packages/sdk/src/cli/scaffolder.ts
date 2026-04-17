@@ -348,8 +348,54 @@ export function wrapCJSExport(content: string): WrapResult {
 }
 
 /**
+ * Extracts the value of `GLASSTRACE_API_KEY` from a `.env.local`-style
+ * string. Returns the raw (unquoted) value, or `null` if the key is
+ * absent, commented out, or empty.
+ *
+ * Only uncommented assignments are considered — a `# GLASSTRACE_API_KEY=...`
+ * placeholder is treated as if the key is not set.
+ *
+ * When multiple uncommented assignments are present, the **last**
+ * effective value wins — matching typical `.env` override semantics
+ * (later lines override earlier ones when loaded by dotenv-style
+ * loaders). Placeholder values (empty or `your_key_here`) are skipped
+ * so a trailing placeholder does not mask a real earlier value.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function readEnvLocalApiKey(content: string): string | null {
+  let last: string | null = null;
+  const regex = /^\s*GLASSTRACE_API_KEY\s*=\s*(.*)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    const raw = match[1].trim();
+    if (raw === "") continue;
+    const unquoted = raw.replace(/^(['"])(.*)\1$/, "$2");
+    if (unquoted === "" || unquoted === "your_key_here") continue;
+    last = unquoted;
+  }
+  return last;
+}
+
+/**
+ * Returns true when the given API key value is a claimed developer key
+ * (prefix `gt_dev_`). Defensive against leading/trailing whitespace.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function isDevApiKey(value: string | null | undefined): boolean {
+  if (value === null || value === undefined) return false;
+  return value.trim().startsWith("gt_dev_");
+}
+
+/**
  * Creates `.env.local` with `GLASSTRACE_API_KEY=` placeholder, or appends
  * to an existing file if it does not already contain `GLASSTRACE_API_KEY`.
+ *
+ * Preservation behavior (DISC-1247 Scenario 6): if an existing `.env.local`
+ * already defines a developer key (`gt_dev_*`), the file is left untouched
+ * so re-running `init` after an account claim does not overwrite the
+ * claimed dev key.
  *
  * @param projectRoot - Absolute path to the project root directory.
  * @returns True if the file was created or modified, false if already configured.
@@ -433,6 +479,54 @@ export async function scaffoldGitignore(projectRoot: string): Promise<boolean> {
 
   fs.writeFileSync(filePath, ".glasstrace/\n", "utf-8");
   return true;
+}
+
+/**
+ * Compares an existing MCP config file against the content init would
+ * write. Returns `true` when they are semantically equal (JSON configs
+ * are parsed and compared deeply; TOML configs use trimmed string
+ * comparison). Returns `false` on parse errors or mismatch.
+ *
+ * Used by `init` to detect manually-edited MCP configs before
+ * overwriting them (DISC-1247 Scenario 2c).
+ *
+ * @internal Exported for unit testing only.
+ */
+export function mcpConfigMatches(
+  existingContent: string,
+  expectedContent: string,
+): boolean {
+  const trimmedExpected = expectedContent.trim();
+
+  // Attempt JSON comparison first — init writes JSON for most agents.
+  try {
+    const existingParsed: unknown = JSON.parse(existingContent);
+    const expectedParsed: unknown = JSON.parse(trimmedExpected);
+    return JSON.stringify(canonicalize(existingParsed)) === JSON.stringify(canonicalize(expectedParsed));
+  } catch {
+    // Fall through to text comparison for TOML and other non-JSON formats.
+  }
+
+  return existingContent.trim() === trimmedExpected;
+}
+
+/**
+ * Sorts object keys recursively to produce a canonical form suitable
+ * for structural equality comparison via JSON.stringify.
+ */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) {
+      sorted[key] = canonicalize(obj[key]);
+    }
+    return sorted;
+  }
+  return value;
 }
 
 /**
