@@ -83,9 +83,11 @@ export function startHeartbeat(
  * Stops the heartbeat timer.
  *
  * The shutdown hook is intentionally not unregistered — the lifecycle
- * coordinator does not expose a removal API, and the hook's internal
- * `shutdownFired` guard plus the timer nulling here ensure it is a no-op
- * if the heartbeat has already been stopped.
+ * coordinator does not expose a removal API. Stopping the heartbeat here
+ * suppresses future periodic ticks by clearing the timer, but it does not
+ * prevent the already-registered shutdown hook from sending its final
+ * health report once during process shutdown. The hook's internal
+ * `shutdownFired` guard ensures it runs at most once regardless.
  */
 export function stopHeartbeat(): void {
   if (heartbeatTimer !== null) {
@@ -216,8 +218,8 @@ function registerHeartbeatShutdownHook(
         const healthReport = collectHealthReport(sdkVersion);
         await performInit(config, anonKey, sdkVersion, healthReport);
       } catch {
-        // Swallow — the coordinator logs hook failures and we do not
-        // want to surface noise during shutdown.
+        // Intentionally swallow final-report failures to avoid adding
+        // shutdown noise or interrupting the remaining shutdown hooks.
       }
     },
   });
