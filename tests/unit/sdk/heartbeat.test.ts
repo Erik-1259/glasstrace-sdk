@@ -6,6 +6,13 @@ import {
 } from "../../../packages/sdk/src/heartbeat.js";
 import * as initClient from "../../../packages/sdk/src/init-client.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
+import * as lifecycle from "../../../packages/sdk/src/lifecycle.js";
+const {
+  executeShutdown,
+  registerShutdownHook,
+  resetLifecycleForTesting,
+  initLifecycle,
+} = lifecycle;
 import type { ResolvedConfig } from "../../../packages/sdk/src/env-detection.js";
 import type { SdkInitResponse } from "@glasstrace/protocol";
 
@@ -50,6 +57,8 @@ function makeInitResponse(): SdkInitResponse {
 describe("heartbeat", () => {
   beforeEach(() => {
     _resetHeartbeatForTesting();
+    resetLifecycleForTesting();
+    initLifecycle({ logger: () => {} });
     vi.useFakeTimers();
     vi.restoreAllMocks();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
@@ -61,6 +70,7 @@ describe("heartbeat", () => {
 
   afterEach(() => {
     _resetHeartbeatForTesting();
+    resetLifecycleForTesting();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -346,88 +356,135 @@ describe("heartbeat", () => {
     });
   });
 
-  describe("Shutdown handlers", () => {
-    it("registers SIGTERM and SIGINT handlers on start", () => {
+  describe("Lifecycle shutdown migration (DISC-1248)", () => {
+    it("registers the final-report hook at priority 10 (heartbeat slot per sdk-lifecycle.md Section 8.3)", () => {
+      const hookSpy = vi.spyOn(lifecycle, "registerShutdownHook");
+
+      const config = createTestConfig();
+      startHeartbeat(config, null, "1.0.0", 1, vi.fn());
+
+      expect(hookSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "heartbeat-final-report", priority: 10 }),
+      );
+    });
+
+    it("does not register direct SIGTERM/SIGINT handlers when started", () => {
       const sigTermBefore = process.listenerCount("SIGTERM");
       const sigIntBefore = process.listenerCount("SIGINT");
 
       const config = createTestConfig();
       startHeartbeat(config, null, "1.0.0", 1, vi.fn());
 
-      expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore + 1);
-      expect(process.listenerCount("SIGINT")).toBe(sigIntBefore + 1);
-    });
-
-    it("removes signal handlers on stopHeartbeat", () => {
-      const sigTermBefore = process.listenerCount("SIGTERM");
-
-      const config = createTestConfig();
-      startHeartbeat(config, null, "1.0.0", 1, vi.fn());
-      stopHeartbeat();
-
+      // Regression guard for DISC-1248: heartbeat must not install its own
+      // signal handlers. Signal handling is owned by the lifecycle
+      // coordinator (registerSignalHandlers in otel-config.ts).
       expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
+      expect(process.listenerCount("SIGINT")).toBe(sigIntBefore);
     });
 
-    it("shutdown handler sends final health report and re-raises signal", async () => {
+    it("executes final report via lifecycle coordinator in priority order (OTel first, heartbeat second)", async () => {
+      const order: string[] = [];
       const collectSpy = vi.spyOn(healthCollector, "collectHealthReport");
-      const performSpy = vi.spyOn(initClient, "performInit").mockResolvedValue(null);
+      const performSpy = vi.spyOn(initClient, "performInit").mockImplementation(async () => {
+        order.push("heartbeat-report");
+        return null;
+      });
       vi.spyOn(initClient, "consumeRateLimitFlag").mockReturnValue(false);
 
-      const config = createTestConfig();
-      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-
-      startHeartbeat(config, null, "1.0.0", 1, vi.fn());
-
-      // Emit SIGTERM
-      process.emit("SIGTERM", "SIGTERM");
-      await vi.advanceTimersByTimeAsync(0);
-
-      // Should have collected and sent a health report
-      expect(collectSpy).toHaveBeenCalled();
-      expect(performSpy).toHaveBeenCalled();
-
-      // Should re-raise SIGTERM so the process exits
-      expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGTERM");
-
-      killSpy.mockRestore();
-    });
-
-    it("shutdown handler does not fire twice", async () => {
-      const performSpy = vi.spyOn(initClient, "performInit").mockResolvedValue(null);
-      vi.spyOn(initClient, "consumeRateLimitFlag").mockReturnValue(false);
+      // Simulate the OTel flush hook that's registered in otel-config.ts
+      // with priority 0 — must run before heartbeat's priority 10 hook.
+      registerShutdownHook({
+        name: "otel-provider-shutdown",
+        priority: 0,
+        fn: async () => {
+          order.push("otel-flush");
+        },
+      });
 
       const config = createTestConfig();
-      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-
       startHeartbeat(config, null, "1.0.0", 1, vi.fn());
 
-      process.emit("SIGTERM", "SIGTERM");
-      process.emit("SIGINT", "SIGINT");
+      // Drive the coordinator — this is what signals/beforeExit would do.
+      await executeShutdown();
+      // Allow any microtasks scheduled by performInit to drain.
       await vi.advanceTimersByTimeAsync(0);
 
-      // Should only fire once despite two signals
-      // (process.once auto-removes, and shutdownFired guard)
+      expect(order).toEqual(["otel-flush", "heartbeat-report"]);
+      expect(collectSpy).toHaveBeenCalledTimes(1);
       expect(performSpy).toHaveBeenCalledTimes(1);
-
-      killSpy.mockRestore();
     });
 
-    it("stopHeartbeat does not affect otel-config signal handlers", () => {
-      // Simulate otel-config handler
-      const otelHandler = vi.fn();
-      process.once("SIGTERM", otelHandler);
-      const countWithOtel = process.listenerCount("SIGTERM");
+    it("emits the final health report exactly once even if shutdown runs twice", async () => {
+      const performSpy = vi.spyOn(initClient, "performInit").mockResolvedValue(null);
+      vi.spyOn(initClient, "consumeRateLimitFlag").mockReturnValue(false);
 
-      // Start and stop heartbeat
+      const config = createTestConfig();
+      startHeartbeat(config, null, "1.0.0", 1, vi.fn());
+
+      await executeShutdown();
+      await executeShutdown();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Second executeShutdown() is a no-op via the coordinator's
+      // _shutdownExecuted guard; the heartbeat module also guards with
+      // shutdownFired. Together they must ensure at-most-once reporting.
+      expect(performSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops the heartbeat timer during the shutdown hook so no further ticks race", async () => {
+      const performSpy = vi.spyOn(initClient, "performInit").mockResolvedValue(null);
+      vi.spyOn(initClient, "consumeRateLimitFlag").mockReturnValue(false);
+
+      const config = createTestConfig();
+      startHeartbeat(config, null, "1.0.0", 1, vi.fn());
+
+      await executeShutdown();
+      await vi.advanceTimersByTimeAsync(0);
+      const callsAfterShutdown = performSpy.mock.calls.length;
+
+      // Advance past several interval boundaries. If the timer were still
+      // live, setInterval would drive additional performInit calls.
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(performSpy.mock.calls.length).toBe(callsAfterShutdown);
+    });
+
+    it("registers the shutdown hook only once across repeated startHeartbeat calls", async () => {
+      const performSpy = vi.spyOn(initClient, "performInit").mockResolvedValue(null);
+      vi.spyOn(initClient, "consumeRateLimitFlag").mockReturnValue(false);
+
       const config = createTestConfig();
       startHeartbeat(config, null, "1.0.0", 1, vi.fn());
       stopHeartbeat();
+      startHeartbeat(config, null, "1.0.0", 2, vi.fn());
 
-      // Otel handler should still be registered
-      expect(process.listenerCount("SIGTERM")).toBe(countWithOtel);
+      await executeShutdown();
+      await vi.advanceTimersByTimeAsync(0);
 
-      // Clean up
-      process.removeListener("SIGTERM", otelHandler);
+      // Even though startHeartbeat ran twice, the hook must fire exactly once.
+      expect(performSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("swallows errors from the final report so the rest of shutdown completes", async () => {
+      vi.spyOn(initClient, "performInit").mockRejectedValue(new Error("network down"));
+      vi.spyOn(initClient, "consumeRateLimitFlag").mockReturnValue(false);
+
+      const later: string[] = [];
+      registerShutdownHook({
+        name: "later-hook",
+        priority: 20,
+        fn: async () => {
+          later.push("ran");
+        },
+      });
+
+      const config = createTestConfig();
+      startHeartbeat(config, null, "1.0.0", 1, vi.fn());
+
+      await executeShutdown();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Later hook must still run even though heartbeat's inner performInit rejected.
+      expect(later).toEqual(["ran"]);
     });
   });
 });
