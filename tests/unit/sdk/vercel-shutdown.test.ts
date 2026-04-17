@@ -45,12 +45,19 @@
  *
  * ## Version coverage
  *
- * The suite runs against the `@vercel/otel` version installed in
- * `node_modules` (v2.1.2 at the time of authoring). Source inspection
- * confirmed the same absence of `process.on`, `SIGTERM`, `SIGINT`, and
- * `beforeExit` references in the latest v1.x release (v1.14.1) and the
- * v2.x line through v2.1.2, so the verdict holds across the range
- * currently in use by the ecosystem.
+ * The suite runs against `@vercel/otel@^2.1.2`, which is the current
+ * stable release of the library and the version real users receive
+ * when installing alongside the SDK's OTel v2 dependencies. The peer
+ * dependency range in `packages/sdk/package.json` is still declared
+ * as `^1.0.0`; this is a known staleness tracked by a separate
+ * follow-up discovery. We cannot pin the devDependency to v1 because
+ * `@vercel/otel@1.x` requires `@opentelemetry/sdk-trace-base@<2.0.0`,
+ * which conflicts with the SDK's existing OTel v2 dependencies.
+ *
+ * Source inspection at `vercel/otel`'s repo confirmed identical
+ * absence of `process.on`, `SIGTERM`, `SIGINT`, and `beforeExit`
+ * references across the latest v1.x tag (v1.14.1) through v2.1.2,
+ * so the verdict holds for the entire Vercel-ecosystem range.
  */
 
 import {
@@ -254,12 +261,10 @@ describe("DISC-1250: @vercel/otel shutdown verification", () => {
     evidence.providerConstructorName = provider.constructor.name;
 
     // The shipped `@vercel/otel` bundle is minified, so the class name
-    // is typically a two-letter identifier ("Ga" at v2.1.2). We don't
-    // assert on it — we assert that a shutdown() method exists on the
-    // provider, which is the property the verification depends on.
-    // The recorded name is preserved in `evidence` for later reference.
+    // may be short or empty depending on bundling and minification.
+    // We record it for reference but only assert on the property we
+    // actually depend on: that `shutdown()` exists on the provider.
     expect(typeof provider.shutdown).toBe("function");
-    expect(provider.constructor.name.length).toBeGreaterThan(0);
   });
 
   it("no ambient code path invokes provider.shutdown() post-registration", async () => {
@@ -350,10 +355,9 @@ describe("DISC-1250: @vercel/otel shutdown verification", () => {
     expect(evidence.providerShutdownInvocations).toBe(0);
     expect(evidence.spansFlushedAtRegistration).toBe(0);
     expect(evidence.spansFlushedAfterManualShutdown).toBeGreaterThanOrEqual(1);
-    // Bundled class name is minified; we assert non-empty rather than
-    // a specific identifier so the test is resilient to future bundler
-    // output changes.
-    expect(evidence.providerConstructorName.length).toBeGreaterThan(0);
+    // Bundled class name is recorded as-is in the evidence block; we
+    // do not assert on it because minification may produce a short or
+    // empty name across library releases.
     expect(evidence.vercelOtelVersion).not.toBe("");
   });
 });
