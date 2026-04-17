@@ -1,0 +1,155 @@
+name: Update Transitive Dependency
+
+# =============================================================================
+# Ad-hoc workflow: regenerate the lockfile on Linux to bump a transitive
+# dependency that cannot be handled by Dependabot or a developer machine.
+# =============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# The project's CI runners are ubuntu-latest (Linux), but most maintainers
+# develop on macOS. npm resolves cross-platform optional peer dependencies
+# (for example @emnapi/core, @emnapi/runtime) differently depending on the
+# host OS. When a macOS developer runs `npm install`, `npm audit fix`, or
+# `npm update` and commits the resulting lockfile, those Linux-specific
+# optional entries get pruned — and CI then fails with
+# `npm ci: Missing: @emnapi/core@... from lock file`.
+#
+# Separately, Dependabot sometimes refuses to auto-PR a transitive bump —
+# for example when the vulnerable transitive is only reachable through
+# `devDependencies` and its lockfile subtree is marked `"dev": true`
+# (this repo intentionally keeps @opentelemetry/* as devDependencies so
+# tsup's `noExternal` can inline them into the published bundle — so the
+# entire OTLP chain, including protobufjs, inherits the dev flag).
+#
+# This workflow sidesteps both problems by generating the lockfile on
+# a GitHub-hosted Linux runner using the exact Node + npm versions CI
+# expects, then pushing the single-file change to a new branch.
+#
+# WHEN TO USE
+# -----------
+# Use this workflow when all of the following are true:
+#   1. A transitive dependency needs to be bumped (direct deps should go
+#      through `npm install <dep>@<ver>` + a normal PR).
+#   2. Dependabot has either not produced a PR or has reported it as
+#      "unresolvable", and manual regeneration is needed.
+#   3. The target version is already satisfied by an existing semver
+#      range in the dep tree (for example protobufjs@^7.0.0 can reach
+#      7.5.5 without any package.json edits). If the target is OUT of
+#      range, add an `overrides` entry to the root package.json in a
+#      separate commit first, then trigger this workflow.
+#
+# WHAT IT DOES
+# ------------
+#   1. Checks out `main`.
+#   2. Sets up Node 22.15 and pins npm to 11.6.1 (matches release.yml).
+#   3. Guards that the target branch name does not already exist on
+#      origin (prevents clobbering in-flight work).
+#   4. Runs `npm update <dependency> --package-lock-only`, which moves
+#      the transitive to the highest version permitted by its current
+#      semver range without touching package.json.
+#   5. Runs `npm audit --audit-level=high` to confirm the bump resolves
+#      the advisory that motivated the run.
+#   6. Commits the single-file lockfile change to a new branch and pushes.
+#   7. Prints the PR-creation URL. A human (you) opens the PR from the
+#      GitHub UI — this is intentional: PRs opened by GITHUB_TOKEN do
+#      NOT trigger CI (GitHub's loop-prevention rule), so the branch is
+#      pushed but the PR is opened manually so CI runs normally.
+#
+# HOW TO USE
+# ----------
+#   1. Go to Actions → "Update Transitive Dependency" → "Run workflow".
+#   2. Enter:
+#        dependency = the transitive package name (for example: protobufjs)
+#        branch     = a new branch name (for example:
+#                     chore/bump-protobufjs-security)
+#   3. Wait for the workflow to finish (~30 seconds).
+#   4. Open the URL printed in the workflow's final step annotation.
+#   5. Click "Create pull request" — CI will run, reviewers can review.
+#   6. Merge once green.
+#
+# SAFETY
+# ------
+#   - This workflow never writes to main.
+#   - It never opens a PR itself (see rationale above).
+#   - It only modifies package-lock.json; package.json is untouched.
+#   - It fails fast if the branch name already exists on origin.
+#   - It fails if `npm audit --audit-level=high` still flags issues
+#     after the bump (meaning the requested dep didn't resolve the
+#     advisory, or a different advisory exists).
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      dependency:
+        description: "Transitive dep to update (for example: protobufjs)"
+        required: true
+        type: string
+      branch:
+        description: "New branch to push the lockfile change to"
+        required: true
+        type: string
+
+concurrency:
+  group: update-transitive-${{ inputs.branch }}
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: Regenerate lockfile on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pin to avoid Node 22.22.2 which ships with a broken npm
+          # (missing promise-retry). See DISC-443.
+          node-version: 22.15
+          cache: npm
+
+      # Match the declared packageManager so the lockfile format is
+      # consistent with what release.yml and CI expect.
+      - name: Upgrade npm to declared version
+        run: npm install -g npm@11.6.1
+
+      - name: Guard — target branch must not already exist
+        run: |
+          if git ls-remote --exit-code --heads origin "${{ inputs.branch }}"; then
+            echo "::error::Branch '${{ inputs.branch }}' already exists on origin. Choose a different name, or delete the existing branch first."
+            exit 1
+          fi
+
+      - name: Update ${{ inputs.dependency }} in lockfile
+        run: npm update "${{ inputs.dependency }}" --package-lock-only
+
+      - name: Show lockfile diff summary
+        run: git diff --stat package-lock.json
+
+      - name: Verify `npm audit` passes after bump
+        run: npm audit --audit-level=high
+
+      - name: Commit lockfile change and push new branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${{ inputs.branch }}"
+          git add package-lock.json
+          git commit -m "chore(deps): bump ${{ inputs.dependency }} transitive via lockfile update workflow"
+          git push origin "${{ inputs.branch }}"
+
+      - name: Print PR creation URL
+        run: |
+          url="https://github.com/${{ github.repository }}/pull/new/${{ inputs.branch }}"
+          echo "::notice title=Open this URL to create the PR::$url"
+          echo ""
+          echo "Lockfile has been regenerated on Linux and pushed to branch:"
+          echo "  ${{ inputs.branch }}"
+          echo ""
+          echo "Open the PR manually via the URL above so CI runs."
