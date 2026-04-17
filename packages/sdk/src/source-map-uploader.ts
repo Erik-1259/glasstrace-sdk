@@ -308,20 +308,83 @@ export async function requestPresignedTokens(
   return PresignedUploadResponseSchema.parse(json);
 }
 
+/** Shape of the subset of `@vercel/blob/client` the SDK consumes. */
+type BlobClientModule = {
+  put: (
+    pathname: string,
+    body: Blob,
+    options: { access: string; token: string },
+  ) => Promise<{ url: string }>;
+};
+
+/**
+ * Loads `@vercel/blob/client` at runtime using the `Function()`-based
+ * dynamic-import evasion trick.
+ *
+ * The indirection hides the specifier from static bundler analysis — webpack,
+ * tsup, esbuild, and rollup all resolve literal `await import("...")` targets
+ * at build time and would raise `Module not found` for consumers without
+ * `@vercel/blob` installed (it is an optional peer dependency). See DISC-1255.
+ *
+ * **CSP note:** `Function()` is semantically equivalent to `eval()` and will
+ * trigger `unsafe-eval` CSP violations in restricted environments. Source-map
+ * upload only runs in Node.js at build time, so CSP does not apply here. The
+ * same caveat documented on `tryImport` in `otel-config.ts` applies if this
+ * code is ever re-used in a browser-equivalent runtime.
+ *
+ * Exported for internal test injection via {@link _setBlobClientLoaderForTesting}
+ * only; not part of the public API.
+ */
+async function defaultBlobClientLoader(): Promise<BlobClientModule> {
+  const dynamicImport = Function("id", "return import(id)") as (
+    id: string,
+  ) => Promise<BlobClientModule>;
+  return dynamicImport("@vercel/blob/client");
+}
+
+let _blobClientLoader: () => Promise<BlobClientModule> = defaultBlobClientLoader;
+
+/**
+ * Replaces the blob client loader. For test use only.
+ *
+ * The production loader uses a `Function()`-based dynamic import to evade
+ * static bundler analysis (DISC-1255), which in turn bypasses Vitest's
+ * module-mock interceptor. Tests that need to stub `@vercel/blob/client`
+ * call this helper to install a fake loader, then restore the default
+ * with {@link _resetBlobClientLoaderForTesting}.
+ *
+ * @internal
+ */
+export function _setBlobClientLoaderForTesting(
+  loader: () => Promise<BlobClientModule>,
+): void {
+  _blobClientLoader = loader;
+}
+
+/**
+ * Restores the default `@vercel/blob/client` loader. For test use only.
+ *
+ * @internal
+ */
+export function _resetBlobClientLoaderForTesting(): void {
+  _blobClientLoader = defaultBlobClientLoader;
+}
+
 /**
  * Phase 2: Upload a single source map to blob storage using a presigned token.
  *
- * Dynamically imports `@vercel/blob/client` to avoid bundling the dependency.
- * Throws a descriptive error if the package is not installed.
+ * Dynamically imports `@vercel/blob/client` via {@link defaultBlobClientLoader}
+ * to avoid bundling the optional peer dependency. Throws a descriptive error
+ * if the package is not installed.
  */
 export async function uploadToBlob(
   clientToken: string,
   pathname: string,
   content: string,
 ): Promise<{ url: string; size: number }> {
-  let mod: { put: (pathname: string, body: Blob, options: { access: string; token: string }) => Promise<{ url: string }> };
+  let mod: BlobClientModule;
   try {
-    mod = await import("@vercel/blob/client") as typeof mod;
+    mod = await _blobClientLoader();
   } catch (err) {
     // Distinguish "not installed" from other import errors
     const code = (err as NodeJS.ErrnoException).code;
@@ -518,10 +581,12 @@ export async function uploadSourceMapsAuto(
     return uploadSourceMaps(apiKey, endpoint, buildHash, maps);
   }
 
-  // Check if @vercel/blob is available
+  // Check if @vercel/blob is available. Uses the shared blob client loader
+  // (which goes through the `Function()` evasion trick) so webpack / tsup /
+  // esbuild do not resolve `@vercel/blob/client` at build time (DISC-1255).
   const checkAvailable = options?.checkBlobAvailable ?? (async () => {
     try {
-      await import("@vercel/blob/client");
+      await _blobClientLoader();
       return true;
     } catch {
       return false;

@@ -1,0 +1,198 @@
+name: Smoke test (published npm)
+
+# =============================================================================
+# Post-publish verification: install @glasstrace/sdk and @glasstrace/protocol
+# FROM npm (not from this repo's packed tarball) and prove they actually work.
+# =============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# The regular CI suite (ci.yml) exercises the SDK code by packing and
+# installing a local tarball. It does NOT verify what consumers actually
+# get when they run `npm install @glasstrace/sdk`. Two real incidents
+# motivated this workflow:
+#
+#   1. The 0.14.0 canary-mis-tag (the reason for PR #138): the stable
+#      dist-tag lagged behind the repo's real intended version for
+#      hours because no automation ever asked "does the dist-tag point
+#      where we think it does?"
+#
+#   2. DISC-1255 (Next.js 16 webpack build failure): the bug was in
+#      shipped 0.14.1 on npm but invisible to our local CI because the
+#      CI test runs against the packed tarball, and the bug only
+#      manifests when webpack tries to resolve a literal dynamic-import
+#      specifier. A post-publish verification would have caught it.
+#
+# WHEN IT RUNS
+# ------------
+#   - After every `Release` workflow completes successfully (canary or
+#     stable). This is the main case — it fires exactly when the risk
+#     materializes.
+#   - Monthly (1st of the month, 06:00 UTC), as a safety net for
+#     upstream peer-dep drift that breaks already-published SDK
+#     versions (e.g. `next@canary` shipping a change that breaks our
+#     `withGlasstraceConfig`).
+#   - On demand via `workflow_dispatch`.
+#
+# WHAT IT CHECKS
+# --------------
+# For BOTH `latest` and `canary` dist-tags, in parallel:
+#
+#   1. `npm install @glasstrace/sdk@<tag> @glasstrace/protocol@<tag>`
+#      from a bare project — proves the tarball resolves and installs.
+#   2. Installed versions MATCH what `npm view dist-tags.<tag>` reports
+#      — catches dist-tag pointing at the wrong version.
+#   3. ESM `import` of every public API works at runtime.
+#   4. CJS `require()` of every public API works at runtime.
+#   5. DISC-1255 regression check: the shipped bundle contains no
+#      literal `import("@vercel/blob/client")` or `import("@vercel/otel")`
+#      calls. Catches cases where the dynamic-import-evasion pattern
+#      gets reverted before a publish.
+#
+# A failure on `latest` after a stable release should be treated as a
+# SEV-2 immediately — real users are installing broken code. Failure on
+# `canary` is less urgent but still worth investigating before promoting
+# that canary to stable.
+#
+# COST
+# ----
+# Runs in ~2 minutes × 2 tags (parallel matrix) = one matrix iteration
+# per release, plus one monthly iteration. Negligible compared to per-PR
+# CI cost.
+# =============================================================================
+
+on:
+  # Fire after every Release workflow completion. The `if:` on the job
+  # filters to successful runs so we don't waste minutes re-smoking on
+  # a release that failed to publish anything.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+  # Monthly safety net for upstream peer-dep drift (not tied to our
+  # own releases). 1st of month, 06:00 UTC.
+  schedule:
+    - cron: "0 6 1 * *"
+
+  # Manual ad-hoc verification.
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-npm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke test @glasstrace/sdk@${{ matrix.dist_tag }}
+    # For workflow_run, only run when the triggering Release succeeded.
+    # Other triggers (schedule, manual dispatch) always run.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        dist_tag: [latest, canary]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          # Pin to avoid Node 22.22.2 which ships with a broken npm
+          # (missing promise-retry). See DISC-443.
+          node-version: 22.15
+
+      # Match the declared packageManager so the install resolves the
+      # same way release.yml and ci.yml do.
+      - name: Upgrade npm to declared version
+        run: npm install -g npm@11.6.1
+
+      - name: Create bare project and install from npm
+        env:
+          DIST_TAG: ${{ matrix.dist_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/smoke
+          cd /tmp/smoke
+          npm init -y > /dev/null
+          npm install \
+            "@glasstrace/sdk@$DIST_TAG" \
+            "@glasstrace/protocol@$DIST_TAG" \
+            zod@4 \
+            @opentelemetry/api
+
+      - name: Assert installed versions match dist-tag
+        env:
+          DIST_TAG: ${{ matrix.dist_tag }}
+        run: |
+          set -euo pipefail
+          cd /tmp/smoke
+          expected_sdk=$(npm view "@glasstrace/sdk" "dist-tags.$DIST_TAG")
+          installed_sdk=$(node -p "require('@glasstrace/sdk/package.json').version")
+          if [ "$expected_sdk" != "$installed_sdk" ]; then
+            echo "::error::SDK version mismatch. dist-tags.$DIST_TAG=$expected_sdk installed=$installed_sdk"
+            exit 1
+          fi
+          expected_proto=$(npm view "@glasstrace/protocol" "dist-tags.$DIST_TAG")
+          installed_proto=$(node -p "require('@glasstrace/protocol/package.json').version")
+          if [ "$expected_proto" != "$installed_proto" ]; then
+            echo "::error::Protocol version mismatch. dist-tags.$DIST_TAG=$expected_proto installed=$installed_proto"
+            exit 1
+          fi
+          echo "Versions match: sdk=$installed_sdk protocol=$installed_proto"
+
+      - name: ESM smoke import
+        run: |
+          cd /tmp/smoke
+          node --input-type=module -e "
+            import { SdkError, registerGlasstrace, withGlasstraceConfig, captureError } from '@glasstrace/sdk';
+            import { SessionIdSchema, GLASSTRACE_ATTRIBUTE_NAMES } from '@glasstrace/protocol';
+            SessionIdSchema.parse('a1b2c3d4e5f6a1b2');
+            if (typeof registerGlasstrace !== 'function') throw new Error('registerGlasstrace missing');
+            if (typeof withGlasstraceConfig !== 'function') throw new Error('withGlasstraceConfig missing');
+            if (typeof captureError !== 'function') throw new Error('captureError missing');
+            if (!GLASSTRACE_ATTRIBUTE_NAMES || Object.keys(GLASSTRACE_ATTRIBUTE_NAMES).length === 0) {
+              throw new Error('GLASSTRACE_ATTRIBUTE_NAMES missing');
+            }
+            new SdkError('ingestion_unreachable', 'smoke');
+            console.log('esm smoke OK');
+          "
+
+      - name: CJS smoke require
+        run: |
+          cd /tmp/smoke
+          node -e "
+            const sdk = require('@glasstrace/sdk');
+            const protocol = require('@glasstrace/protocol');
+            protocol.SessionIdSchema.parse('a1b2c3d4e5f6a1b2');
+            if (typeof sdk.registerGlasstrace !== 'function') throw new Error('registerGlasstrace missing');
+            if (typeof sdk.withGlasstraceConfig !== 'function') throw new Error('withGlasstraceConfig missing');
+            if (typeof sdk.captureError !== 'function') throw new Error('captureError missing');
+            console.log('cjs smoke OK');
+          "
+
+      - name: DISC-1255 regression check on published bundle
+        run: |
+          cd /tmp/smoke
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const sdkDist = 'node_modules/@glasstrace/sdk/dist';
+            const pattern = /import\s*\(\s*[\"'](@vercel\/blob\/client|@vercel\/otel)[\"']\s*\)/;
+            const files = [];
+            const walk = (d) => {
+              for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+                const p = path.join(d, e.name);
+                if (e.isDirectory()) walk(p);
+                else if (p.endsWith('.js') || p.endsWith('.cjs')) files.push(p);
+              }
+            };
+            walk(sdkDist);
+            const hits = files.filter(f => pattern.test(fs.readFileSync(f, 'utf8')));
+            if (hits.length) {
+              console.error('Literal optional-peer import() found in published bundle:', hits);
+              process.exit(1);
+            }
+            console.log('published bundle DISC-1255 check OK');
+          "

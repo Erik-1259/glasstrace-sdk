@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { withGlasstraceConfig, handleSourceMapUpload } from "../../../packages/sdk/src/config-wrapper.js";
+import {
+  withGlasstraceConfig,
+  handleSourceMapUpload,
+  _resetTurbopackWarningForTesting,
+} from "../../../packages/sdk/src/config-wrapper.js";
 
 // Mock child_process for computeBuildHash
 vi.mock("node:child_process", () => ({
@@ -214,6 +218,92 @@ describe("withGlasstraceConfig", () => {
     const original = { reactStrictMode: true };
     const result = withGlasstraceConfig(original);
     expect(result.reactStrictMode).toBe(true);
+  });
+
+  // --- DISC-1256 regression coverage ---
+
+  it("seeds an empty turbopack config when the user has not set one", () => {
+    const result = withGlasstraceConfig({});
+    expect(result.turbopack).toEqual({});
+  });
+
+  it("preserves an existing turbopack config unchanged", () => {
+    const userTurbopack = { rules: { "*.svg": { loaders: ["@svgr/webpack"] } } };
+    const result = withGlasstraceConfig({ turbopack: userTurbopack });
+    expect(result.turbopack).toBe(userTurbopack);
+  });
+
+  it("preserves caller subtype via generic parameter (DISC-1256)", () => {
+    // Compile-time coverage: the generic signature means `result.myCustom`
+    // is statically known to be `string`, not `unknown`. If the generic is
+    // removed this assertion won't type-check.
+    const result = withGlasstraceConfig({
+      reactStrictMode: true as const,
+      myCustom: "value",
+    });
+    const myCustom: string = result.myCustom;
+    expect(myCustom).toBe("value");
+    expect(result.reactStrictMode).toBe(true);
+  });
+
+  it("accepts an interface-shaped config without a string index signature (Next NextConfig shape)", () => {
+    // Mirrors Next's real `NextConfig` — an interface with named optional
+    // properties and NO string index signature. Before the constraint was
+    // relaxed from `Record<string, unknown>` to `object`, this would fail
+    // to type-check with "Index signature for type 'string' is missing"
+    // (the DISC-1256 symptom reported by Next 16 consumers).
+    interface NextConfigLike {
+      reactStrictMode?: boolean;
+      experimental?: Record<string, unknown>;
+    }
+    const next16Shape: NextConfigLike = { reactStrictMode: true };
+    const result = withGlasstraceConfig(next16Shape);
+    expect(result.reactStrictMode).toBe(true);
+  });
+
+  it("warns once when Turbopack is detected via TURBOPACK=1", () => {
+    _resetTurbopackWarningForTesting();
+    const originalEnvValue = process.env.TURBOPACK;
+    process.env.TURBOPACK = "1";
+    const warnSpy = vi.spyOn(globalThis.console, "warn").mockImplementation(() => {});
+
+    try {
+      withGlasstraceConfig({});
+      withGlasstraceConfig({}); // second call should not re-emit
+
+      const turbopackWarnings = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === "string" && call[0].includes("Turbopack detected"),
+      );
+      expect(turbopackWarnings).toHaveLength(1);
+      expect(turbopackWarnings[0][0]).toContain("next build --webpack");
+    } finally {
+      if (originalEnvValue === undefined) delete process.env.TURBOPACK;
+      else process.env.TURBOPACK = originalEnvValue;
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does not warn about Turbopack when --webpack flag is present", () => {
+    _resetTurbopackWarningForTesting();
+    const originalArgv = process.argv;
+    const originalEnvValue = process.env.TURBOPACK;
+    process.argv = [...originalArgv, "--webpack"];
+    process.env.TURBOPACK = "1"; // even with env set, --webpack wins
+
+    const warnSpy = vi.spyOn(globalThis.console, "warn").mockImplementation(() => {});
+
+    try {
+      withGlasstraceConfig({});
+      const turbopackWarnings = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === "string" && call[0].includes("Turbopack detected"),
+      );
+      expect(turbopackWarnings).toHaveLength(0);
+    } finally {
+      process.argv = originalArgv;
+      if (originalEnvValue === undefined) delete process.env.TURBOPACK;
+      else process.env.TURBOPACK = originalEnvValue;
+      warnSpy.mockRestore();
+    }
   });
 });
 

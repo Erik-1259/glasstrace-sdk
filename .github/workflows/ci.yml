@@ -71,6 +71,35 @@ jobs:
       - name: Build
         run: npm run build
 
+      # DISC-1255 regression guard: ensure the emitted SDK bundle does not
+      # contain any literal `import("@vercel/blob/client")` or
+      # `import("@vercel/otel")` calls. Those literals cause webpack / tsup /
+      # esbuild to resolve the specifier at build time and fail for consumers
+      # without the optional peer dependency installed. The SDK hides these
+      # specifiers behind a `Function("id", "return import(id)")` indirection
+      # so they must never appear as literal `import(...)` calls in shipped JS.
+      # The check intentionally only scans emitted JS (`.js` / `.cjs`) — source
+      # maps and `.d.ts` files legitimately reference the specifier.
+      - name: Check for bundled optional peer-dep specifiers
+        run: |
+          set -euo pipefail
+          violations=$(
+            grep -RhnE 'import\s*\(\s*["'\''](@vercel/blob/client|@vercel/otel)["'\'']\s*\)' \
+              packages/sdk/dist \
+              --include='*.js' --include='*.cjs' \
+              || true
+          )
+          if [ -n "$violations" ]; then
+            echo "::error::Literal import() of an optional peer dependency found in shipped bundle."
+            echo "This will break webpack/tsup/esbuild builds for consumers without the peer dep installed."
+            echo "Route the import through the Function()-based dynamic-import evasion helper instead. See DISC-1255."
+            echo ""
+            echo "Offending lines:"
+            echo "$violations"
+            exit 1
+          fi
+          echo "No literal optional-peer-dep import() calls found in shipped bundle."
+
       - name: Pack (verify publishable)
         run: |
           npm pack --dry-run --workspace=packages/protocol
@@ -189,3 +218,104 @@ jobs:
             if (typeof env !== 'object') throw new Error('readEnvVars failed');
             console.log('sdk: all imports OK');
           "
+
+  next-compat:
+    name: Next.js compatibility (webpack + Turbopack)
+    runs-on: ubuntu-latest
+    needs: test
+    # DISC-1255 and DISC-1256 regression coverage: scaffold a bare Next.js
+    # project, install the packed SDK tarball, apply `withGlasstraceConfig`
+    # to a minimal `next.config.ts`, and run `next build` in both the
+    # Turbopack-default path and the `--webpack` path. Both must exit 0.
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: corepack enable
+
+      - run: npm ci --no-audit
+
+      - name: Build packages
+        run: npm run build
+
+      - name: Pack tarballs
+        run: |
+          mkdir -p /tmp/packs
+          npm pack --workspace=packages/protocol --pack-destination /tmp/packs
+          npm pack --workspace=packages/sdk --pack-destination /tmp/packs
+
+      - name: Scaffold minimal Next.js app and install SDK
+        run: |
+          # Use a dedicated directory so cleanup is unambiguous even if a
+          # prior run left files behind (self-hosted runners, reused /tmp).
+          rm -rf /tmp/next-compat
+          mkdir /tmp/next-compat
+          cd /tmp/next-compat
+          npm init -y
+          # Mark the scaffold as an ES module so Turbopack does not reject
+          # the app/*.tsx files for mixing CJS and ESM syntax. `npm init -y`
+          # omits `"type"`, which defaults to CommonJS and breaks the
+          # Turbopack build pipeline.
+          node -e 'const fs=require("fs"); const p="package.json"; const j=JSON.parse(fs.readFileSync(p,"utf8")); j.type="module"; fs.writeFileSync(p, JSON.stringify(j, null, 2));'
+          # Pin next@canary for the Next 16 canary path (DISC-1255/DISC-1256
+          # both reproduced on 16.2.x-canary). React 19 is required by Next 16.
+          npm install next@canary react@19 react-dom@19 typescript@5 @types/react@19 @types/node@22
+          npm install /tmp/packs/glasstrace-protocol-*.tgz /tmp/packs/glasstrace-sdk-*.tgz
+          # Minimum-required tsconfig (copied from the create-next-app defaults
+          # that we actually use — paths, module resolution, jsx preserve).
+          cat > tsconfig.json <<'TSCONFIG'
+          {
+            "compilerOptions": {
+              "target": "ES2020",
+              "lib": ["dom", "dom.iterable", "esnext"],
+              "allowJs": true,
+              "skipLibCheck": true,
+              "strict": true,
+              "noEmit": true,
+              "esModuleInterop": true,
+              "module": "esnext",
+              "moduleResolution": "bundler",
+              "resolveJsonModule": true,
+              "isolatedModules": true,
+              "jsx": "preserve",
+              "incremental": true
+            },
+            "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+            "exclude": ["node_modules"]
+          }
+          TSCONFIG
+          cat > next.config.ts <<'NEXTCFG'
+          import type { NextConfig } from "next";
+          import { withGlasstraceConfig } from "@glasstrace/sdk";
+
+          const nextConfig: NextConfig = {
+            reactStrictMode: true,
+          };
+
+          export default withGlasstraceConfig(nextConfig);
+          NEXTCFG
+          mkdir -p app
+          cat > app/layout.tsx <<'LAYOUT'
+          export default function RootLayout({ children }: { children: React.ReactNode }) {
+            return (<html><body>{children}</body></html>);
+          }
+          LAYOUT
+          cat > app/page.tsx <<'PAGE'
+          export default function Page() { return <main>ok</main>; }
+          PAGE
+
+      - name: next build (Turbopack default, DISC-1256)
+        working-directory: /tmp/next-compat
+        run: npx next build
+
+      - name: next build --webpack (DISC-1255 + DISC-1256)
+        working-directory: /tmp/next-compat
+        run: npx next build --webpack
+
+      - name: Cleanup scaffold
+        if: always()
+        run: rm -rf /tmp/next-compat /tmp/packs
