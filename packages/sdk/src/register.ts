@@ -13,7 +13,7 @@ import * as otelApi from "@opentelemetry/api";
 import { installConsoleCapture, uninstallConsoleCapture, sdkLog } from "./console-capture.js";
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
-import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, setAuthState, emitLifecycleEvent, resetLifecycleForTesting } from "./lifecycle.js";
+import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, setAuthState, emitLifecycleEvent, registerSignalHandlers, resetLifecycleForTesting } from "./lifecycle.js";
 import { startRuntimeStateWriter, _resetRuntimeStateForTesting } from "./runtime-state.js";
 
 /** Mask an API key for safe event emission — shows prefix + last 4 chars. */
@@ -114,6 +114,39 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       console.info("[glasstrace] Not production-disabled.");
     }
 
+    // Synchronous probe for an existing OTel provider. Used both to gate
+    // the context manager installation below AND to decide whether to own
+    // SIGTERM / SIGINT signal handling. If another tracing tool (Datadog,
+    // Sentry, New Relic) has already registered a provider, the SDK must
+    // NOT claim the global context manager slot — doing so would break
+    // the other tool's context propagation. The ProxyTracer check is
+    // synchronous; it sees any provider installed before registerGlasstrace()
+    // was called (the standard instrumentation order).
+    const existingProbe = otelApi.trace.getTracerProvider().getTracer("glasstrace-probe");
+    const anotherProviderRegistered = existingProbe.constructor.name !== "ProxyTracer";
+
+    // Register SIGTERM/SIGINT handlers BEFORE any async work (DISC-1249),
+    // but ONLY when this SDK will own the provider (Scenario A, bare path).
+    // configureOtel() yields a tick and awaits the @vercel/otel probe;
+    // without an early handler a signal arriving in that window would find
+    // no coordinator and silently drop buffered spans.
+    //
+    // In coexistence mode (Scenario B) the existing provider already owns
+    // signal shutdown. Adding a second handler here would race against it:
+    // our handler re-raises the signal via process.kill() as soon as our
+    // (initially empty) hook list drains, which could terminate the
+    // process before the other provider's async flush completes. Instead,
+    // we rely on the coexistence beforeExit trigger wired inside
+    // configureOtel() plus the other provider's propagation of shutdown()
+    // into our injected BatchSpanProcessor.
+    //
+    // Registered AFTER the production check so PRODUCTION_DISABLED processes
+    // don't retain a handler that would log invalid-transition warnings if
+    // signaled.
+    if (!anotherProviderRegistered) {
+      registerSignalHandlers();
+    }
+
     // Determine auth mode
     const anonymous = isAnonymousMode(config);
     let effectiveKey: string | undefined = config.apiKey;
@@ -154,14 +187,6 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     setCoreState(CoreState.KEY_PENDING);
     const currentGeneration = registrationGeneration;
-
-    // Check for an existing OTel provider BEFORE installing the context
-    // manager. If another tracing tool (Datadog, Sentry, New Relic) has
-    // already registered a provider, the SDK must NOT claim the global
-    // context manager slot — doing so would break the other tool's
-    // context propagation. The ProxyTracer check is synchronous.
-    const existingProbe = otelApi.trace.getTracerProvider().getTracer("glasstrace-probe");
-    const anotherProviderRegistered = existingProbe.constructor.name !== "ProxyTracer";
 
     if (anotherProviderRegistered) {
       if (config.verbose) {
