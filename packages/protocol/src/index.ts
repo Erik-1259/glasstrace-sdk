@@ -64,3 +64,6 @@ export {
   GLASSTRACE_ATTRIBUTE_NAMES,
   DEFAULT_CAPTURE_CONFIG,
 } from "./constants.js";
+
+// --- Session ID derivation ---
+export { deriveSessionId } from "./session.js";
