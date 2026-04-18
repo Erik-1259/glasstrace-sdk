@@ -13,6 +13,7 @@ import {
   emitGuidanceMessage,
   tryAutoAttachGlasstraceProcessor,
 } from "./coexistence.js";
+import { setCoexistenceState, _resetCoexistenceStateForTesting } from "./signal-handler.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let _resolvedApiKey: string = API_KEY_PENDING;
@@ -74,6 +75,10 @@ export function resetOtelConfigForTesting(): void {
   _additionalExporters.length = 0;
   // Signal and beforeExit handler cleanup is handled by resetLifecycleForTesting()
   // via the shutdown coordinator.
+  // Reset coexistence state here as well so that test suites that call
+  // resetOtelConfigForTesting() without _resetRegistrationForTesting() do
+  // not leak coexistenceState ("coexisting" / "sole-owner") between tests.
+  _resetCoexistenceStateForTesting();
 }
 
 /**
@@ -142,11 +147,17 @@ export async function configureOtel(
   // when a Next.js 16 production build or a Sentry import has already
   // registered a provider, auto-attach our span processor onto it.
   if (anotherProviderRegistered) {
+    // Inform the signal handler that it should NOT re-raise — the existing
+    // provider owns signal-based shutdown (DISC-1265).
+    setCoexistenceState("coexisting");
     await runCoexistencePath(existingProvider, config);
     return;
   }
 
   // Step 4: No existing provider → registration path.
+  // Inform the signal handler that Glasstrace owns the provider and should
+  // re-raise after draining its hooks (DISC-1265).
+  setCoexistenceState("sole-owner");
   await runRegistrationPath(config, sessionManager);
 }
 
