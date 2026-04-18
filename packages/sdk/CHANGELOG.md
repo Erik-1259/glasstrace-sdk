@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.17.3
+
+### Patch Changes
+
+- 3827c9b: Register a lifecycle shutdown hook on the @vercel/otel path to flush buffered spans on SIGTERM (DISC-1263). @vercel/otel does not self-flush on process exit; this hook closes the gap.
+
 ## 0.17.2
 
 ### Patch Changes
