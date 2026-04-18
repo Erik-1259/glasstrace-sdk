@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
 import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import type { CaptureConfig } from "@glasstrace/protocol";
-import { GlasstraceExporter, API_KEY_PENDING } from "../../../packages/sdk/src/enriching-exporter.js";
+import { GlasstraceExporter, API_KEY_PENDING, extractLeadingPath } from "../../../packages/sdk/src/enriching-exporter.js";
 import { SessionManager } from "../../../packages/sdk/src/session.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 import * as consoleCapture from "../../../packages/sdk/src/console-capture.js";
@@ -189,6 +189,43 @@ describe("GlasstraceExporter", () => {
 
       const enriched = delegate.exportedSpans[0][0];
       expect(enriched.attributes[ATTR.ROUTE]).toBe("GET /health");
+    });
+
+    it("falls back to span name when http.route carries a non-string OTel value", () => {
+      // OTel's AttributeValue allows non-string shapes on any attribute
+      // (number, boolean, arrays). A custom instrumentation that emits
+      // http.route as e.g. a number must not disable Glasstrace
+      // enrichment for the span — the heuristic and route extractor
+      // would both throw on `.trim()`/`.startsWith()` if we accepted the
+      // cast at face value. Codex P2 on PR #156.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "GET /health",
+        attributes: { "http.route": 404 as unknown as string },
+      });
+      const callback = vi.fn();
+
+      exporter.export([span], callback);
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ROUTE]).toBe("GET /health");
+      // POST heuristic must also remain safe on a non-string route
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("survives an array-shaped http.route and keeps enrichment flowing", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "GET /health",
+        attributes: { "http.route": ["/a", "/b"] as unknown as string },
+      });
+      const callback = vi.fn();
+
+      exporter.export([span], callback);
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ROUTE]).toBe("GET /health");
+      expect(enriched.attributes[ATTR.HTTP_METHOD]).toBeUndefined();
     });
 
     it("enriches error spans with glasstrace.error.*", () => {
@@ -1790,6 +1827,345 @@ describe("GlasstraceExporter", () => {
 
       const enriched = delegate.exportedSpans[0][0];
       expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+    });
+  });
+
+  describe("Next.js Server Action heuristic (DISC-1253)", () => {
+    // Suppress the developer-facing stderr nudge so tests don't pollute
+    // test output or depend on nudge state. The heuristic behavior (the
+    // attribute) is independent of the nudge firing.
+    const ORIGINAL_SUPPRESS = process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+
+    beforeEach(() => {
+      process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE = "1";
+    });
+
+    afterEach(() => {
+      if (ORIGINAL_SUPPRESS === undefined) {
+        delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+      } else {
+        process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE = ORIGINAL_SUPPRESS;
+      }
+    });
+
+    it("flags POST /login as a Server Action (page route)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/login",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("flags POST /[locale]/login (parameterized page route)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/[locale]/login",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("does NOT flag POST /api/auth (API route prefix)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/api/auth",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag POST /api (exact-match API root)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/api",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag POST /_next/static/... (Next internal route)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/_next/static/chunks/foo.js",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag GET /login (non-POST)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.route": "/login",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag POST /apiary (lookalike page route is not /api/*)", () => {
+      // Regression guard against accidental prefix-match bugs — only
+      // exact "/api" or "/api/..." should be excluded.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/apiary",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      // "/apiary" is a legitimate page route, so it should be flagged.
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("uses http.route when present but falls back to span name for ROUTE", () => {
+      // Span name "POST /login" used as fallback when http.route is absent
+      // should still be recognized as a page route.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "/login",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("normalizes 'POST /login' span name (no http.route) as a page route", () => {
+      // Regression: when http.route is missing, route falls back to
+      // span.name which Next.js formats as "METHOD /path". The heuristic
+      // must extract the leading /path token before matching.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "POST /login",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("normalizes 'POST /api/auth' span name (no http.route) → NOT flagged", () => {
+      // Regression guard for Codex-flagged defect: before normalization,
+      // a span literally named "POST /api/auth" would slip past the
+      // `/api/` prefix check and get incorrectly tagged.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "POST /api/auth",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("normalizes 'middleware POST /login' span name → flagged", () => {
+      // Next.js also emits "middleware POST <path>" span names for
+      // middleware execution spans. The leading-path extractor walks
+      // tokens until it finds one starting with `/`.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "middleware POST /login",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("normalizes 'middleware POST /_next/data/...' → NOT flagged", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "middleware POST /_next/data/build-id/route.json",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag a span with no path-like token (e.g. plain 'POST')", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "POST",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("fires the nudge when heuristic matches AND correlation.id is absent", async () => {
+      // Clear the env-var silencer we set in beforeEach so we can observe
+      // the nudge, then reload the nudge module to clear the module-level
+      // hasFired guard.
+      delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+      delete process.env.NODE_ENV;
+      delete process.env.VERCEL_ENV;
+
+      const nudgeMod = await import("../../../packages/sdk/src/nudge/error-nudge.js");
+      nudgeMod.__resetNudgeStateForTests();
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+      try {
+        const { exporter } = createExporter();
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.route": "/login",
+            "http.status_code": 200,
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const calls = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((msg) => msg.includes("Server Action"));
+        expect(calls.length).toBe(1);
+        expect(calls[0]).toContain("glasstrace.dev/ext");
+      } finally {
+        stderrSpy.mockRestore();
+        nudgeMod.__resetNudgeStateForTests();
+      }
+    });
+
+    it("does NOT fire the nudge when correlation.id is present on the span", async () => {
+      delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+      delete process.env.NODE_ENV;
+      delete process.env.VERCEL_ENV;
+
+      const nudgeMod = await import("../../../packages/sdk/src/nudge/error-nudge.js");
+      nudgeMod.__resetNudgeStateForTests();
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+      try {
+        const { exporter } = createExporter();
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.route": "/login",
+            "http.status_code": 200,
+            "glasstrace.correlation.id": "cid_test_12345",
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const calls = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((msg) => msg.includes("Server Action"));
+        expect(calls.length).toBe(0);
+      } finally {
+        stderrSpy.mockRestore();
+        nudgeMod.__resetNudgeStateForTests();
+      }
+    });
+  });
+
+  describe("extractLeadingPath (DISC-1253 helper)", () => {
+    it("returns bare paths unchanged", () => {
+      expect(extractLeadingPath("/login")).toBe("/login");
+      expect(extractLeadingPath("/[locale]/login")).toBe("/[locale]/login");
+      expect(extractLeadingPath("/api/auth")).toBe("/api/auth");
+    });
+
+    it("strips a leading method token from 'METHOD /path' spans", () => {
+      expect(extractLeadingPath("POST /login")).toBe("/login");
+      expect(extractLeadingPath("GET /api/users")).toBe("/api/users");
+    });
+
+    it("walks to the first /-prefixed token in multi-word span names", () => {
+      expect(extractLeadingPath("middleware POST /login")).toBe("/login");
+      expect(extractLeadingPath("GET RSC /page")).toBe("/page");
+    });
+
+    it("returns undefined for empty, whitespace-only, or non-path inputs", () => {
+      expect(extractLeadingPath(undefined)).toBeUndefined();
+      expect(extractLeadingPath("")).toBeUndefined();
+      expect(extractLeadingPath("   ")).toBeUndefined();
+      expect(extractLeadingPath("POST")).toBeUndefined();
+      expect(extractLeadingPath("no path here")).toBeUndefined();
+    });
+
+    it("trims surrounding whitespace before parsing", () => {
+      expect(extractLeadingPath("  /login  ")).toBe("/login");
+      expect(extractLeadingPath("  POST /login  ")).toBe("/login");
     });
   });
 

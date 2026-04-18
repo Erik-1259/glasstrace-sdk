@@ -241,6 +241,21 @@ export type {
 export { captureError } from "./capture-error.js";
 
 /**
+ * Reads the `x-gt-cid` header from an incoming request and sets it as
+ * `glasstrace.correlation.id` on the active OTel span. Call it from a
+ * Next.js `middleware.ts` or a custom server request hook so Server
+ * Action traces can be correlated with Glasstrace browser extension data
+ * (DISC-1253).
+ */
+export { captureCorrelationId } from "./correlation-id.js";
+
+/**
+ * Request shape accepted by {@link captureCorrelationId}. Works with both
+ * Fetch-API `Request` / `NextRequest` and Node `IncomingMessage`.
+ */
+export type { CorrelationIdRequest } from "./correlation-id.js";
+
+/**
  * {@link discoverTestFiles} scans a project directory for test files matching
  * conventional patterns (`.test.ts`, `.spec.ts`) and custom vitest/jest config.
  *

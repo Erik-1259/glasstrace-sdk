@@ -7,6 +7,7 @@ import type { SessionManager } from "./session.js";
 import { classifyFetchTarget } from "./fetch-classifier.js";
 import { recordSpansExported, recordSpansDropped } from "./health-collector.js";
 import { sdkLog } from "./console-capture.js";
+import { maybeShowServerActionNudge } from "./nudge/error-nudge.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -173,7 +174,7 @@ export class GlasstraceExporter implements SpanExporter {
     try {
       const attrs = span.attributes ?? {};
       const name = span.name ?? "";
-      const extra: Record<string, string | number> = {};
+      const extra: Record<string, string | number | boolean> = {};
 
       // glasstrace.trace.type
       extra[ATTR.TRACE_TYPE] = "server";
@@ -197,8 +198,14 @@ export class GlasstraceExporter implements SpanExporter {
       }
 
       // glasstrace.route
-      const route =
-        (attrs["http.route"] as string | undefined) ?? name;
+      // OTel's AttributeValue allows non-string shapes (number, boolean,
+      // array) on `http.route`. A custom instrumentation could set a
+      // non-string there and blow up `.trim()` / `.startsWith()` calls
+      // below; guard with typeof so malformed route attributes fall back
+      // to `name` (always a string per OTel span contract) instead of
+      // disabling all enrichment for the span.
+      const rawRoute = attrs["http.route"];
+      const route = typeof rawRoute === "string" ? rawRoute : name;
       if (route) {
         extra[ATTR.ROUTE] = route;
       }
@@ -230,6 +237,36 @@ export class GlasstraceExporter implements SpanExporter {
         (attrs["http.request.method"] as string | undefined);
       if (method) {
         extra[ATTR.HTTP_METHOD] = method;
+      }
+
+      // glasstrace.next.action.detected — DISC-1253.
+      // Heuristic: a POST to a page route (not /api/*, not /_next/*) is
+      // almost always a Server Action in idiomatic Next.js App Router code.
+      // We cannot identify the specific action without extra metadata —
+      // DISC-1254 covers that path. Label "detected" not "confirmed" to
+      // leave room for rare false-positive cases (legacy form POSTs,
+      // hand-rolled page-route POST handlers).
+      //
+      // `route` may come from `http.route` (a bare path like "/login") or
+      // fall back to `span.name` (which Next.js formats as "POST /login",
+      // sometimes "middleware POST", etc.). We normalize to the leading
+      // path segment before matching so a span named "POST /api/auth"
+      // does not slip past the `/api/` guard and get falsely flagged.
+      const actionRoute = extractLeadingPath(route);
+      if (method === "POST" && actionRoute) {
+        const isApiRoute = actionRoute === "/api" || actionRoute.startsWith("/api/");
+        const isInternalRoute = actionRoute.startsWith("/_next/");
+        if (!isApiRoute && !isInternalRoute) {
+          extra[ATTR.NEXT_ACTION_DETECTED] = true;
+          // Developer-facing nudge (once per process): when a Server Action
+          // trace is detected but no glasstrace.correlation.id is present,
+          // the Glasstrace browser extension is likely absent. Installing it
+          // unlocks per-action identification via the Next-Action header
+          // (DISC-1254 covers capture).
+          if (typeof extra[ATTR.CORRELATION_ID] !== "string") {
+            maybeShowServerActionNudge();
+          }
+        }
       }
 
       // glasstrace.http.status_code
@@ -509,7 +546,7 @@ export class GlasstraceExporter implements SpanExporter {
  */
 function createEnrichedSpan(
   span: ReadableSpan,
-  extra: Record<string, string | number>,
+  extra: Record<string, string | number | boolean>,
 ): ReadableSpan {
   const enrichedAttributes = { ...span.attributes, ...extra };
   return Object.create(span, {
@@ -553,6 +590,39 @@ function getExceptionEventDetails(span: ReadableSpan): {
     type: typeof type === "string" ? type : undefined,
     message: typeof message === "string" ? message : undefined,
   };
+}
+
+/**
+ * Extracts the leading path from a route-or-span-name string so the
+ * Server Action heuristic (DISC-1253) can match reliably regardless of
+ * whether the value came from `http.route` (bare path, e.g. "/login")
+ * or from `span.name` (Next.js-formatted, e.g. "POST /login" or
+ * "middleware POST /login").
+ *
+ * Returns the first `/…`-prefixed token, or `undefined` if no such
+ * token is present. Empty input yields `undefined` so callers can use
+ * the result as a truthy guard.
+ */
+export function extractLeadingPath(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+
+  // Fast path: already a bare path.
+  if (trimmed.startsWith("/")) {
+    const firstSpace = trimmed.indexOf(" ");
+    return firstSpace === -1 ? trimmed : trimmed.slice(0, firstSpace);
+  }
+
+  // Fallback: scan for the first whitespace-separated token that looks
+  // like a path. Handles "POST /login", "middleware POST /login", etc.
+  for (const token of trimmed.split(/\s+/)) {
+    if (token.startsWith("/")) {
+      return token;
+    }
+  }
+
+  return undefined;
 }
 
 /**

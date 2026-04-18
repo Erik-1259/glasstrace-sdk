@@ -241,3 +241,163 @@ describe("maybeShowMcpNudge", () => {
     expect(stderrSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("maybeShowServerActionNudge (DISC-1253)", () => {
+  let originalEnv: NodeJS.ProcessEnv;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    originalEnv = { ...process.env };
+    stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    // Default to non-production so the nudge fires unless suppressed.
+    delete process.env.NODE_ENV;
+    delete process.env.VERCEL_ENV;
+    delete process.env.GLASSTRACE_FORCE_ENABLE;
+    delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    stderrSpy.mockRestore();
+  });
+
+  async function loadServerActionNudge() {
+    const mod = await import(
+      "../../../../packages/sdk/src/nudge/error-nudge.js"
+    );
+    return mod.maybeShowServerActionNudge as () => void;
+  }
+
+  it("fires a one-time stderr nudge with the documented message", async () => {
+    const nudge = await loadServerActionNudge();
+    nudge();
+
+    expect(stderrSpy).toHaveBeenCalledOnce();
+    const output = stderrSpy.mock.calls[0]![0] as string;
+    expect(output).toBe(
+      `[glasstrace] Detected a Next.js Server Action trace. Install the ` +
+        `Glasstrace browser extension to capture the Server Action identifier ` +
+        `for precise action-level debugging. https://glasstrace.dev/ext\n`,
+    );
+  });
+
+  it("dedupes within a process (second call is a no-op)", async () => {
+    const nudge = await loadServerActionNudge();
+    nudge();
+    nudge();
+    nudge();
+
+    expect(stderrSpy).toHaveBeenCalledOnce();
+  });
+
+  it("is silenced by GLASSTRACE_SUPPRESS_ACTION_NUDGE=1", async () => {
+    process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE = "1";
+    const nudge = await loadServerActionNudge();
+
+    nudge();
+
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire in NODE_ENV=production", async () => {
+    process.env.NODE_ENV = "production";
+    const nudge = await loadServerActionNudge();
+
+    nudge();
+
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire in VERCEL_ENV=production", async () => {
+    process.env.VERCEL_ENV = "production";
+    const nudge = await loadServerActionNudge();
+
+    nudge();
+
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it("fires in production when GLASSTRACE_FORCE_ENABLE=true", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.GLASSTRACE_FORCE_ENABLE = "true";
+    const nudge = await loadServerActionNudge();
+
+    nudge();
+
+    expect(stderrSpy).toHaveBeenCalledOnce();
+  });
+
+  it("uses process.stderr.write (not console.error)", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error");
+    const nudge = await loadServerActionNudge();
+
+    nudge();
+
+    expect(stderrSpy).toHaveBeenCalledOnce();
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("sets hasFiredServerAction on silencer path so subsequent calls fast-exit", async () => {
+    process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE = "1";
+    const nudge = await loadServerActionNudge();
+
+    nudge();
+    expect(stderrSpy).not.toHaveBeenCalled();
+
+    // Remove the silencer to prove the second call short-circuits via
+    // hasFiredServerAction rather than re-reading process.env.
+    delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+    nudge();
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("server-action nudge and MCP nudge are independent (DISC-1253)", () => {
+  let originalEnv: NodeJS.ProcessEnv;
+  let originalCwd: typeof process.cwd;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  let tempDir: string;
+
+  beforeEach(() => {
+    vi.resetModules();
+    originalEnv = { ...process.env };
+    originalCwd = process.cwd;
+    stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    tempDir = join(tmpdir(), `nudge-indep-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(tempDir, { recursive: true });
+
+    delete process.env.NODE_ENV;
+    delete process.env.VERCEL_ENV;
+    delete process.env.GLASSTRACE_FORCE_ENABLE;
+    delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+    process.cwd = () => tempDir;
+  });
+
+  afterEach(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } finally {
+      process.env = originalEnv;
+      process.cwd = originalCwd;
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("firing the server-action nudge does NOT consume the MCP nudge budget", async () => {
+    const mod = await import(
+      "../../../../packages/sdk/src/nudge/error-nudge.js"
+    );
+
+    mod.maybeShowServerActionNudge();
+    expect(stderrSpy).toHaveBeenCalledOnce();
+
+    mod.maybeShowMcpNudge("some error");
+    expect(stderrSpy).toHaveBeenCalledTimes(2);
+    const mcpOutput = stderrSpy.mock.calls[1]![0] as string;
+    expect(mcpOutput).toContain("[glasstrace] Error captured:");
+  });
+});
