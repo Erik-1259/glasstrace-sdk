@@ -1,5 +1,11 @@
 # @glasstrace/sdk
 
+## 0.18.0
+
+### Minor Changes
+
+- c4980aa: Coexistence-aware signal handler: always installed, re-raises only when not in coexistence mode (DISC-1265). Scenario B state is set synchronously before handler installation so signals arriving in the async setup window do not race against an existing provider's flush. Scenario B users now receive heartbeat telemetry on exit.
+
 ## 0.17.3
 
 ### Patch Changes
