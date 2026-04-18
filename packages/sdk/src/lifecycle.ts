@@ -535,10 +535,21 @@ export function getStatus(): {
 //   - Scenario A (bare path): register BOTH signal handlers AND
 //     beforeExit trigger. Signals cover SIGTERM/SIGINT, beforeExit
 //     covers clean event loop drain (all timers unref'd).
-//   - Scenario B (coexistence): register ONLY beforeExit trigger.
-//     The existing provider owns signals. beforeExit covers the edge
-//     case where the provider doesn't propagate shutdown on drain.
+//   - Scenario B (coexistence): the handler is ALWAYS installed (DISC-1265),
+//     but at signal-delivery time the coexistenceState flag controls whether
+//     to re-raise. When coexisting, the existing provider's handler owns
+//     process termination; Glasstrace runs its hooks and yields the signal.
+//     beforeExit is also registered in both paths for event-loop-drain exit.
+//
+// Coexistence state flag (DISC-1265):
+//   - Defaults to "unknown" until configureOtel() completes its async probe.
+//   - Set to "sole-owner" when Glasstrace owns the OTel provider (Scenarios A/E).
+//   - Set to "coexisting" when an external provider is detected (Scenarios B/D).
+//   - The signal handler reads this flag at DELIVERY time, not at install time,
+//     so a late-arriving provider detected by the async probe is always respected.
 // ---------------------------------------------------------------------------
+
+export type CoexistenceState = "unknown" | "sole-owner" | "coexisting";
 
 export interface ShutdownHook {
   name: string;
@@ -546,12 +557,39 @@ export interface ShutdownHook {
   fn: () => Promise<void>;
 }
 
+let _coexistenceState: CoexistenceState = "unknown";
 let _shutdownHooks: ShutdownHook[] = [];
 let _signalHandlersRegistered = false;
 let _signalHandler: ((signal: NodeJS.Signals) => void) | null = null;
 let _beforeExitRegistered = false;
 let _beforeExitHandler: (() => void) | null = null;
 let _shutdownExecuted = false;
+
+/**
+ * Returns the current coexistence state flag.
+ * Used by the signal handler to decide whether to re-raise the signal
+ * or yield process termination to an external OTel provider.
+ */
+export function getCoexistenceState(): CoexistenceState {
+  return _coexistenceState;
+}
+
+/**
+ * Update the coexistence state flag. Called by configureOtel() after
+ * its async provider probe completes.
+ *
+ * - "sole-owner": Glasstrace owns the OTel provider; the signal handler
+ *   will re-raise to terminate the process (Scenarios A and E).
+ * - "coexisting": an external OTel provider was detected; the signal
+ *   handler runs hooks then yields to the other provider's handler
+ *   (Scenarios B and D), unless no other handler is present (in which
+ *   case it re-raises to avoid a process-hang).
+ *
+ * Calling this with the same value is a no-op.
+ */
+export function setCoexistenceState(state: CoexistenceState): void {
+  _coexistenceState = state;
+}
 
 /**
  * Register a shutdown hook. Hooks are executed in priority order
@@ -605,8 +643,22 @@ export async function executeShutdown(timeoutMs = 5000): Promise<void> {
 
 /**
  * Register SIGTERM and SIGINT handlers that trigger the shutdown
- * coordinator. Called by the core lifecycle setup, not by individual
- * layers. Re-raises the signal after shutdown completes.
+ * coordinator. Always installed, regardless of coexistence mode (DISC-1265).
+ * The handler consults the coexistenceState flag at signal-DELIVERY time
+ * rather than at installation time, so a late-arriving provider detected
+ * by configureOtel()'s async probe is always respected.
+ *
+ * Signal-delivery behavior:
+ *   - Always runs executeShutdown() (heartbeat final-report hook included).
+ *   - "unknown" or "sole-owner": re-raises the signal to trigger default
+ *     process termination (Node kills the process).
+ *   - "coexisting": checks process.listenerCount(signal) at delivery time.
+ *     If another handler is present (count > 0 after removing ours), it
+ *     yields and lets the other handler own termination. If no other
+ *     handler remains, re-raises to prevent a process-hang — once
+ *     Glasstrace installs a listener, Node's built-in default termination
+ *     is suppressed, so yielding with no other handler would leave the
+ *     process running indefinitely.
  */
 export function registerSignalHandlers(): void {
   if (_signalHandlersRegistered) return;
@@ -616,11 +668,29 @@ export function registerSignalHandlers(): void {
 
   const handler = (signal: NodeJS.Signals) => {
     void executeShutdown().finally(() => {
-      // Remove our handler and re-raise the signal for default behavior
+      // Remove our listener first so the re-raise count check is accurate.
       if (_signalHandler) {
         process.removeListener("SIGTERM", _signalHandler);
         process.removeListener("SIGINT", _signalHandler);
       }
+
+      // Coexistence-aware re-raise decision (DISC-1265).
+      // Read the flag at delivery time — configureOtel()'s async probe may
+      // have updated it after this handler was installed.
+      if (_coexistenceState === "coexisting") {
+        // Check how many OTHER handlers are registered for this signal.
+        // If at least one remains, yield: the external provider's handler
+        // will run and own process termination.
+        // If none remain, re-raise to avoid a process-hang (Node's default
+        // termination is suppressed once any listener is installed).
+        const remainingListeners = process.listenerCount(signal);
+        if (remainingListeners > 0) {
+          // Another handler is present — yield to it.
+          return;
+        }
+        // No other handlers — fall through to re-raise to prevent hang.
+      }
+
       process.kill(process.pid, signal);
     });
   };
@@ -634,13 +704,11 @@ export function registerSignalHandlers(): void {
  * Register a beforeExit handler that triggers the shutdown coordinator.
  * beforeExit fires when the event loop drains (not on signals).
  *
- * For Scenario B (coexistence): the existing provider owns SIGTERM/SIGINT.
- * This trigger covers the edge case where the process exits without signals
- * (event loop drains naturally). The existing provider's MultiSpanProcessor
- * handles signal-based shutdown by propagating to our injected processor.
- *
- * Both signal handlers and beforeExit triggers call the same executeShutdown(),
- * which is idempotent — if signals already ran shutdown, beforeExit is a no-op.
+ * Registered in both Scenario A (bare) and Scenario B (coexistence) to
+ * cover the case where the process exits via event-loop drain rather than
+ * a signal. Both signal handlers and beforeExit triggers call the same
+ * executeShutdown(), which is idempotent — if one already ran shutdown,
+ * the other is a no-op.
  */
 export function registerBeforeExitTrigger(): void {
   if (_beforeExitRegistered) return;
@@ -669,6 +737,7 @@ export function resetLifecycleForTesting(): void {
   _coreState = CoreState.IDLE;
   _authState = AuthState.ANONYMOUS;
   _otelState = OtelState.UNCONFIGURED;
+  _coexistenceState = "unknown";
   _emitter.removeAllListeners();
   _emitter = new EventEmitter();
   _logger = null;

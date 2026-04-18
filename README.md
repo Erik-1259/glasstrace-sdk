@@ -160,6 +160,11 @@ When Glasstrace detects a pre-registered provider, it:
 3. Falls back to injecting into the provider's processor list for
    OTel SDK v2 (which removed `addSpanProcessor()`).
 4. Emits an informational log message identifying the auto-attach path.
+5. Installs its own SIGTERM/SIGINT handler unconditionally. In
+   coexistence mode the handler runs all Glasstrace shutdown hooks
+   (including the heartbeat final-report) and then yields signal
+   ownership to the existing provider's handler. Process termination
+   is owned by the existing provider.
 
 ### Manual Integration (recommended for Sentry)
 

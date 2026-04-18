@@ -7,7 +7,7 @@ import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
-import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger } from "./lifecycle.js";
+import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger, setCoexistenceState } from "./lifecycle.js";
 import {
   emitNudgeMessage,
   emitGuidanceMessage,
@@ -167,6 +167,11 @@ async function runCoexistencePath(
   existingProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
   config: ResolvedConfig,
 ): Promise<void> {
+  // Inform the signal handler that a coexisting provider was detected (DISC-1265).
+  // This is set before any early-return path so the flag is accurate regardless
+  // of whether processor attachment succeeds or fails.
+  setCoexistenceState("coexisting");
+
   // Attempt to auto-attach via the shared primitive.
   //
   // tryAutoAttachGlasstraceProcessor() performs its own "already present"
@@ -209,10 +214,10 @@ async function runCoexistencePath(
 
     // Register coexistence flush hook via the lifecycle coordinator, and
     // wire the beforeExit trigger so the coordinator runs on event loop drain.
-    // The existing provider handles signal-based shutdown (its MultiSpanProcessor
-    // propagates shutdown() to our injected processor). The beforeExit trigger
-    // covers the edge case where the process exits without signals. Both
-    // triggers (signals and beforeExit) call executeShutdown() which is
+    // Signal handlers are always installed (DISC-1265) and will run hooks
+    // then yield to the external provider's handler at delivery time.
+    // The beforeExit trigger covers the edge case where the process exits
+    // without signals. Both triggers call executeShutdown() which is
     // idempotent — if one already ran, the other is a no-op.
     registerShutdownHook({
       name: "coexistence-flush",
@@ -260,6 +265,11 @@ async function runRegistrationPath(
   config: ResolvedConfig,
   sessionManager: SessionManager,
 ): Promise<void> {
+  // Inform the signal handler that Glasstrace owns the provider (DISC-1265).
+  // At delivery time the handler will re-raise the signal to terminate
+  // the process after running shutdown hooks (Scenario A / E behaviour).
+  setCoexistenceState("sole-owner");
+
   // Build OTLP exporter configuration
   const exporterUrl = `${config.endpoint}/v1/traces`;
 
@@ -335,10 +345,10 @@ async function runRegistrationPath(
   otelApi.trace.setGlobalTracerProvider(provider);
 
   // Register OTel shutdown via lifecycle coordinator.
-  // Signal handlers are installed upfront by registerGlasstrace() so they
-  // exist during this async setup window (DISC-1249). beforeExit is still
-  // wired here because Scenario A owns the provider and the coexistence
-  // path registers its own beforeExit trigger independently.
+  // Signal handlers are installed upfront by registerGlasstrace() (DISC-1249,
+  // DISC-1265). By the time we reach here, coexistenceState is "sole-owner"
+  // so the handler will re-raise the signal after hooks complete. beforeExit
+  // is wired to cover the event-loop-drain exit path.
   registerShutdownHook({
     name: "otel-provider-shutdown",
     priority: 0,

@@ -125,27 +125,21 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     const existingProbe = otelApi.trace.getTracerProvider().getTracer("glasstrace-probe");
     const anotherProviderRegistered = existingProbe.constructor.name !== "ProxyTracer";
 
-    // Register SIGTERM/SIGINT handlers BEFORE any async work (DISC-1249),
-    // but ONLY when this SDK will own the provider (Scenario A, bare path).
-    // configureOtel() yields a tick and awaits the @vercel/otel probe;
+    // Register SIGTERM/SIGINT handlers BEFORE any async work (DISC-1249).
+    // The handler is always installed regardless of coexistence mode (DISC-1265).
+    // configureOtel() yields a tick and awaits the async provider probe;
     // without an early handler a signal arriving in that window would find
     // no coordinator and silently drop buffered spans.
     //
-    // In coexistence mode (Scenario B) the existing provider already owns
-    // signal shutdown. Adding a second handler here would race against it:
-    // our handler re-raises the signal via process.kill() as soon as our
-    // (initially empty) hook list drains, which could terminate the
-    // process before the other provider's async flush completes. Instead,
-    // we rely on the coexistence beforeExit trigger wired inside
-    // configureOtel() plus the other provider's propagation of shutdown()
-    // into our injected BatchSpanProcessor.
+    // The handler consults the coexistenceState flag at DELIVERY time
+    // (set by configureOtel() after its async probe), so it correctly
+    // handles both sole-owner (Scenario A/E, re-raise) and coexisting
+    // (Scenario B/D, run hooks then yield to the external provider's handler).
     //
     // Registered AFTER the production check so PRODUCTION_DISABLED processes
     // don't retain a handler that would log invalid-transition warnings if
     // signaled.
-    if (!anotherProviderRegistered) {
-      registerSignalHandlers();
-    }
+    registerSignalHandlers();
 
     // Determine auth mode
     const anonymous = isAnonymousMode(config);

@@ -8,13 +8,13 @@
  * dropped with no state transition and no warning.
  *
  * The fix moves signal handler registration to registerGlasstrace(),
- * synchronously — after the production-disabled check and the synchronous
- * provider probe, before the fire-and-forget configureOtel() call. Handlers
- * are installed ONLY when this SDK will own the OTel provider (Scenario A,
- * bare path). In coexistence mode (Scenario B) the existing provider
- * already owns signal shutdown; adding a second handler would race and
- * could terminate the process before the other provider's async flush
- * completes (see Codex review on #146).
+ * synchronously — after the production-disabled check and before the
+ * fire-and-forget configureOtel() call.
+ *
+ * DISC-1265 extended this further: handlers are now ALWAYS installed,
+ * regardless of coexistence mode. The handler consults the coexistenceState
+ * flag (set by configureOtel()'s async probe) at signal-delivery time to
+ * decide whether to re-raise the signal or yield to the external provider.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as lifecycle from "../../../packages/sdk/src/lifecycle.js";
@@ -192,12 +192,13 @@ describe("DISC-1249: signal handler timing during configureOtel() window", () =>
   });
 });
 
-describe("DISC-1249: registerGlasstrace() signal handler ownership", () => {
+describe("DISC-1249 / DISC-1265: registerGlasstrace() signal handler ownership", () => {
   // Verifies the wiring:
   //   - Scenario A (no existing provider): registerGlasstrace() installs
-  //     signal handlers synchronously.
-  //   - Scenario B (existing provider): registerGlasstrace() does NOT
-  //     install signal handlers — the existing provider owns them.
+  //     signal handlers synchronously (DISC-1249).
+  //   - Scenario B (existing provider): registerGlasstrace() ALSO installs
+  //     signal handlers synchronously (DISC-1265). The handler consults the
+  //     coexistenceState flag at delivery time to decide whether to re-raise.
   let killSpy: ReturnType<typeof vi.spyOn>;
 
   const initResponseJson = {
@@ -267,7 +268,7 @@ describe("DISC-1249: registerGlasstrace() signal handler ownership", () => {
     expect(signalSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("Scenario B: does NOT install signal handlers when an existing provider is registered", async () => {
+  it("Scenario B: installs signal handlers even when an existing provider is registered (DISC-1265)", async () => {
     const signalSpy = vi.spyOn(lifecycle, "registerSignalHandlers");
 
     // Seed the global OTel API with an existing (non-Proxy) provider so
@@ -299,9 +300,10 @@ describe("DISC-1249: registerGlasstrace() signal handler ownership", () => {
       environment: "test",
     });
 
-    // The existing provider owns signals — Glasstrace must not claim them.
-    expect(signalSpy).not.toHaveBeenCalled();
-    expect(process.listenerCount("SIGTERM")).toBe(sigTermBefore);
-    expect(process.listenerCount("SIGINT")).toBe(sigIntBefore);
+    // DISC-1265: handlers are always installed, even in Scenario B.
+    // The handler consults coexistenceState at delivery time — not here.
+    expect(signalSpy).toHaveBeenCalledTimes(1);
+    expect(process.listenerCount("SIGTERM") - sigTermBefore).toBe(1);
+    expect(process.listenerCount("SIGINT") - sigIntBefore).toBe(1);
   });
 });
