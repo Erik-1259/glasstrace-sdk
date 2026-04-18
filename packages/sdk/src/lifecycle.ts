@@ -8,13 +8,15 @@
  * The core layer provides a shared typed event emitter that other layers
  * and SDK modules use for cross-layer communication.
  *
- * This module has NO imports from other SDK modules. It accepts a logger
- * function via initLifecycle() to avoid circular dependencies.
+ * This module imports only from `./signal-handler.js`, which itself has no
+ * imports, so the dependency graph remains acyclic. The logger is still
+ * injected via initLifecycle() to avoid coupling to console-capture.
  *
  * @see docs/component-designs/sdk-lifecycle.md
  */
 
 import { EventEmitter } from "node:events";
+import { getCoexistenceState } from "./signal-handler.js";
 
 // ---------------------------------------------------------------------------
 // State Enums
@@ -535,9 +537,10 @@ export function getStatus(): {
 //   - Scenario A (bare path): register BOTH signal handlers AND
 //     beforeExit trigger. Signals cover SIGTERM/SIGINT, beforeExit
 //     covers clean event loop drain (all timers unref'd).
-//   - Scenario B (coexistence): register ONLY beforeExit trigger.
-//     The existing provider owns signals. beforeExit covers the edge
-//     case where the provider doesn't propagate shutdown on drain.
+//   - Scenario B (coexistence): signal handlers are ALWAYS installed
+//     (DISC-1265) but do NOT re-raise (coexistenceState="coexisting").
+//     The beforeExit trigger also fires for event-loop-drain exit.
+//     The existing provider owns signal re-raise and its own flush.
 // ---------------------------------------------------------------------------
 
 export interface ShutdownHook {
@@ -604,9 +607,13 @@ export async function executeShutdown(timeoutMs = 5000): Promise<void> {
 }
 
 /**
- * Register SIGTERM and SIGINT handlers that trigger the shutdown
- * coordinator. Called by the core lifecycle setup, not by individual
- * layers. Re-raises the signal after shutdown completes.
+ * Register SIGTERM and SIGINT handlers that trigger the shutdown coordinator.
+ * Always installed by registerGlasstrace(), regardless of whether another
+ * OTel provider exists (DISC-1265). The re-raise decision is deferred to
+ * delivery time: the handler checks coexistenceState (set by configureOtel()
+ * once its async provider probe completes) and only re-raises when NOT
+ * "coexisting". In coexistence mode, hooks still run but the existing
+ * provider is responsible for re-raising the signal.
  */
 export function registerSignalHandlers(): void {
   if (_signalHandlersRegistered) return;
@@ -614,14 +621,43 @@ export function registerSignalHandlers(): void {
 
   _signalHandlersRegistered = true;
 
+  // Snapshot listener counts BEFORE we install our own handlers. A non-zero
+  // count means another party (Sentry, Datadog, the existing provider) already
+  // owns SIGTERM/SIGINT and will re-raise when it is done flushing. Zero means
+  // nobody else handles the signal — if we don't re-raise, the process hangs.
+  // This check is needed because `coexistenceState === "coexisting"` only tells
+  // us that ANOTHER OTEL PROVIDER exists, not that it installed signal handlers.
+  // A bare BasicTracerProvider has no signal handlers, so we must still re-raise.
+  const otherSigtermListeners = process.listenerCount("SIGTERM");
+  const otherSigintListeners = process.listenerCount("SIGINT");
+
   const handler = (signal: NodeJS.Signals) => {
     void executeShutdown().finally(() => {
-      // Remove our handler and re-raise the signal for default behavior
+      // Remove our handler to avoid re-entry on re-raise.
       if (_signalHandler) {
         process.removeListener("SIGTERM", _signalHandler);
         process.removeListener("SIGINT", _signalHandler);
       }
-      process.kill(process.pid, signal);
+      // Re-raise the signal to restore default OS behavior UNLESS we are in
+      // coexistence mode AND the other provider had its own signal handlers at
+      // registration time. When both conditions hold, that provider owns signal
+      // re-raise and will terminate the process on its own schedule; re-raising
+      // here would race against its async flush and could kill the process
+      // before buffered spans are delivered.
+      //
+      // When coexisting but NO pre-existing signal listeners were detected, we
+      // must still re-raise — the other provider (e.g. a bare BasicTracerProvider)
+      // has no signal ownership, so OS default termination will not happen
+      // otherwise and the process would hang indefinitely.
+      //
+      // During the async-window ("unknown"), re-raise is the safe default because
+      // it preserves standard process termination semantics when we have no
+      // information about provider ownership.
+      const otherListeners = signal === "SIGTERM" ? otherSigtermListeners : otherSigintListeners;
+      const otherProviderOwnsSignal = getCoexistenceState() === "coexisting" && otherListeners > 0;
+      if (!otherProviderOwnsSignal) {
+        process.kill(process.pid, signal);
+      }
     });
   };
 
@@ -634,10 +670,10 @@ export function registerSignalHandlers(): void {
  * Register a beforeExit handler that triggers the shutdown coordinator.
  * beforeExit fires when the event loop drains (not on signals).
  *
- * For Scenario B (coexistence): the existing provider owns SIGTERM/SIGINT.
- * This trigger covers the edge case where the process exits without signals
- * (event loop drains naturally). The existing provider's MultiSpanProcessor
- * handles signal-based shutdown by propagating to our injected processor.
+ * For Scenario B (coexistence): Glasstrace installs signal handlers (DISC-1265)
+ * but does not re-raise — the existing provider owns signal re-raise. This
+ * beforeExit trigger covers the edge case where the process exits without
+ * signals (event loop drains naturally).
  *
  * Both signal handlers and beforeExit triggers call the same executeShutdown(),
  * which is idempotent — if signals already ran shutdown, beforeExit is a no-op.

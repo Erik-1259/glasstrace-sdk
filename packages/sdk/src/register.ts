@@ -14,6 +14,7 @@ import { installConsoleCapture, uninstallConsoleCapture, sdkLog } from "./consol
 import { collectHealthReport, _resetHealthForTesting } from "./health-collector.js";
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
 import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, setAuthState, emitLifecycleEvent, registerSignalHandlers, resetLifecycleForTesting } from "./lifecycle.js";
+import { setCoexistenceState } from "./signal-handler.js";
 import { startRuntimeStateWriter, _resetRuntimeStateForTesting } from "./runtime-state.js";
 
 /** Mask an API key for safe event emission — shows prefix + last 4 chars. */
@@ -114,9 +115,8 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       console.info("[glasstrace] Not production-disabled.");
     }
 
-    // Synchronous probe for an existing OTel provider. Used both to gate
-    // the context manager installation below AND to decide whether to own
-    // SIGTERM / SIGINT signal handling. If another tracing tool (Datadog,
+    // Synchronous probe for an existing OTel provider. Used to gate
+    // context manager installation below. If another tracing tool (Datadog,
     // Sentry, New Relic) has already registered a provider, the SDK must
     // NOT claim the global context manager slot — doing so would break
     // the other tool's context propagation. The ProxyTracer check is
@@ -125,27 +125,36 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     const existingProbe = otelApi.trace.getTracerProvider().getTracer("glasstrace-probe");
     const anotherProviderRegistered = existingProbe.constructor.name !== "ProxyTracer";
 
-    // Register SIGTERM/SIGINT handlers BEFORE any async work (DISC-1249),
-    // but ONLY when this SDK will own the provider (Scenario A, bare path).
+    // When another provider is already present, set coexistenceState BEFORE
+    // installing the signal handler. Without this, the handler would see
+    // "unknown" during the configureOtel() async tick/probe window and would
+    // re-raise the signal — terminating the process before the existing
+    // provider's async flush completes (Codex review on #168).
+    //
+    // configureOtel() calls setCoexistenceState() again after its own async
+    // probe for precision (e.g. a new provider appears in that tick window),
+    // but the synchronous probe is authoritative for any signal arriving
+    // between registerGlasstrace() returning and configureOtel() completing.
+    if (anotherProviderRegistered) {
+      setCoexistenceState("coexisting");
+    }
+
+    // Register SIGTERM/SIGINT handlers BEFORE any async work (DISC-1249).
     // configureOtel() yields a tick and awaits the @vercel/otel probe;
     // without an early handler a signal arriving in that window would find
     // no coordinator and silently drop buffered spans.
     //
-    // In coexistence mode (Scenario B) the existing provider already owns
-    // signal shutdown. Adding a second handler here would race against it:
-    // our handler re-raises the signal via process.kill() as soon as our
-    // (initially empty) hook list drains, which could terminate the
-    // process before the other provider's async flush completes. Instead,
-    // we rely on the coexistence beforeExit trigger wired inside
-    // configureOtel() plus the other provider's propagation of shutdown()
-    // into our injected BatchSpanProcessor.
+    // The handler is now always installed regardless of whether another
+    // provider exists (DISC-1265). Whether the signal is re-raised after our
+    // hooks drain is decided at delivery time by checking coexistenceState:
+    //   - "unknown"     → re-raise (safe default during the startup window)
+    //   - "sole-owner"  → re-raise (Glasstrace owns the provider)
+    //   - "coexisting"  → do NOT re-raise (existing provider owns shutdown)
     //
     // Registered AFTER the production check so PRODUCTION_DISABLED processes
     // don't retain a handler that would log invalid-transition warnings if
     // signaled.
-    if (!anotherProviderRegistered) {
-      registerSignalHandlers();
-    }
+    registerSignalHandlers();
 
     // Determine auth mode
     const anonymous = isAnonymousMode(config);
@@ -477,7 +486,7 @@ export function _resetRegistrationForTesting(): void {
   _resetHealthForTesting();
   _resetHeartbeatForTesting();
   uninstallConsoleCapture();
-  resetOtelConfigForTesting();
+  resetOtelConfigForTesting(); // also resets coexistenceState via signal-handler
   _resetRuntimeStateForTesting();
   _sessionManager = null;
   resetLifecycleForTesting();
