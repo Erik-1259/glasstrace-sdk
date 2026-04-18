@@ -287,14 +287,14 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
     }
   });
 
-  it("returns null when there is no anon key on disk (no verification needed)", async () => {
+  it("reports 'skipped' when there is no anon key on disk (no verification needed)", async () => {
     const dir = createTmpProject();
     // No .glasstrace/anon_key yet.
     const result = await verifyAnonKeyRegistration(dir);
-    expect(result).toBeNull();
+    expect(result).toEqual({ outcome: "skipped" });
   });
 
-  it("returns null on successful server verification", async () => {
+  it("reports 'verified' on successful server verification", async () => {
     const dir = createTmpProject();
     fs.mkdirSync(path.join(dir, ".glasstrace"));
     fs.writeFileSync(
@@ -311,10 +311,10 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
     );
 
     const result = await verifyAnonKeyRegistration(dir);
-    expect(result).toBeNull();
+    expect(result).toEqual({ outcome: "verified" });
   });
 
-  it("returns a 'server rejected' error on HTTP 4xx", async () => {
+  it("reports 'failed' with a 'server rejected' error on HTTP 4xx", async () => {
     const dir = createTmpProject();
     fs.mkdirSync(path.join(dir, ".glasstrace"));
     fs.writeFileSync(
@@ -329,12 +329,13 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
     );
 
     const result = await verifyAnonKeyRegistration(dir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("server rejected");
-    expect(result).toContain("HTTP 401");
+    expect(result.outcome).toBe("failed");
+    if (result.outcome !== "failed") return;
+    expect(result.error).toContain("server rejected");
+    expect(result.error).toContain("HTTP 401");
   });
 
-  it("returns a 'fetch failed' error on transport failure", async () => {
+  it("reports 'failed' with a 'fetch failed' error on transport failure", async () => {
     const dir = createTmpProject();
     fs.mkdirSync(path.join(dir, ".glasstrace"));
     fs.writeFileSync(
@@ -349,11 +350,16 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
     );
 
     const result = await verifyAnonKeyRegistration(dir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("fetch failed");
+    expect(result.outcome).toBe("failed");
+    if (result.outcome !== "failed") return;
+    expect(result.error).toContain("fetch failed");
+    // Must render as `fetch failed: <reason>` exactly once — never
+    // `fetch failed (fetch failed: ...)` or `fetch failed: fetch failed: ...`.
+    expect(result.error).not.toMatch(/fetch failed.*fetch failed/);
+    expect(result.error).toContain("EHOSTUNREACH");
   });
 
-  it("returns a 'malformed response' error on HttpsBodyParseError", async () => {
+  it("reports 'failed' with a 'malformed response' error on HttpsBodyParseError", async () => {
     const dir = createTmpProject();
     fs.mkdirSync(path.join(dir, ".glasstrace"));
     fs.writeFileSync(
@@ -368,8 +374,9 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
     );
 
     const result = await verifyAnonKeyRegistration(dir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("malformed response");
+    expect(result.outcome).toBe("failed");
+    if (result.outcome !== "failed") return;
+    expect(result.error).toContain("malformed response");
   });
 
   it("surfaces the three error classes as distinct, user-actionable messages", async () => {
@@ -387,7 +394,9 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
       }) as never,
     );
     const transport = await verifyAnonKeyRegistration(dir);
-    expect(transport).toContain("fetch failed");
+    expect(transport.outcome).toBe("failed");
+    if (transport.outcome !== "failed") return;
+    expect(transport.error).toContain("fetch failed");
 
     // Class 2: status
     _setTransportForTesting(
@@ -396,7 +405,9 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
       }) as never,
     );
     const rejected = await verifyAnonKeyRegistration(dir);
-    expect(rejected).toContain("server rejected");
+    expect(rejected.outcome).toBe("failed");
+    if (rejected.outcome !== "failed") return;
+    expect(rejected.error).toContain("server rejected");
 
     // Class 3: parse
     _setTransportForTesting(
@@ -405,9 +416,60 @@ describe("verifyAnonKeyRegistration — direct function tests", () => {
       }) as never,
     );
     const malformed = await verifyAnonKeyRegistration(dir);
-    expect(malformed).toContain("malformed response");
+    expect(malformed.outcome).toBe("failed");
+    if (malformed.outcome !== "failed") return;
+    expect(malformed.error).toContain("malformed response");
 
     // All three distinguishable.
-    expect(new Set([transport, rejected, malformed]).size).toBe(3);
+    expect(
+      new Set([transport.error, rejected.error, malformed.error]).size,
+    ).toBe(3);
+  });
+
+  it("does not authenticate with process.env.GLASSTRACE_API_KEY when .env.local has no dev key (Codex P1)", async () => {
+    // Regression: when no dev key is on disk, `devKey` is undefined.
+    // `resolveConfig` would otherwise fall back to the shell's
+    // GLASSTRACE_API_KEY, causing verification to run with an unrelated
+    // stale key and report a false `exitCode: 2` server-rejected failure
+    // even though anon registration is valid.
+    const dir = createTmpProject();
+    fs.mkdirSync(path.join(dir, ".glasstrace"));
+    fs.writeFileSync(
+      path.join(dir, ".glasstrace", "anon_key"),
+      "gt_anon_" + "f".repeat(48),
+    );
+
+    const previousShellKey = process.env["GLASSTRACE_API_KEY"];
+    process.env["GLASSTRACE_API_KEY"] = "gt_dev_SHELL_STALE_KEY";
+
+    let capturedAuth: string | undefined;
+    let capturedBody: Record<string, unknown> | undefined;
+    _setTransportForTesting(
+      vi.fn(async (_url, body, options): Promise<HttpsPostJsonResult> => {
+        capturedAuth = (options as { headers: Record<string, string> }).headers[
+          "Authorization"
+        ];
+        capturedBody = body as Record<string, unknown>;
+        return { status: 200, body: SUCCESS_RESPONSE, raw: "" };
+      }) as never,
+    );
+
+    try {
+      const result = await verifyAnonKeyRegistration(dir);
+      expect(result).toEqual({ outcome: "verified" });
+      // Authorization header must be the anon key, not the shell dev key.
+      expect(capturedAuth).toBe("Bearer gt_anon_" + "f".repeat(48));
+      expect(capturedAuth).not.toContain("SHELL_STALE_KEY");
+      // `anonKey` field should NOT be set in the payload because the
+      // effective key IS the anon key — `sendInitRequest` only sets
+      // `anonKey` when config.apiKey is a dev key (straggler linking).
+      expect(capturedBody?.["anonKey"]).toBeUndefined();
+    } finally {
+      if (previousShellKey === undefined) {
+        delete process.env["GLASSTRACE_API_KEY"];
+      } else {
+        process.env["GLASSTRACE_API_KEY"] = previousShellKey;
+      }
+    }
   });
 });

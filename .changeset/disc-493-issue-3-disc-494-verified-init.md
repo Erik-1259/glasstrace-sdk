@@ -3,10 +3,10 @@
 ---
 
 Bypass Next.js 16's patched `fetch` for `/v1/sdk/init` using `node:https`
-directly, and verify anon-key registration during CLI `sdk init` instead
-of relying on runtime fire-and-forget. Resolves the silent init-hang
-(DISC-493 Issue 3) and the silently-unlinked anon-key (DISC-494) in one
-PR.
+directly, and verify anon-key registration during CLI `glasstrace init`
+instead of relying on runtime fire-and-forget. Resolves the silent
+init-hang (DISC-493 Issue 3) and the silently-unlinked anon-key
+(DISC-494) in one PR.
 
 - The SDK now issues its init request via `node:https`, with a 10-second
   per-request timeout, 500 ms + 1500 ms retry backoff on transport

@@ -283,9 +283,14 @@ function sendSingleRequest(
     };
 
     let settled = false;
+    // Hoisted so every settle path can clear the manual timer and drop
+    // the optional abort listener. Assigned below once `req`, `timer`,
+    // and `onAbort` exist.
+    let cleanup = (): void => {};
     const settle = (fn: () => void): void => {
       if (settled) return;
       settled = true;
+      cleanup();
       fn();
     };
 
@@ -330,13 +335,31 @@ function sendSingleRequest(
     // Don't block process exit while the timer is running.
     if (typeof timer.unref === "function") timer.unref();
 
-    req.on("error", (err) => {
+    // Hoisted so `cleanup` can remove it on settle. Only registered
+    // on the signal below when `signal !== undefined`.
+    const onAbort = (): void => {
+      settle(() => {
+        req.destroy(new Error("Aborted"));
+        reject(new HttpsTransportError("Request aborted"));
+      });
+    };
+
+    // Install cleanup now that `timer` and `onAbort` exist. Invoked by
+    // every settle path (success, status-error, parse-error, transport
+    // error, timeout, abort) to clear the manual timer and drop the
+    // abort listener so long-lived signals don't accumulate listeners.
+    cleanup = (): void => {
       clearTimeout(timer);
+      if (signal !== undefined) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
+
+    req.on("error", (err) => {
       settle(() => reject(new HttpsTransportError(`fetch failed: ${err.message}`, err)));
     });
 
     req.on("timeout", () => {
-      clearTimeout(timer);
       settle(() => {
         req.destroy(new Error("Request timed out"));
         reject(new HttpsTransportError(`Request timed out after ${timeoutMs}ms`));
@@ -345,20 +368,13 @@ function sendSingleRequest(
 
     if (signal !== undefined) {
       if (signal.aborted) {
-        clearTimeout(timer);
         req.destroy(new Error("Aborted"));
         settle(() => reject(new HttpsTransportError("Request aborted")));
         return;
       }
-      const onAbort = (): void => {
-        clearTimeout(timer);
-        req.destroy(new Error("Aborted"));
-        settle(() => reject(new HttpsTransportError("Request aborted")));
-      };
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    // `end` clears the pending timer only on success via the settle path.
     req.end(payload);
   });
 }
@@ -367,6 +383,10 @@ function sendSingleRequest(
  * Delay helper that honors an AbortSignal. We cannot use `setTimeout`'s
  * built-in `signal` option because it is not available in older Node 20
  * patch releases (added in 20.6).
+ *
+ * Both settle paths (timer fires, signal aborts) clear the pending
+ * timer and remove the abort listener so this helper remains leak-free
+ * under heavy retry/abort usage.
  */
 function sleep(
   ms: number,
@@ -374,13 +394,30 @@ function sleep(
   signal: AbortSignal | undefined,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    // Forward-declared so `settle` below can reference it. Assigned
+    // once `timer` exists.
+    let cleanup = (): void => {};
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+    const onAbort = (): void => {
+      settle(() => reject(new HttpsTransportError("Request aborted")));
+    };
     const timer = scheduler(() => {
-      if (signal !== undefined) signal.removeEventListener("abort", onAbort);
-      resolve();
+      settle(resolve);
     }, ms);
     if (typeof timer.unref === "function") timer.unref();
-    const onAbort = (): void => {
-      reject(new HttpsTransportError("Request aborted"));
+    cleanup = (): void => {
+      // `scheduler` returns whatever `setTimeout` returns (NodeJS.Timeout
+      // in Node, number in jsdom). Both are accepted by `clearTimeout`.
+      clearTimeout(timer as unknown as NodeJS.Timeout);
+      if (signal !== undefined) {
+        signal.removeEventListener("abort", onAbort);
+      }
     };
     if (signal !== undefined) {
       if (signal.aborted) {

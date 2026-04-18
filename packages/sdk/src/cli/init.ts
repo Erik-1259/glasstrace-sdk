@@ -634,15 +634,42 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
 
   if (!skipVerify && !isCI) {
     const verifyResult = await verifyAnonKeyRegistration(projectRoot);
-    if (verifyResult !== null) {
-      errors.push(verifyResult);
+    if (verifyResult.outcome === "failed") {
+      errors.push(verifyResult.error);
       return { exitCode: 2, summary, warnings, errors };
     }
-    summary.push("Verified anon key registration with Glasstrace API");
+    if (verifyResult.outcome === "verified") {
+      summary.push("Verified anon key registration with Glasstrace API");
+    } else {
+      // "skipped": no anon key on disk means MCP auto-configuration
+      // failed earlier (a warning was already emitted). Reporting
+      // "Verified ..." here would misrepresent the state of setup —
+      // a verification request was never even sent.
+      summary.push("Skipped anon key verification (no anon key on disk)");
+    }
   }
 
   return { exitCode: 0, summary, warnings, errors };
 }
+
+/**
+ * Outcome of {@link verifyAnonKeyRegistration}:
+ *
+ * - `"verified"` — the server registered the anon key (HTTP 2xx with a
+ *   schema-valid response body).
+ * - `"skipped"` — no anon key was on disk, so no verification request
+ *   was sent. Typically means MCP auto-configuration failed earlier
+ *   (warnings were already emitted) — distinct from a verification
+ *   success.
+ * - `"failed"` — the verification request was sent and failed.
+ *   `error` is a user-facing message distinguishing the failure class
+ *   (`fetch failed: ...`, `server rejected the key ...`, or
+ *   `server returned malformed response ...`) with no anon key bytes.
+ */
+export type VerifyAnonKeyOutcome =
+  | { outcome: "verified" }
+  | { outcome: "skipped" }
+  | { outcome: "failed"; error: string };
 
 /**
  * Verifies that the anonymous key written by init is registered
@@ -651,8 +678,9 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
  * "initialized successfully" followed by silent MCP authentication
  * failures (DISC-494).
  *
- * Returns `null` on success, or an error message string on failure.
- * The error message distinguishes three classes:
+ * Returns a discriminated outcome so the CLI can distinguish a genuine
+ * verification pass from the "no anon key on disk" skip case. On
+ * failure the error message distinguishes three classes:
  *   - "fetch failed" — transport error (DNS, TCP, TLS, timeout)
  *   - "server rejected the key" — HTTP 4xx/5xx
  *   - "server returned malformed response" — HTTP 2xx with unparseable
@@ -666,16 +694,17 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
  */
 export async function verifyAnonKeyRegistration(
   projectRoot: string,
-): Promise<string | null> {
+): Promise<VerifyAnonKeyOutcome> {
   // Read env the same way the runtime would — scaffoldEnvLocal may have
   // written GLASSTRACE_API_KEY=gt_anon_..., so prefer the generated
   // anon key on disk as the authoritative value to verify.
   const anonKey = await readAnonKey(projectRoot);
   if (anonKey === null) {
-    // No anon key on disk means MCP wasn't configured. Silently skip
+    // No anon key on disk means MCP wasn't configured. Skip
     // verification — this is a partial install, not a verification
-    // failure. The init flow already emitted warnings above.
-    return null;
+    // failure. The init flow already emitted warnings above. Report
+    // "skipped" so the caller doesn't claim verification succeeded.
+    return { outcome: "skipped" };
   }
 
   // Load the dev key from .env.local if present (for straggler linking)
@@ -701,23 +730,45 @@ export async function verifyAnonKeyRegistration(
     // Ignore — fall through to anon-only verification.
   }
 
-  const config = resolveConfig({ apiKey: devKey });
+  // Resolve endpoint / environment from the user's shell, then pin
+  // `apiKey` to whatever we read from .env.local. `resolveConfig` uses
+  // `??` to fall back to `process.env.GLASSTRACE_API_KEY` when the
+  // option is undefined, which would cause verification to authenticate
+  // with an unrelated stale key in shells that export
+  // `GLASSTRACE_API_KEY` — producing false "server rejected" failures
+  // even when the freshly generated anon key is valid. The explicit
+  // override keeps verification tied to disk state.
+  const baseConfig = resolveConfig({ apiKey: devKey });
+  const config = { ...baseConfig, apiKey: devKey };
   const sdkVersion = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
 
   const result: VerifyInitResult = await verifyInitReachable(config, anonKey, sdkVersion);
 
   if (result.ok) {
-    return null;
+    return { outcome: "verified" };
   }
 
   const hint = "Run 'npx glasstrace status' or 'npx glasstrace doctor' to diagnose.";
   switch (result.reason) {
     case "transport":
-      return `Glasstrace init verification failed: fetch failed (${result.detail}). ${hint}`;
+      // `result.detail` is the raw cause with any leading `fetch failed: `
+      // stripped by verifyInitReachable. Format once here so the output
+      // matches the documented `fetch failed: <reason>` shape and never
+      // renders `fetch failed (fetch failed: ...)`.
+      return {
+        outcome: "failed",
+        error: `Glasstrace init verification failed: fetch failed: ${result.detail}. ${hint}`,
+      };
     case "rejected":
-      return `Glasstrace init verification failed: server rejected the key (HTTP ${result.status}). ${hint}`;
+      return {
+        outcome: "failed",
+        error: `Glasstrace init verification failed: server rejected the key (HTTP ${result.status}). ${hint}`,
+      };
     case "malformed":
-      return `Glasstrace init verification failed: server returned malformed response. ${hint}`;
+      return {
+        outcome: "failed",
+        error: `Glasstrace init verification failed: server returned malformed response. ${hint}`,
+      };
   }
 }
 

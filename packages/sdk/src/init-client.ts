@@ -411,9 +411,11 @@ export async function performInit(
       return null;
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), INIT_TIMEOUT_MS);
-
+    // No outer AbortController timeout: `httpsPostJson` enforces a
+    // per-attempt timeout (INIT_TIMEOUT_MS = 10s) AND a 20s total
+    // deadline across retries. An outer 10s abort would race the first
+    // attempt's own timeout and prevent the backoff-retry window from
+    // ever running, defeating the transport's retry behavior.
     try {
       // Delegate to sendInitRequest to avoid duplicating fetch logic
       const result = await sendInitRequest(
@@ -423,10 +425,7 @@ export async function performInit(
         undefined,
         healthReport ?? undefined,
         undefined,
-        controller.signal,
       );
-
-      clearTimeout(timeoutId);
 
       // Update in-memory config
       currentConfig = result;
@@ -452,18 +451,11 @@ export async function performInit(
 
       return null;
     } catch (err) {
-      clearTimeout(timeoutId);
       recordInitFailure();
 
-      if (err instanceof DOMException && err.name === "AbortError") {
-        console.warn("[glasstrace] ingestion_unreachable: Init request timed out.");
-        return null;
-      }
-
       // HttpsTransportError covers DNS/TCP/TLS/timeout from the
-      // node:https transport. The abort-triggered timeout raised by
-      // the AbortController above is also surfaced as a transport error
-      // because `httpsPostJson` honors the signal.
+      // node:https transport itself — `httpsPostJson` raises timeouts
+      // via this error class when its internal deadlines expire.
       if (err instanceof HttpsTransportError) {
         if (/timed out|aborted/i.test(err.message)) {
           console.warn("[glasstrace] ingestion_unreachable: Init request timed out.");
@@ -643,6 +635,9 @@ export function didLastInitSucceed(): boolean {
  *   compliant payload. The anon key (if any) is registered server-side.
  * - `ok: false` with `reason: "transport"` — DNS/TCP/TLS/timeout failure.
  *   No response reached the server (or couldn't be parsed off the wire).
+ *   `detail` is the raw cause (e.g. "ECONNREFUSED") with any leading
+ *   `fetch failed: ` prefix stripped; callers that render to the user
+ *   should add the prefix themselves to avoid doubling it.
  * - `ok: false` with `reason: "rejected"` — HTTP 4xx/5xx status. The
  *   server received the call but declined it. `status` is set.
  * - `ok: false` with `reason: "malformed"` — HTTP 2xx but the body was
@@ -702,9 +697,16 @@ export async function verifyInitReachable(
     }
 
     // Everything else (transport errors, timeouts, abort, unknown) is
-    // classified as transport. Default message is stable for test
-    // assertions.
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, reason: "transport", detail: `fetch failed: ${message}` };
+    // classified as transport. `detail` is the raw cause without a
+    // `fetch failed:` prefix so the CLI (the only caller that renders
+    // this) can format it as `fetch failed: <detail>` without risking
+    // the double-prefix that would occur when the underlying error
+    // already starts with `fetch failed:` (e.g., `HttpsTransportError`
+    // from `sendSingleRequest`).
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const detail = rawMessage.startsWith("fetch failed: ")
+      ? rawMessage.slice("fetch failed: ".length)
+      : rawMessage;
+    return { ok: false, reason: "transport", detail };
   }
 }
