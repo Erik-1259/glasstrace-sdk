@@ -7,6 +7,7 @@ import type { SessionManager } from "./session.js";
 import { classifyFetchTarget } from "./fetch-classifier.js";
 import { recordSpansExported, recordSpansDropped } from "./health-collector.js";
 import { sdkLog } from "./console-capture.js";
+import { maybeShowServerActionNudge } from "./nudge/error-nudge.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -173,7 +174,7 @@ export class GlasstraceExporter implements SpanExporter {
     try {
       const attrs = span.attributes ?? {};
       const name = span.name ?? "";
-      const extra: Record<string, string | number> = {};
+      const extra: Record<string, string | number | boolean> = {};
 
       // glasstrace.trace.type
       extra[ATTR.TRACE_TYPE] = "server";
@@ -230,6 +231,29 @@ export class GlasstraceExporter implements SpanExporter {
         (attrs["http.request.method"] as string | undefined);
       if (method) {
         extra[ATTR.HTTP_METHOD] = method;
+      }
+
+      // glasstrace.next.action.detected — DISC-1253.
+      // Heuristic: a POST to a page route (not /api/*, not /_next/*) is
+      // almost always a Server Action in idiomatic Next.js App Router code.
+      // We cannot identify the specific action without extra metadata —
+      // DISC-1254 covers that path. Label "detected" not "confirmed" to
+      // leave room for rare false-positive cases (legacy form POSTs,
+      // hand-rolled page-route POST handlers).
+      if (method === "POST" && route) {
+        const isApiRoute = route === "/api" || route.startsWith("/api/");
+        const isInternalRoute = route.startsWith("/_next/");
+        if (!isApiRoute && !isInternalRoute) {
+          extra[ATTR.NEXT_ACTION_DETECTED] = true;
+          // Developer-facing nudge (once per process): when a Server Action
+          // trace is detected but no glasstrace.correlation.id is present,
+          // the Glasstrace browser extension is likely absent. Installing it
+          // unlocks per-action identification via the Next-Action header
+          // (DISC-1254 covers capture).
+          if (typeof extra[ATTR.CORRELATION_ID] !== "string") {
+            maybeShowServerActionNudge();
+          }
+        }
       }
 
       // glasstrace.http.status_code
@@ -509,7 +533,7 @@ export class GlasstraceExporter implements SpanExporter {
  */
 function createEnrichedSpan(
   span: ReadableSpan,
-  extra: Record<string, string | number>,
+  extra: Record<string, string | number | boolean>,
 ): ReadableSpan {
   const enrichedAttributes = { ...span.attributes, ...extra };
   return Object.create(span, {

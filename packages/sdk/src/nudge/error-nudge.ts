@@ -1,9 +1,16 @@
 import { resolveConfig, isProductionDisabled } from "../env-detection.js";
 
 /**
- * Module-level flag ensuring the nudge fires at most once per process.
+ * Module-level flag ensuring the MCP-connection nudge fires at most once
+ * per process.
  */
 let hasFired = false;
+
+/**
+ * Module-level flag ensuring the Server Action nudge fires at most once
+ * per process (DISC-1253).
+ */
+let hasFiredServerAction = false;
 
 /**
  * Strips control characters (except space) from a string to prevent
@@ -74,4 +81,60 @@ export function maybeShowMcpNudge(errorSummary: string): void {
       `  Debug with AI: ask your agent "What's the latest Glasstrace error?"\n` +
       `  Not connected? Run: npx glasstrace mcp add\n`,
   );
+}
+
+/**
+ * Shows a one-time stderr nudge when the SDK detects a Next.js Server
+ * Action trace whose originating request had no Glasstrace browser
+ * extension correlation header (`x-gt-cid`) — meaning the extension was
+ * not active for that request and the specific Server Action identifier
+ * could not be captured (DISC-1253).
+ *
+ * The nudge is suppressed when:
+ * - It has already fired in this process
+ * - The environment is detected as production (and force-enable is off)
+ * - `GLASSTRACE_SUPPRESS_ACTION_NUDGE=1` is set
+ *
+ * Routes through `process.stderr.write()` — identical transport to the
+ * existing MCP nudge — so it is not captured by OpenTelemetry console
+ * instrumentation and plays nicely with existing error-nudge tests.
+ */
+export function maybeShowServerActionNudge(): void {
+  if (hasFiredServerAction) {
+    return;
+  }
+
+  // User opt-out takes precedence over every other check so we never
+  // re-run I/O when silenced.
+  if (process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE === "1") {
+    hasFiredServerAction = true;
+    return;
+  }
+
+  // Production check — suppress silently, but remember the decision so
+  // subsequent calls fast-exit via hasFiredServerAction without re-running
+  // resolveConfig.
+  const config = resolveConfig();
+  if (isProductionDisabled(config)) {
+    hasFiredServerAction = true;
+    return;
+  }
+
+  hasFiredServerAction = true;
+
+  process.stderr.write(
+    `[glasstrace] Detected a Next.js Server Action trace. Install the ` +
+      `Glasstrace browser extension to capture the Server Action identifier ` +
+      `for precise action-level debugging. https://glasstrace.dev/ext\n`,
+  );
+}
+
+/**
+ * Test-only hook: resets both nudge guards so independent tests can
+ * reload module state without relying on `vi.resetModules()` side effects.
+ * Kept internal — not exported from the SDK barrel.
+ */
+export function __resetNudgeStateForTests(): void {
+  hasFired = false;
+  hasFiredServerAction = false;
 }

@@ -91,6 +91,70 @@ total cap). HTTP 4xx/5xx and malformed responses are surfaced
 immediately. Set `GLASSTRACE_SKIP_INIT_VERIFY=1` to skip verification
 for offline installs.
 
+## Server Action detection (Next.js)
+
+Next.js does not emit a dedicated OTel span for Server Actions. The SDK
+applies a post-hoc heuristic at enrichment time: any `POST` to a page
+route (not `/api/*`, not `/_next/*`) is almost always a Server Action
+invocation in idiomatic App Router code. When the heuristic matches,
+the SDK adds the attribute:
+
+```
+glasstrace.next.action.detected = true
+```
+
+The attribute is labeled `detected` rather than `confirmed` because rare
+false-positives are possible (legacy form POSTs, hand-rolled page-route
+POST handlers). The heuristic cannot identify *which* Server Action
+ran — that requires the `Next-Action` request header, which the
+Glasstrace browser extension captures.
+
+### Correlating a trace with browser extension data
+
+To correlate a server-captured trace with extension-side action data,
+call `captureCorrelationId` from a Next.js `middleware.ts` (or any
+custom server request hook that runs inside the request's OTel context):
+
+```ts
+// middleware.ts
+import { captureCorrelationId } from "@glasstrace/sdk";
+import { NextResponse } from "next/server";
+
+export function middleware(req: Request) {
+  captureCorrelationId(req);
+  return NextResponse.next();
+}
+```
+
+`captureCorrelationId` reads the `x-gt-cid` header from an incoming
+request and sets it as `glasstrace.correlation.id` on the currently
+active span. It accepts either a Fetch-API `Request` / `NextRequest`
+or a Node `IncomingMessage`. The helper is defensive: no active span,
+missing header, or malformed input are all silent no-ops — it never
+throws from a request hook.
+
+### Installation nudge
+
+When the heuristic fires and the span has no
+`glasstrace.correlation.id` attribute (i.e. the extension was not
+active for that request), the SDK writes a single stderr nudge per
+process recommending the browser extension:
+
+```
+[glasstrace] Detected a Next.js Server Action trace. Install the
+Glasstrace browser extension to capture the Server Action identifier
+for precise action-level debugging. https://glasstrace.dev/ext
+```
+
+Silence the nudge by setting:
+
+```
+GLASSTRACE_SUPPRESS_ACTION_NUDGE=1
+```
+
+The nudge never fires in production (detected via `NODE_ENV` or
+`VERCEL_ENV`) unless `GLASSTRACE_FORCE_ENABLE=true` is also set.
+
 ## License
 
 [MIT](./LICENSE)

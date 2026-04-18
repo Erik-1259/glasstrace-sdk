@@ -34,6 +34,7 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   SOURCE_MAPPED: "glasstrace.source.mapped",
   TRPC_PROCEDURE: "glasstrace.trpc.procedure",
   ERROR_RESPONSE_BODY: "glasstrace.error.response_body",
+  NEXT_ACTION_DETECTED: "glasstrace.next.action.detected",
 
   // Client-side attributes
   PLATFORM: "glasstrace.platform",

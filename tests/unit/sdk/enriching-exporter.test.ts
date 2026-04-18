@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
@@ -1790,6 +1790,225 @@ describe("GlasstraceExporter", () => {
 
       const enriched = delegate.exportedSpans[0][0];
       expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+    });
+  });
+
+  describe("Next.js Server Action heuristic (DISC-1253)", () => {
+    // Suppress the developer-facing stderr nudge so tests don't pollute
+    // test output or depend on nudge state. The heuristic behavior (the
+    // attribute) is independent of the nudge firing.
+    const ORIGINAL_SUPPRESS = process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+
+    beforeEach(() => {
+      process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE = "1";
+    });
+
+    afterEach(() => {
+      if (ORIGINAL_SUPPRESS === undefined) {
+        delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+      } else {
+        process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE = ORIGINAL_SUPPRESS;
+      }
+    });
+
+    it("flags POST /login as a Server Action (page route)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/login",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("flags POST /[locale]/login (parameterized page route)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/[locale]/login",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("does NOT flag POST /api/auth (API route prefix)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/api/auth",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag POST /api (exact-match API root)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/api",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag POST /_next/static/... (Next internal route)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/_next/static/chunks/foo.js",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag GET /login (non-POST)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.route": "/login",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("does NOT flag POST /apiary (lookalike page route is not /api/*)", () => {
+      // Regression guard against accidental prefix-match bugs — only
+      // exact "/api" or "/api/..." should be excluded.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/apiary",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      // "/apiary" is a legitimate page route, so it should be flagged.
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("uses http.route when present but falls back to span name for ROUTE", () => {
+      // Span name "POST /login" used as fallback when http.route is absent
+      // should still be recognized as a page route.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "/login",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("fires the nudge when heuristic matches AND correlation.id is absent", async () => {
+      // Clear the env-var silencer we set in beforeEach so we can observe
+      // the nudge, then reload the nudge module to clear the module-level
+      // hasFired guard.
+      delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+      delete process.env.NODE_ENV;
+      delete process.env.VERCEL_ENV;
+
+      const nudgeMod = await import("../../../packages/sdk/src/nudge/error-nudge.js");
+      nudgeMod.__resetNudgeStateForTests();
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+      try {
+        const { exporter } = createExporter();
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.route": "/login",
+            "http.status_code": 200,
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const calls = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((msg) => msg.includes("Server Action"));
+        expect(calls.length).toBe(1);
+        expect(calls[0]).toContain("glasstrace.dev/ext");
+      } finally {
+        stderrSpy.mockRestore();
+        nudgeMod.__resetNudgeStateForTests();
+      }
+    });
+
+    it("does NOT fire the nudge when correlation.id is present on the span", async () => {
+      delete process.env.GLASSTRACE_SUPPRESS_ACTION_NUDGE;
+      delete process.env.NODE_ENV;
+      delete process.env.VERCEL_ENV;
+
+      const nudgeMod = await import("../../../packages/sdk/src/nudge/error-nudge.js");
+      nudgeMod.__resetNudgeStateForTests();
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+      try {
+        const { exporter } = createExporter();
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.route": "/login",
+            "http.status_code": 200,
+            "glasstrace.correlation.id": "cid_test_12345",
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const calls = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((msg) => msg.includes("Server Action"));
+        expect(calls.length).toBe(0);
+      } finally {
+        stderrSpy.mockRestore();
+        nudgeMod.__resetNudgeStateForTests();
+      }
     });
   });
 
