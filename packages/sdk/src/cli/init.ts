@@ -29,6 +29,13 @@ import {
   unwrapCJSExport,
   removeGlasstraceConfigImport,
 } from "./uninit.js";
+import { verifyInitReachable, type VerifyInitResult } from "../init-client.js";
+import { resolveConfig } from "../env-detection.js";
+
+// Declare the tsup-injected SDK version literal. Replaced at build time
+// via `define` in tsup.config.ts. Falls back to "0.0.0-dev" when
+// running tests under vitest (no tsup build step).
+declare const __SDK_VERSION__: string;
 
 /**
  * Returns true if the current Node.js major version meets the minimum requirement.
@@ -681,7 +688,164 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     }
   }
 
+  // Step 10: Blocking verification that the anon key is registered
+  // server-side (DISC-493 Issue 3, DISC-494). Runs last so failures here
+  // surface the exit code without blocking the file scaffolding work.
+  //
+  // Skipped when:
+  //   - `GLASSTRACE_SKIP_INIT_VERIFY=1` is set (offline installs)
+  //   - CI mode is active (CI builds should not reach external networks)
+  //   - Vitest is running (`VITEST` env var) — unit tests that don't
+  //     care about the network path shouldn't be forced to mock the
+  //     transport; tests that DO care use `_setTransportForTesting`
+  //     and explicitly un-set `VITEST` before calling runInit.
+  const skipVerify =
+    process.env["GLASSTRACE_SKIP_INIT_VERIFY"] === "1" ||
+    process.env["GLASSTRACE_SKIP_INIT_VERIFY"] === "true" ||
+    process.env["VITEST"] === "true";
+
+  if (!skipVerify && !isCI) {
+    const verifyResult = await verifyAnonKeyRegistration(projectRoot);
+    if (verifyResult.outcome === "failed") {
+      errors.push(verifyResult.error);
+      return { exitCode: 2, summary, warnings, errors };
+    }
+    if (verifyResult.outcome === "verified") {
+      summary.push("Verified anon key registration with Glasstrace API");
+    } else {
+      // "skipped": no anon key on disk means MCP auto-configuration
+      // failed earlier (a warning was already emitted). Reporting
+      // "Verified ..." here would misrepresent the state of setup —
+      // a verification request was never even sent.
+      summary.push("Skipped anon key verification (no anon key on disk)");
+    }
+  }
+
   return { exitCode: 0, summary, warnings, errors };
+}
+
+/**
+ * Outcome of {@link verifyAnonKeyRegistration}:
+ *
+ * - `"verified"` — the server registered the anon key (HTTP 2xx with a
+ *   schema-valid response body).
+ * - `"skipped"` — no anon key was on disk, so no verification request
+ *   was sent. Typically means MCP auto-configuration failed earlier
+ *   (warnings were already emitted) — distinct from a verification
+ *   success.
+ * - `"failed"` — the verification request was sent and failed.
+ *   `error` is a user-facing message distinguishing the failure class
+ *   (`fetch failed: ...`, `server rejected the key ...`, or
+ *   `server returned malformed response ...`) with no anon key bytes.
+ */
+export type VerifyAnonKeyOutcome =
+  | { outcome: "verified" }
+  | { outcome: "skipped" }
+  | { outcome: "failed"; error: string };
+
+/**
+ * Verifies that the anonymous key written by init is registered
+ * server-side. Called at the end of the scaffold flow so that when it
+ * fails, the user sees an actionable error rather than a misleading
+ * "initialized successfully" followed by silent MCP authentication
+ * failures (DISC-494).
+ *
+ * Returns a discriminated outcome so the CLI can distinguish a genuine
+ * verification pass from the "no anon key on disk" skip case. On
+ * failure the error message distinguishes three classes:
+ *   - "fetch failed" — transport error (DNS, TCP, TLS, timeout)
+ *   - "server rejected the key" — HTTP 4xx/5xx
+ *   - "server returned malformed response" — HTTP 2xx with unparseable
+ *     body
+ *
+ * The anon key is NEVER included in the returned message. Callers
+ * (the CLI entry point) render it verbatim to stderr via the errors
+ * array and exit non-zero.
+ *
+ * @internal Exported for testability.
+ */
+export async function verifyAnonKeyRegistration(
+  projectRoot: string,
+): Promise<VerifyAnonKeyOutcome> {
+  // Read env the same way the runtime would — scaffoldEnvLocal may have
+  // written GLASSTRACE_API_KEY=gt_anon_..., so prefer the generated
+  // anon key on disk as the authoritative value to verify.
+  const anonKey = await readAnonKey(projectRoot);
+  if (anonKey === null) {
+    // No anon key on disk means MCP wasn't configured. Skip
+    // verification — this is a partial install, not a verification
+    // failure. The init flow already emitted warnings above. Report
+    // "skipped" so the caller doesn't claim verification succeeded.
+    return { outcome: "skipped" };
+  }
+
+  // Load the dev key from .env.local if present (for straggler linking)
+  // but fall through to anon-only verification otherwise. Reading is
+  // best-effort: any error leaves devKey undefined and we verify the
+  // anon key in isolation.
+  //
+  // Use `readEnvLocalApiKey` (shared with the rest of the init flow) so
+  // we match dotenv-style last-wins semantics. A hand-rolled regex here
+  // would pick the FIRST `GLASSTRACE_API_KEY=` assignment, which in a
+  // rotated env file would authenticate with a stale key and surface a
+  // false `server rejected` failure even when the effective key is
+  // valid.
+  let devKey: string | undefined;
+  try {
+    const envPath = path.join(projectRoot, ".env.local");
+    if (fs.existsSync(envPath)) {
+      const envContent = fs.readFileSync(envPath, "utf-8");
+      const effective = readEnvLocalApiKey(envContent);
+      // Only send a real dev key in the dev slot — don't double-count
+      // the anon key as both keys.
+      if (effective !== null && isDevApiKey(effective)) {
+        devKey = effective;
+      }
+    }
+  } catch {
+    // Ignore — fall through to anon-only verification.
+  }
+
+  // Resolve endpoint / environment from the user's shell, then pin
+  // `apiKey` to whatever we read from .env.local. `resolveConfig` uses
+  // `??` to fall back to `process.env.GLASSTRACE_API_KEY` when the
+  // option is undefined, which would cause verification to authenticate
+  // with an unrelated stale key in shells that export
+  // `GLASSTRACE_API_KEY` — producing false "server rejected" failures
+  // even when the freshly generated anon key is valid. The explicit
+  // override keeps verification tied to disk state.
+  const baseConfig = resolveConfig({ apiKey: devKey });
+  const config = { ...baseConfig, apiKey: devKey };
+  const sdkVersion = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
+
+  const result: VerifyInitResult = await verifyInitReachable(config, anonKey, sdkVersion);
+
+  if (result.ok) {
+    return { outcome: "verified" };
+  }
+
+  const hint = "Run 'npx glasstrace status' or 'npx glasstrace doctor' to diagnose.";
+  switch (result.reason) {
+    case "transport":
+      // `result.detail` is the raw cause with any leading `fetch failed: `
+      // stripped by verifyInitReachable. Format once here so the output
+      // matches the documented `fetch failed: <reason>` shape and never
+      // renders `fetch failed (fetch failed: ...)`.
+      return {
+        outcome: "failed",
+        error: `Glasstrace init verification failed: fetch failed: ${result.detail}. ${hint}`,
+      };
+    case "rejected":
+      return {
+        outcome: "failed",
+        error: `Glasstrace init verification failed: server rejected the key (HTTP ${result.status}). ${hint}`,
+      };
+    case "malformed":
+      return {
+        outcome: "failed",
+        error: `Glasstrace init verification failed: server returned malformed response. ${hint}`,
+      };
+  }
 }
 
 /**
@@ -831,18 +995,28 @@ if (isDirectExecution) {
             }
           }
           if (result.summary.length > 0) {
-            process.stderr.write("\nGlasstrace initialized successfully!\n\n");
+            // Only claim success when exitCode is 0. A non-zero exit
+            // means init scaffolding completed but a later step (e.g.,
+            // verifyAnonKeyRegistration) failed — we must not tell the
+            // user everything is fine (DISC-494 root cause).
+            if (result.exitCode === 0) {
+              process.stderr.write("\nGlasstrace initialized successfully!\n\n");
+            } else {
+              process.stderr.write("\nGlasstrace init completed with errors.\n\n");
+            }
             for (const line of result.summary) {
               process.stderr.write(`  - ${line}\n`);
             }
-            process.stderr.write("\nNext steps:\n");
-            process.stderr.write("  1. Start your Next.js dev server\n");
-            process.stderr.write(
-              "  2. Glasstrace works immediately in anonymous mode\n",
-            );
-            process.stderr.write(
-              "  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n",
-            );
+            if (result.exitCode === 0) {
+              process.stderr.write("\nNext steps:\n");
+              process.stderr.write("  1. Start your Next.js dev server\n");
+              process.stderr.write(
+                "  2. Glasstrace works immediately in anonymous mode\n",
+              );
+              process.stderr.write(
+                "  3. To link to your account, set GLASSTRACE_API_KEY in .env.local\n\n",
+              );
+            }
           }
           process.exit(result.exitCode);
         })

@@ -13,6 +13,12 @@ import type {
 } from "@glasstrace/protocol";
 import type { ResolvedConfig } from "./env-detection.js";
 import { recordInitFailure, recordConfigSync, acknowledgeHealthReport } from "./health-collector.js";
+import {
+  httpsPostJson,
+  HttpsStatusError,
+  HttpsTransportError,
+  HttpsBodyParseError,
+} from "./https-transport.js";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const CONFIG_FILE = "config";
@@ -56,6 +62,17 @@ function loadFsSyncOrNull(): { readFileSync: typeof import("node:fs").readFileSy
     return null;
   }
 }
+
+/**
+ * Test-only transport hook. When set, `sendInitRequest` calls this
+ * instead of `httpsPostJson`. Enables unit tests to assert that the
+ * SDK never routes through `globalThis.fetch` (Next.js patching) by
+ * injecting a pure-function transport that never touches the network.
+ *
+ * Production code never sets this. Reset via `_resetConfigForTesting()`.
+ */
+type HttpsPostJsonFn = typeof httpsPostJson;
+let transportOverride: HttpsPostJsonFn | null = null;
 
 /** In-memory config from the latest successful init response. */
 let currentConfig: SdkInitResponse | null = null;
@@ -171,6 +188,13 @@ export async function saveCachedConfig(
 /**
  * Sends a POST request to `/v1/sdk/init`.
  * Validates the response against `SdkInitResponseSchema`.
+ *
+ * Uses `node:https` via {@link httpsPostJson} rather than the global
+ * `fetch` because Next.js 16 patches `fetch` for caching/revalidation
+ * and can cause the init request to silently hang (DISC-493 Issue 3).
+ * Retries transport-level failures (DNS, TCP, TLS) twice with 500ms +
+ * 1500ms backoff, capped at a 20-second total deadline. Server responses
+ * (HTTP 4xx/5xx) are never retried and are surfaced immediately.
  */
 export async function sendInitRequest(
   config: ResolvedConfig,
@@ -213,29 +237,38 @@ export async function sendInitRequest(
 
   const url = `${config.endpoint}/v1/sdk/init`;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${effectiveKey}`,
-    },
-    body: JSON.stringify(payload),
-    signal,
-  });
-
-  if (!response.ok) {
-    // Consume the response body to release the connection back to the pool.
-    // Without this, the underlying TCP socket stays allocated until GC, which
-    // causes connection pool exhaustion under sustained error conditions.
-    // Wrapped in try-catch so a stream error doesn't mask the HTTP status error.
-    try { await response.text(); } catch { /* body drain is best-effort */ }
-    const error = new Error(`Init request failed with status ${response.status}`);
-    (error as unknown as Record<string, unknown>).status = response.status;
-    throw error;
+  const transport = transportOverride ?? httpsPostJson;
+  let result;
+  try {
+    result = await transport(url, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${effectiveKey}`,
+      },
+      timeoutMs: INIT_TIMEOUT_MS,
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof HttpsStatusError) {
+      const error = new Error(`Init request failed with status ${err.status}`);
+      (error as unknown as Record<string, unknown>).status = err.status;
+      throw error;
+    }
+    if (err instanceof HttpsBodyParseError) {
+      // Preserve SyntaxError name so callers can distinguish parse failures
+      // (existing test contract uses `name === "SyntaxError"`).
+      const cause = err.cause;
+      if (cause instanceof SyntaxError) throw cause;
+      throw err;
+    }
+    if (err instanceof HttpsTransportError) {
+      // Transport error — surface as-is; callers classify via message/name.
+      throw err;
+    }
+    throw err;
   }
 
-  const body = await response.json();
-  return SdkInitResponseSchema.parse(body);
+  return SdkInitResponseSchema.parse(result.body);
 }
 
 /**
@@ -378,9 +411,11 @@ export async function performInit(
       return null;
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), INIT_TIMEOUT_MS);
-
+    // No outer AbortController timeout: `httpsPostJson` enforces a
+    // per-attempt timeout (INIT_TIMEOUT_MS = 10s) AND a 20s total
+    // deadline across retries. An outer 10s abort would race the first
+    // attempt's own timeout and prevent the backoff-retry window from
+    // ever running, defeating the transport's retry behavior.
     try {
       // Delegate to sendInitRequest to avoid duplicating fetch logic
       const result = await sendInitRequest(
@@ -390,10 +425,7 @@ export async function performInit(
         undefined,
         healthReport ?? undefined,
         undefined,
-        controller.signal,
       );
-
-      clearTimeout(timeoutId);
 
       // Update in-memory config
       currentConfig = result;
@@ -419,11 +451,17 @@ export async function performInit(
 
       return null;
     } catch (err) {
-      clearTimeout(timeoutId);
       recordInitFailure();
 
-      if (err instanceof DOMException && err.name === "AbortError") {
-        console.warn("[glasstrace] ingestion_unreachable: Init request timed out.");
+      // HttpsTransportError covers DNS/TCP/TLS/timeout from the
+      // node:https transport itself — `httpsPostJson` raises timeouts
+      // via this error class when its internal deadlines expire.
+      if (err instanceof HttpsTransportError) {
+        if (/timed out|aborted/i.test(err.message)) {
+          console.warn("[glasstrace] ingestion_unreachable: Init request timed out.");
+        } else {
+          console.warn(`[glasstrace] ingestion_unreachable: ${err.message}`);
+        }
         return null;
       }
 
@@ -539,6 +577,19 @@ export function _resetConfigForTesting(): void {
   configCacheChecked = false;
   rateLimitBackoff = false;
   lastInitSucceeded = false;
+  transportOverride = null;
+}
+
+/**
+ * Installs a test-only transport that replaces the `node:https` path
+ * used by `sendInitRequest` and `performInit`. Tests use this to avoid
+ * opening real sockets and to assert the SDK never routes through
+ * `globalThis.fetch`. Pass `null` to restore the default transport.
+ *
+ * @internal Test-only. Never called from production code paths.
+ */
+export function _setTransportForTesting(fn: HttpsPostJsonFn | null): void {
+  transportOverride = fn;
 }
 
 /**
@@ -575,4 +626,87 @@ export function consumeRateLimitFlag(): boolean {
  */
 export function didLastInitSucceed(): boolean {
   return lastInitSucceeded;
+}
+
+/**
+ * Result of {@link verifyInitReachable}.
+ *
+ * - `ok: true` — server acknowledged the init call with a valid, schema-
+ *   compliant payload. The anon key (if any) is registered server-side.
+ * - `ok: false` with `reason: "transport"` — DNS/TCP/TLS/timeout failure.
+ *   No response reached the server (or couldn't be parsed off the wire).
+ *   `detail` is the raw cause (e.g. "ECONNREFUSED") with any leading
+ *   `fetch failed: ` prefix stripped; callers that render to the user
+ *   should add the prefix themselves to avoid doubling it.
+ * - `ok: false` with `reason: "rejected"` — HTTP 4xx/5xx status. The
+ *   server received the call but declined it. `status` is set.
+ * - `ok: false` with `reason: "malformed"` — HTTP 2xx but the body was
+ *   not valid JSON or did not match the protocol schema.
+ */
+export type VerifyInitResult =
+  | { ok: true; response: SdkInitResponse }
+  | { ok: false; reason: "transport"; detail: string }
+  | { ok: false; reason: "rejected"; status: number; detail: string }
+  | { ok: false; reason: "malformed"; detail: string };
+
+/**
+ * Synchronously verifies that `/v1/sdk/init` is reachable and that the
+ * provided anon key (if any) is registered server-side. Unlike
+ * {@link performInit}, this function does NOT swallow errors — it
+ * classifies them into the three user-actionable categories and
+ * returns them.
+ *
+ * Used by the CLI `init` command to fail loudly when the init request
+ * fails (DISC-493 Issue 3, DISC-494), rather than relying on the
+ * runtime fire-and-forget call which can silently fail inside a
+ * Next.js 16 process.
+ *
+ * The anon key is NEVER logged by this function. Error `detail`
+ * strings are sanitized to the failure class only — the key does not
+ * appear in transport, rejection, or malformed messages.
+ */
+export async function verifyInitReachable(
+  config: ResolvedConfig,
+  anonKey: AnonApiKey | null,
+  sdkVersion: string,
+): Promise<VerifyInitResult> {
+  try {
+    const response = await sendInitRequest(config, anonKey, sdkVersion);
+    return { ok: true, response };
+  } catch (err) {
+    // HTTP status error — server rejected the key.
+    const status = (err as Record<string, unknown>).status;
+    if (typeof status === "number") {
+      return {
+        ok: false,
+        reason: "rejected",
+        status,
+        detail: `server returned HTTP ${status}`,
+      };
+    }
+
+    // Schema validation failure (ZodError) or JSON parse error
+    // (SyntaxError). Both mean the server responded but the body is
+    // not a shape we can use.
+    if (err instanceof Error && (err.name === "ZodError" || err.name === "SyntaxError")) {
+      return {
+        ok: false,
+        reason: "malformed",
+        detail: "server returned malformed response",
+      };
+    }
+
+    // Everything else (transport errors, timeouts, abort, unknown) is
+    // classified as transport. `detail` is the raw cause without a
+    // `fetch failed:` prefix so the CLI (the only caller that renders
+    // this) can format it as `fetch failed: <detail>` without risking
+    // the double-prefix that would occur when the underlying error
+    // already starts with `fetch failed:` (e.g., `HttpsTransportError`
+    // from `sendSingleRequest`).
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const detail = rawMessage.startsWith("fetch failed: ")
+      ? rawMessage.slice("fetch failed: ".length)
+      : rawMessage;
+    return { ok: false, reason: "transport", detail };
+  }
 }

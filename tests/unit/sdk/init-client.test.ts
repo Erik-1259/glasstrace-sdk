@@ -15,9 +15,16 @@ import {
   _resetConfigForTesting,
   _isRateLimitBackoff,
   _setCurrentConfig,
+  _setTransportForTesting,
   consumeRateLimitFlag,
   didLastInitSucceed,
 } from "../../../packages/sdk/src/init-client.js";
+import {
+  HttpsStatusError,
+  HttpsTransportError,
+  HttpsBodyParseError,
+  type HttpsPostJsonResult,
+} from "../../../packages/sdk/src/https-transport.js";
 import type { ResolvedConfig } from "../../../packages/sdk/src/env-detection.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 
@@ -43,6 +50,54 @@ function makeInitResponse(overrides?: Partial<SdkInitResponse>): SdkInitResponse
     },
     ...overrides,
   } as SdkInitResponse;
+}
+
+/**
+ * Creates a mock transport that matches the contract of `httpsPostJson`
+ * and returns JSON for 2xx responses or throws the appropriate typed
+ * error for 4xx/5xx/transport failures.
+ *
+ * Tests set this via `_setTransportForTesting(mock)` to exercise the
+ * init path without opening real sockets and to assert the SDK never
+ * routes through a patched `globalThis.fetch`.
+ */
+interface MockTransportOptions {
+  ok?: boolean;
+  status?: number;
+  json?: unknown;
+  rejectWith?: unknown;
+  text?: string;
+}
+
+function mockTransport(
+  opts: MockTransportOptions,
+): ReturnType<typeof vi.fn> {
+  return vi.fn(async (
+    _url: string,
+    body: unknown,
+  ): Promise<HttpsPostJsonResult> => {
+    if (opts.rejectWith !== undefined) {
+      throw opts.rejectWith;
+    }
+    const status = opts.status ?? (opts.ok === false ? 500 : 200);
+    if (opts.ok === false) {
+      throw new HttpsStatusError(status, opts.text ?? "");
+    }
+    // Capture body into the fn call args (already captured by vi.fn)
+    void body;
+    return {
+      status,
+      body: opts.json,
+      raw: opts.json === undefined ? "" : JSON.stringify(opts.json),
+    };
+  });
+}
+
+/** Installs a mock transport; returns the mock for assertions. */
+function installMockTransport(opts: MockTransportOptions): ReturnType<typeof vi.fn> {
+  const mock = mockTransport(opts);
+  _setTransportForTesting(mock as never);
+  return mock;
 }
 
 function makeResolvedConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
@@ -180,23 +235,16 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const responseBody = makeInitResponse();
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
+      const transport = installMockTransport({ ok: true, json: responseBody });
 
       const result = await sendInitRequest(config, null, "0.1.0");
       expect(result.config).toEqual(responseBody.config);
       expect(result.subscriptionStatus).toBe("anonymous");
 
-      const fetchCall = vi.mocked(fetch).mock.calls[0];
-      expect(fetchCall[0]).toBe("https://api.glasstrace.dev/v1/sdk/init");
-      const reqInit = fetchCall[1]!;
-      expect(reqInit.method).toBe("POST");
-      expect((reqInit.headers as Record<string, string>)["Authorization"]).toBe(
-        `Bearer ${config.apiKey}`,
-      );
+      const call = transport.mock.calls[0];
+      expect(call[0]).toBe("https://api.glasstrace.dev/v1/sdk/init");
+      const opts = call[2] as { headers: Record<string, string> };
+      expect(opts.headers["Authorization"]).toBe(`Bearer ${config.apiKey}`);
     });
 
     it("includes anonKey when both dev key and anon key are provided (straggler linking)", async () => {
@@ -204,14 +252,10 @@ describe("Init Client + Config Cache", () => {
       const anonKey = ("gt_anon_" + "b".repeat(48)) as import("@glasstrace/protocol").AnonApiKey;
       const responseBody = makeInitResponse();
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
+      const transport = installMockTransport({ ok: true, json: responseBody });
 
       await sendInitRequest(config, anonKey, "0.1.0");
-      const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+      const body = transport.mock.calls[0][1] as Record<string, unknown>;
       expect(body.anonKey).toBe(anonKey);
       expect(body.apiKey).toBeUndefined();
     });
@@ -220,14 +264,10 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const responseBody = makeInitResponse();
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
+      const transport = installMockTransport({ ok: true, json: responseBody });
 
       await sendInitRequest(config, null, "0.1.0");
-      const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+      const body = transport.mock.calls[0][1] as Record<string, unknown>;
       expect(body.apiKey).toBeUndefined();
       expect(body.sdkVersion).toBe("0.1.0");
     });
@@ -235,42 +275,17 @@ describe("Init Client + Config Cache", () => {
     it("throws on non-OK response", async () => {
       const config = makeResolvedConfig();
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-        text: () => Promise.resolve("Internal Server Error"),
-      }));
+      installMockTransport({ ok: false, status: 500, text: "Internal Server Error" });
 
       await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow(
         "Init request failed with status 500",
       );
     });
 
-    it("consumes response body on error to prevent connection pool leaks", async () => {
+    it("surfaces HTTP status errors with a numeric `status` property", async () => {
       const config = makeResolvedConfig();
-      const textMock = vi.fn().mockResolvedValue("error body");
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 502,
-        text: textMock,
-      }));
-
-      await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow(
-        "Init request failed with status 502",
-      );
-      expect(textMock).toHaveBeenCalledOnce();
-    });
-
-    it("still throws the status error when consuming an error response body fails", async () => {
-      const config = makeResolvedConfig();
-      const textMock = vi.fn().mockRejectedValue(new Error("body read failed"));
-
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 503,
-        text: textMock,
-      }));
+      installMockTransport({ ok: false, status: 502, text: "Bad Gateway" });
 
       let thrown: unknown;
       try {
@@ -279,22 +294,29 @@ describe("Init Client + Config Cache", () => {
         thrown = error;
       }
 
-      expect(textMock).toHaveBeenCalledOnce();
       expect(thrown).toBeInstanceOf(Error);
-      // The status error message must take precedence over the body-read failure
-      expect((thrown as Error).message).toBe("Init request failed with status 503");
-      expect((thrown as Error).message).not.toContain("body read failed");
-      expect(thrown).toMatchObject({ status: 503 });
+      expect((thrown as Error).message).toBe("Init request failed with status 502");
+      expect(thrown).toMatchObject({ status: 502 });
+    });
+
+    it("does NOT route through globalThis.fetch (DISC-493 Issue 3)", async () => {
+      const config = makeResolvedConfig();
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+
+      installMockTransport({ ok: true, json: makeInitResponse() });
+
+      await sendInitRequest(config, null, "0.1.0");
+
+      // Next.js 16 patches globalThis.fetch for caching/revalidation.
+      // The SDK must NOT route through it or the init request can hang.
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
 
     it("throws when response fails schema validation", async () => {
       const config = makeResolvedConfig();
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ invalid: true }),
-      }));
+      installMockTransport({ ok: true, json: { invalid: true } });
 
       await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow();
     });
@@ -310,11 +332,7 @@ describe("Init Client + Config Cache", () => {
     it("throws when response.json() returns malformed data", async () => {
       const config = makeResolvedConfig();
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.reject(new SyntaxError("Unexpected token")),
-      }));
+      installMockTransport({ rejectWith: new HttpsBodyParseError(200, new SyntaxError("Unexpected token")) });
 
       await expect(sendInitRequest(config, null, "0.1.0")).rejects.toThrow(
         expect.objectContaining({ name: "SyntaxError" }),
@@ -335,11 +353,7 @@ describe("Init Client + Config Cache", () => {
         },
       });
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
+      installMockTransport({ ok: true, json: responseBody });
 
       await performInit(config, null, "0.1.0");
 
@@ -353,11 +367,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 401,
-        text: () => Promise.resolve("Unauthorized"),
-      }));
+      installMockTransport({ ok: false, status: 401, text: "Unauthorized" });
 
       await performInit(config, null, "0.1.0");
       expect(warnSpy).toHaveBeenCalledWith(
@@ -369,11 +379,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-        text: () => Promise.resolve("Too Many Requests"),
-      }));
+      installMockTransport({ ok: false, status: 429, text: "Too Many Requests" });
 
       await performInit(config, null, "0.1.0");
       expect(warnSpy).toHaveBeenCalledWith(
@@ -387,19 +393,14 @@ describe("Init Client + Config Cache", () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
       // First call sets backoff
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-        text: () => Promise.resolve("Too Many Requests"),
-      }));
+      installMockTransport({ ok: false, status: 429, text: "Too Many Requests" });
       await performInit(config, null, "0.1.0");
       expect(_isRateLimitBackoff()).toBe(true);
 
       // Second call should skip and reset backoff
-      const fetchMock = vi.fn();
-      vi.stubGlobal("fetch", fetchMock);
+      const transportMock = installMockTransport({ ok: true, json: makeInitResponse() });
       await performInit(config, null, "0.1.0");
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(transportMock).not.toHaveBeenCalled();
       expect(_isRateLimitBackoff()).toBe(false);
     });
 
@@ -407,7 +408,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+      installMockTransport({ rejectWith: new HttpsTransportError("fetch failed: ECONNREFUSED") });
 
       await performInit(config, null, "0.1.0");
       expect(warnSpy).toHaveBeenCalledWith(
@@ -419,10 +420,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
-        const error = new DOMException("The operation was aborted", "AbortError");
-        return Promise.reject(error);
-      }));
+      installMockTransport({ rejectWith: new DOMException("The operation was aborted", "AbortError") });
 
       await performInit(config, null, "0.1.0");
       expect(warnSpy).toHaveBeenCalledWith(
@@ -434,11 +432,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-        text: () => Promise.resolve("Internal Server Error"),
-      }));
+      installMockTransport({ ok: false, status: 500, text: "Internal Server Error" });
 
       await performInit(config, null, "0.1.0");
       expect(warnSpy).toHaveBeenCalledWith(
@@ -450,11 +444,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ invalid: "schema" }),
-      }));
+      installMockTransport({ ok: true, json: { invalid: "schema" } });
 
       await performInit(config, null, "0.1.0");
       expect(warnSpy).toHaveBeenCalledWith(
@@ -485,11 +475,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const responseBody = makeInitResponse({ claimResult });
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
+      installMockTransport({ ok: true, json: responseBody });
 
       // Isolate file writes to tempDir so writeClaimedKey doesn't touch repo root
       vi.spyOn(process, "cwd").mockReturnValue(tempDir);
@@ -513,11 +499,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const responseBody = makeInitResponse();
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
+      installMockTransport({ ok: true, json: responseBody });
 
       vi.spyOn(process, "cwd").mockReturnValue(tempDir);
       const result = await performInit(config, null, "0.1.0");
@@ -528,11 +510,7 @@ describe("Init Client + Config Cache", () => {
       const config = makeResolvedConfig();
       const responseBody = makeInitResponse({ claimResult });
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(responseBody),
-      }));
+      installMockTransport({ ok: true, json: responseBody });
 
       vi.spyOn(process, "cwd").mockReturnValue(tempDir);
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -707,11 +685,7 @@ describe("Init Client + Config Cache", () => {
       const syncSpy = vi.spyOn(healthCollector, "recordConfigSync");
       const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(makeInitResponse()),
-      }));
+      installMockTransport({ ok: true, json: makeInitResponse() });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0");
@@ -730,7 +704,7 @@ describe("Init Client + Config Cache", () => {
       const syncSpy = vi.spyOn(healthCollector, "recordConfigSync");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+      installMockTransport({ rejectWith: new HttpsTransportError("fetch failed: network down") });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0");
@@ -745,11 +719,7 @@ describe("Init Client + Config Cache", () => {
       const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 401,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 401, text: "" });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0");
@@ -763,11 +733,7 @@ describe("Init Client + Config Cache", () => {
       const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 429, text: "" });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0");
@@ -781,11 +747,7 @@ describe("Init Client + Config Cache", () => {
       const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 500, text: "" });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0");
@@ -798,13 +760,10 @@ describe("Init Client + Config Cache", () => {
     it("passes health report to sendInitRequest payload", async () => {
       let capturedBody: Record<string, unknown> | undefined;
 
-      vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, init: RequestInit) => {
-        capturedBody = JSON.parse(init.body as string);
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(makeInitResponse()),
-        });
-      }));
+      _setTransportForTesting(vi.fn(async (_url: string, body: unknown) => {
+        capturedBody = body as Record<string, unknown>;
+        return { status: 200, body: makeInitResponse(), raw: "" };
+      }) as never);
 
       const healthReport: SdkHealthReport = {
         tracesExportedSinceLastInit: 42,
@@ -825,13 +784,10 @@ describe("Init Client + Config Cache", () => {
     it("omits healthReport from payload when null", async () => {
       let capturedBody: Record<string, unknown> | undefined;
 
-      vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, init: RequestInit) => {
-        capturedBody = JSON.parse(init.body as string);
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(makeInitResponse()),
-        });
-      }));
+      _setTransportForTesting(vi.fn(async (_url: string, body: unknown) => {
+        capturedBody = body as Record<string, unknown>;
+        return { status: 200, body: makeInitResponse(), raw: "" };
+      }) as never);
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0", null);
@@ -845,11 +801,7 @@ describe("Init Client + Config Cache", () => {
     it("acknowledges health report on successful performInit", async () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(makeInitResponse()),
-      }));
+      installMockTransport({ ok: true, json: makeInitResponse() });
 
       const healthReport = {
         tracesExportedSinceLastInit: 5,
@@ -872,7 +824,7 @@ describe("Init Client + Config Cache", () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+      installMockTransport({ rejectWith: new HttpsTransportError("fetch failed: network down") });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
@@ -886,11 +838,7 @@ describe("Init Client + Config Cache", () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 401,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 401, text: "" });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
@@ -903,11 +851,7 @@ describe("Init Client + Config Cache", () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 429, text: "" });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
@@ -920,11 +864,7 @@ describe("Init Client + Config Cache", () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 500, text: "" });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
@@ -937,8 +877,7 @@ describe("Init Client + Config Cache", () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const abortError = new DOMException("The operation was aborted", "AbortError");
-      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
+      installMockTransport({ rejectWith: new DOMException("The operation was aborted", "AbortError") });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
@@ -951,11 +890,7 @@ describe("Init Client + Config Cache", () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ invalid: "response" }),
-      }));
+      installMockTransport({ ok: true, json: { invalid: "response" } });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0", { tracesExportedSinceLastInit: 5, tracesDropped: 0, initFailures: 0, configAge: 0, sdkVersion: "1.0.0" });
@@ -967,11 +902,7 @@ describe("Init Client + Config Cache", () => {
     it("works when called without healthReport argument (backward compat)", async () => {
       const ackSpy = vi.spyOn(healthCollector, "acknowledgeHealthReport");
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(makeInitResponse()),
-      }));
+      installMockTransport({ ok: true, json: makeInitResponse() });
 
       const config = makeResolvedConfig();
       await performInit(config, null, "1.0.0");
@@ -1001,11 +932,7 @@ describe("Init Client + Config Cache", () => {
   describe("consumeRateLimitFlag", () => {
     it("returns true after 429 response", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 429, text: "" });
 
       await performInit(makeResolvedConfig(), null, "1.0.0");
 
@@ -1014,11 +941,7 @@ describe("Init Client + Config Cache", () => {
     });
 
     it("returns false after successful init", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(makeInitResponse()),
-      }));
+      installMockTransport({ ok: true, json: makeInitResponse() });
 
       await performInit(makeResolvedConfig(), null, "1.0.0");
 
@@ -1028,11 +951,7 @@ describe("Init Client + Config Cache", () => {
 
     it("clears on read", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 429, text: "" });
 
       await performInit(makeResolvedConfig(), null, "1.0.0");
 
@@ -1044,11 +963,7 @@ describe("Init Client + Config Cache", () => {
 
   describe("didLastInitSucceed", () => {
     it("returns true after successful init", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(makeInitResponse()),
-      }));
+      installMockTransport({ ok: true, json: makeInitResponse() });
 
       await performInit(makeResolvedConfig(), null, "1.0.0");
 
@@ -1058,7 +973,7 @@ describe("Init Client + Config Cache", () => {
 
     it("returns false after failed init", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+      installMockTransport({ rejectWith: new HttpsTransportError("fetch failed: network down") });
 
       await performInit(makeResolvedConfig(), null, "1.0.0");
 
@@ -1068,11 +983,7 @@ describe("Init Client + Config Cache", () => {
 
     it("returns false after 429", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-        text: () => Promise.resolve(""),
-      }));
+      installMockTransport({ ok: false, status: 429, text: "" });
 
       await performInit(makeResolvedConfig(), null, "1.0.0");
 
