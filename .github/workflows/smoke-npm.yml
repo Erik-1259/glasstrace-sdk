@@ -128,14 +128,20 @@ jobs:
         run: |
           set -euo pipefail
           cd /tmp/smoke
+          # Read package.json via fs, not require(). The SDK's exports
+          # field only exposes `.` and `./drizzle`, so Node 22+ rejects
+          # `require('@glasstrace/sdk/package.json')` with
+          # ERR_PACKAGE_PATH_NOT_EXPORTED. fs is unaffected by exports
+          # and mirrors what tooling like npm / pnpm do internally when
+          # they need to inspect installed versions.
           expected_sdk=$(npm view "@glasstrace/sdk" "dist-tags.$DIST_TAG")
-          installed_sdk=$(node -p "require('@glasstrace/sdk/package.json').version")
+          installed_sdk=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('node_modules/@glasstrace/sdk/package.json', 'utf8')).version)")
           if [ "$expected_sdk" != "$installed_sdk" ]; then
             echo "::error::SDK version mismatch. dist-tags.$DIST_TAG=$expected_sdk installed=$installed_sdk"
             exit 1
           fi
           expected_proto=$(npm view "@glasstrace/protocol" "dist-tags.$DIST_TAG")
-          installed_proto=$(node -p "require('@glasstrace/protocol/package.json').version")
+          installed_proto=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('node_modules/@glasstrace/protocol/package.json', 'utf8')).version)")
           if [ "$expected_proto" != "$installed_proto" ]; then
             echo "::error::Protocol version mismatch. dist-tags.$DIST_TAG=$expected_proto installed=$installed_proto"
             exit 1
