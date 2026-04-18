@@ -155,6 +155,18 @@ GLASSTRACE_SUPPRESS_ACTION_NUDGE=1
 The nudge never fires in production (detected via `NODE_ENV` or
 `VERCEL_ENV`) unless `GLASSTRACE_FORCE_ENABLE=true` is also set.
 
+## Security
+
+The SDK transmits your API key exclusively via the `Authorization: Bearer`
+header on every outbound request. The key is never included in JSON request
+bodies, which eliminates exposure through proxy access logs, WAF logging,
+CDN request-logging, and application-level middleware that captures request
+bodies for debugging. This applies to all SDK-originated requests:
+`/v1/sdk/init`, `/v1/source-maps`, and the presigned upload flow
+(`/v1/source-maps/presign`, `/v1/source-maps/manifest`). The
+[`no-api-key-in-body` regression tests](https://github.com/Erik-1259/glasstrace-sdk/blob/main/tests/unit/sdk/no-api-key-in-body.test.ts)
+enforce this invariant continuously.
+
 ## License
 
 [MIT](./LICENSE)
