@@ -54,13 +54,27 @@ describe("scaffoldInstrumentation", () => {
     expect(result.action).toBe("already-registered");
   });
 
-  it("returns unrecognized when file has no register() function", async () => {
-    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), "// custom content without register function\n");
-    const result = await scaffoldInstrumentation(tmpDir);
-    expect(result.action).toBe("unrecognized");
-    // Original content should be unchanged
+  it("appends register() when file exists but has no register function (DISC-493 Issue 1)", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "instrumentation.ts"),
+      "// custom content without register function\n",
+    );
+    const result = await scaffoldInstrumentation(tmpDir, { force: true });
+    expect(result.action).toBe("appended");
+    // Original content must be preserved; a new register() is appended.
     const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
-    expect(content).toBe("// custom content without register function\n");
+    expect(content).toContain("// custom content without register function");
+    expect(content).toContain("registerGlasstrace");
+    expect(content).toContain("export async function register()");
+    expect(content).toContain('import { registerGlasstrace } from "@glasstrace/sdk"');
+  });
+
+  it("scaffoldInstrumentation uses a module-level import (callers pass absolute projectRoot)", async () => {
+    // Sanity check that force:true bypasses the prompt for fresh creates too.
+    const result = await scaffoldInstrumentation(tmpDir, { force: true });
+    expect(result.action).toBe("created");
+    expect(result.layout).toBe("root");
+    expect(result.filePath).toBe(path.join(tmpDir, "instrumentation.ts"));
   });
 
   it("injects registerGlasstrace into existing instrumentation.ts with Prisma", async () => {
@@ -71,7 +85,7 @@ export function register() {
 }
 `;
     fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), prismaContent);
-    const result = await scaffoldInstrumentation(tmpDir);
+    const result = await scaffoldInstrumentation(tmpDir, { force: true });
     expect(result.action).toBe("injected");
     const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
     expect(content).toContain("registerGlasstrace()");
@@ -90,7 +104,7 @@ export async function register() {
 }
 `;
     fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), sentryContent);
-    const result = await scaffoldInstrumentation(tmpDir);
+    const result = await scaffoldInstrumentation(tmpDir, { force: true });
     expect(result.action).toBe("injected");
     const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
     expect(content).toContain("registerGlasstrace()");
@@ -108,7 +122,7 @@ export function register() {
 }
 `;
     fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), existing);
-    const result = await scaffoldInstrumentation(tmpDir);
+    const result = await scaffoldInstrumentation(tmpDir, { force: true });
     expect(result.action).toBe("injected");
     const content = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
     // All original code should be preserved
@@ -505,6 +519,149 @@ describe("scaffoldGitignore", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// DISC-493 Issue 1 — src/ layout detection and conflict handling
+// ---------------------------------------------------------------------------
+
+describe("runInit — DISC-493 Issue 1 src/ layout", () => {
+  beforeEach(() => {
+    if (!fs.existsSync(path.join(tmpDir, "next.config.ts"))) {
+      fs.writeFileSync(path.join(tmpDir, "next.config.ts"), "export default {};\n");
+    }
+  });
+
+  it("creates src/instrumentation.ts when the project uses the src/ layout", async () => {
+    fs.mkdirSync(path.join(tmpDir, "src"));
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(fs.existsSync(path.join(tmpDir, "src", "instrumentation.ts"))).toBe(true);
+    // Root must NOT be created — that would be the DISC-493 silent failure
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(false);
+    expect(result.summary.some((s: string) => s.includes("src/instrumentation.ts") || s.includes("src\\instrumentation.ts"))).toBe(true);
+  });
+
+  it("creates root instrumentation.ts when the project does not use src/ layout", async () => {
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "src", "instrumentation.ts"))).toBe(false);
+  });
+
+  it("merges registerGlasstrace into existing src/instrumentation.ts without overwriting", async () => {
+    fs.mkdirSync(path.join(tmpDir, "src"));
+    fs.writeFileSync(
+      path.join(tmpDir, "src", "instrumentation.ts"),
+      'import * as Sentry from "@sentry/nextjs";\n\nexport async function register() {\n  Sentry.init({ dsn: "https://example@sentry.io/123" });\n}\n',
+    );
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+    expect(result.exitCode).toBe(0);
+    const content = fs.readFileSync(path.join(tmpDir, "src", "instrumentation.ts"), "utf-8");
+    expect(content).toContain("Sentry.init");
+    expect(content).toContain("registerGlasstrace");
+    // A competing root file MUST NOT have been created
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(false);
+  });
+
+  it("appends a register() function when src/instrumentation.ts has none", async () => {
+    fs.mkdirSync(path.join(tmpDir, "src"));
+    fs.writeFileSync(
+      path.join(tmpDir, "src", "instrumentation.ts"),
+      'import * as Sentry from "@sentry/nextjs";\n',
+    );
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+    expect(result.exitCode).toBe(0);
+    const content = fs.readFileSync(path.join(tmpDir, "src", "instrumentation.ts"), "utf-8");
+    expect(content).toContain("export async function register()");
+    expect(content).toContain("registerGlasstrace()");
+    expect(content).toContain("Sentry");
+    expect(result.summary.some((s: string) => s.includes("Appended register()"))).toBe(true);
+  });
+
+  it("emits an error and writes nothing when both root and src/ files exist", async () => {
+    fs.mkdirSync(path.join(tmpDir, "src"));
+    const rootBefore = "export async function register() { /* user A */ }\n";
+    const srcBefore = "export async function register() { /* user B */ }\n";
+    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), rootBefore);
+    fs.writeFileSync(path.join(tmpDir, "src", "instrumentation.ts"), srcBefore);
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors.some((e: string) => /undefined|both.*exist/i.test(e))).toBe(true);
+    // Neither file may be mutated
+    expect(fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8")).toBe(rootBefore);
+    expect(fs.readFileSync(path.join(tmpDir, "src", "instrumentation.ts"), "utf-8")).toBe(srcBefore);
+  });
+
+  it("is idempotent under the src/ layout", async () => {
+    fs.mkdirSync(path.join(tmpDir, "src"));
+
+    const first = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+    expect(first.exitCode).toBe(0);
+    const firstContent = fs.readFileSync(path.join(tmpDir, "src", "instrumentation.ts"), "utf-8");
+
+    const second = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+    expect(second.exitCode).toBe(0);
+    const secondContent = fs.readFileSync(path.join(tmpDir, "src", "instrumentation.ts"), "utf-8");
+
+    expect(secondContent).toBe(firstContent);
+    // registerGlasstrace must appear exactly once — no duplication across runs
+    const callCount = secondContent.match(/registerGlasstrace\s*\(\s*\)/g)?.length ?? 0;
+    expect(callCount).toBe(1);
+  });
+
+  it("rolls back the correct file under the src/ layout when a later step fails", async () => {
+    // src/ layout with a later step failure — the scaffolder should have
+    // written src/instrumentation.ts, and rollback must delete THAT file
+    // rather than attempting to clean up a nonexistent root file.
+    fs.mkdirSync(path.join(tmpDir, "src"));
+    // Force .env.local failure to trigger rollback after the instrumentation step
+    fs.mkdirSync(path.join(tmpDir, ".env.local"));
+
+    const result = await runInit({
+      projectRoot: tmpDir,
+      yes: true,
+      coverageMap: false,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.some((e: string) => e.includes(".env.local"))).toBe(true);
+    // src/instrumentation.ts should have been rolled back (init-created file deleted)
+    expect(fs.existsSync(path.join(tmpDir, "src", "instrumentation.ts"))).toBe(false);
+    // Root instrumentation must not exist either
+    expect(fs.existsSync(path.join(tmpDir, "instrumentation.ts"))).toBe(false);
+  });
+});
+
 describe("runInit — CLI flow", () => {
   // runInit requires a Next.js config to pass monorepo classification
   beforeEach(() => {
@@ -563,8 +720,11 @@ describe("runInit — CLI flow", () => {
     }
   });
 
-  it("non-interactive mode warns when instrumentation.ts has unrecognized pattern", async () => {
-    fs.writeFileSync(path.join(tmpDir, "instrumentation.ts"), "// custom content without register()");
+  it("non-interactive mode appends register() when instrumentation.ts has no register function", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "instrumentation.ts"),
+      "// custom content without register()",
+    );
     fs.writeFileSync(path.join(tmpDir, ".env.local"), "GLASSTRACE_API_KEY=my-key\n");
     fs.writeFileSync(path.join(tmpDir, ".gitignore"), ".glasstrace/\n");
 
@@ -574,11 +734,14 @@ describe("runInit — CLI flow", () => {
       coverageMap: false,
     });
     expect(result.exitCode).toBe(0);
-    // File should be unchanged (no register() to inject into)
+    // The scaffolder now appends a register() function rather than leaving
+    // the file untouched — DISC-493 Issue 1.
     const instrumentationContent = fs.readFileSync(path.join(tmpDir, "instrumentation.ts"), "utf-8");
-    expect(instrumentationContent).toBe("// custom content without register()");
-    // Should have a warning about manual instructions
-    expect(result.warnings.some((w: string) => w.includes("register()"))).toBe(true);
+    expect(instrumentationContent).toContain("// custom content without register()");
+    expect(instrumentationContent).toContain("export async function register()");
+    expect(instrumentationContent).toContain("registerGlasstrace()");
+    // Summary should mention the append, not a warning.
+    expect(result.summary.some((s: string) => s.includes("Appended register()"))).toBe(true);
   });
 
   it("returns summary of created/modified files", async () => {
@@ -1271,19 +1434,34 @@ describe("runInit — rollback on failure", () => {
   });
 
   it("does NOT roll back on non-fatal warnings", async () => {
-    // Set up: instrumentation with unrecognized pattern generates a WARNING, not an error
-    fs.writeFileSync(
-      path.join(tmpDir, "instrumentation.ts"),
-      "// custom content without register()",
-    );
+    // Create .mcp.json as a directory so MCP write fails with a warning
+    // (not a fatal error) — the init flow continues, and rollback must
+    // not fire for warnings alone.
     fs.writeFileSync(path.join(tmpDir, ".env.local"), "GLASSTRACE_API_KEY=my-key\n");
     fs.writeFileSync(path.join(tmpDir, ".gitignore"), ".glasstrace/\n");
+    // Create a Claude marker so the init flow actually tries to write .mcp.json
+    fs.mkdirSync(path.join(tmpDir, ".claude"), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, ".mcp.json"));
 
-    const result = await runInit({
-      projectRoot: tmpDir,
-      yes: true,
-      coverageMap: false,
-    });
+    // Enter non-CI so agent detection runs (it is the path that emits
+    // warnings for failed agent configuration).
+    const savedCI = process.env["CI"];
+    const savedGHA = process.env["GITHUB_ACTIONS"];
+    delete process.env["CI"];
+    delete process.env["GITHUB_ACTIONS"];
+    let result;
+    try {
+      result = await runInit({
+        projectRoot: tmpDir,
+        yes: true,
+        coverageMap: false,
+      });
+    } finally {
+      if (savedCI === undefined) delete process.env["CI"];
+      else process.env["CI"] = savedCI;
+      if (savedGHA === undefined) delete process.env["GITHUB_ACTIONS"];
+      else process.env["GITHUB_ACTIONS"] = savedGHA;
+    }
 
     expect(result.exitCode).toBe(0);
     // Warnings were generated but no rollback happened

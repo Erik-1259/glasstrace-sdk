@@ -197,9 +197,44 @@ MCP for any detected AI coding agents (Claude Code, Cursor, Codex,
 Gemini, Windsurf). Agent detection scans for marker files and writes
 native MCP configuration so agents can query traces immediately.
 
-If an `instrumentation.ts` file already exists with an `export function
-register()`, init injects `registerGlasstrace()` as the first statement
-rather than overwriting the file.
+**Instrumentation file precedence:** init targets the first matching
+location in this order:
+
+1. An existing `src/instrumentation.{ts,js,mjs}` — the user has already
+   committed to this location, so merge there.
+2. An existing `instrumentation.{ts,js,mjs}` at the project root — same
+   rationale.
+3. A new `src/instrumentation.ts` when the project contains a `src/`
+   directory at its root (the common Next.js convention used by many
+   apps, including those that already have `src/instrumentation.ts` for
+   Sentry or Datadog).
+4. A new `instrumentation.ts` at the root when no `src/` directory is
+   present.
+
+Next.js only loads instrumentation from one of the two locations, so
+scaffolding to the wrong one was a silent failure — the SDK was
+installed but never ran.
+
+**Merge into existing instrumentation:** If the target file already
+exists, init merges rather than overwriting:
+
+- If it exposes an `export [async] function register()`, init inserts
+  `registerGlasstrace()` as the first statement of the existing body and
+  imports `registerGlasstrace` at the top of the file.
+- If it has no `register()` function (e.g., only contains a top-level
+  Sentry import), init appends a new `export async function register()`
+  that calls `registerGlasstrace()`.
+- If `registerGlasstrace()` is already present, init is a no-op.
+
+Before modifying an existing file, init prompts for confirmation. Pass
+`--force` (or `--yes`) to skip the prompt for automated environments.
+
+**Both-layout conflict:** If the project has **both** `instrumentation.ts`
+at the root **and** `src/instrumentation.ts`, init exits with an error
+without modifying either file. Next.js's loader behavior is undefined
+when both are present: it will pick one and silently ignore the other.
+Merge your code into `src/instrumentation.ts` and delete the root file,
+then re-run init.
 
 **Monorepo support:** When run from a monorepo root (pnpm workspaces,
 npm workspaces, Turborepo, or Lerna), init auto-detects workspace

@@ -12,6 +12,55 @@ section which documents automatic span-processor attachment onto a
 pre-registered OTel provider (Sentry, Datadog, Next.js 16 production)
 and manual integration via `createGlasstraceSpanProcessor()`.
 
+## Initialize
+
+```bash
+npx glasstrace init
+```
+
+The `init` command scaffolds the files Glasstrace needs and merges into
+your existing setup rather than overwriting.
+
+### Instrumentation file precedence
+
+Init picks the first matching location:
+
+1. An existing `src/instrumentation.{ts,js,mjs}` — the user has already
+   committed to this location, so merge there.
+2. An existing `instrumentation.{ts,js,mjs}` at the project root — same
+   rationale.
+3. A new `src/instrumentation.ts` when the project contains a `src/`
+   directory at its root (the common Next.js convention).
+4. A new `instrumentation.ts` at the project root.
+
+Next.js only loads instrumentation from one of the two locations —
+scaffolding to the wrong one silently prevents the SDK from starting,
+so the layout is resolved automatically.
+
+### Merge into existing instrumentation
+
+When an instrumentation file already exists, init merges instead of
+overwriting:
+
+- If the file exports a `register()` function, init inserts
+  `registerGlasstrace()` as the first statement of the existing body
+  and imports `registerGlasstrace` at the top of the file.
+- If the file has no `register()` function (for example, it only
+  contains a top-level Sentry import), init appends a new
+  `export async function register()` that calls `registerGlasstrace()`.
+- If `registerGlasstrace()` is already present, init is a no-op.
+
+Before modifying an existing file, init prompts for confirmation. Pass
+`--force` (or `--yes`) to skip the prompt in automated environments.
+
+### Both-layout conflict
+
+If both `instrumentation.ts` (root) and `src/instrumentation.ts` exist,
+init exits non-zero without modifying either file. Next.js's loader
+behavior is undefined when both are present — it loads one and ignores
+the other. Merge your code into `src/instrumentation.ts`, delete the
+root file, then re-run init.
+
 ## License
 
 [MIT](./LICENSE)
