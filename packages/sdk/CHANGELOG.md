@@ -1,5 +1,19 @@
 # @glasstrace/sdk
 
+## 0.17.2
+
+### Patch Changes
+
+- f0ecf07: Remove `apiKey` from outbound request bodies — credentials are sent exclusively via the `Authorization: Bearer` header (DISC-782, DISC-1156). Adds a dedicated regression test suite and a security note in the package README.
+- a952a5c: SDK hygiene: fix nested-catch double-counting of recordInitFailure (DISC-1121), codify health-report invariant (DISC-1123), fix stale MCP tool count in generateInfoSection (DISC-1222).
+- de523ca: Update `@vercel/otel` peer dependency range to `^2.0.0` (DISC-1264).
+
+  The previous peer range of `^1.0.0` was effectively broken: `@vercel/otel@1.x`
+  requires `@opentelemetry/sdk-trace-base@<2.0.0`, but `@glasstrace/sdk` depends
+  on `@opentelemetry/sdk-trace-base@^2.6.1`, making joint installation impossible
+  (ERESOLVE). The updated range reflects the version the SDK actually supports and
+  eliminates the spurious `unmet peer` warning for users on `@vercel/otel@2.x`.
+
 ## 0.17.1
 
 ### Patch Changes
