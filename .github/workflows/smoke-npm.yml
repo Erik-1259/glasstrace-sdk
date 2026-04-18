@@ -108,7 +108,27 @@ jobs:
       - name: Upgrade npm to declared version
         run: npm install -g npm@11.6.1
 
+      # Guard: skip canary smoke when the canary dist-tag points at a
+      # version older than latest. A stale canary (e.g. left over from
+      # before a DISC-1255-class fix) would fail the bundle regression
+      # check with a false positive — testing old code, not new. We emit
+      # a workflow notice so the stale tag stays visible, and skip the
+      # remaining steps cleanly rather than failing the run.
+      - name: Skip stale canary
+        if: ${{ matrix.dist_tag == 'canary' }}
+        shell: bash
+        run: |
+          latest=$(npm view "@glasstrace/sdk" dist-tags.latest)
+          canary=$(npm view "@glasstrace/sdk" dist-tags.canary)
+          # Use node's semver via npx to compare without installing an
+          # extra dep. Exit 0 when canary >= latest; exit 1 when stale.
+          if ! npx --yes semver --range ">=$latest" "$canary" > /dev/null 2>&1; then
+            echo "::notice::canary dist-tag ($canary) is older than latest ($latest). Skipping canary smoke — update the canary dist-tag when a real pre-release is available."
+            echo "SKIP_REMAINING=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Create bare project and install from npm
+        if: ${{ env.SKIP_REMAINING != 'true' }}
         env:
           DIST_TAG: ${{ matrix.dist_tag }}
         run: |
@@ -123,6 +143,7 @@ jobs:
             @opentelemetry/api
 
       - name: Assert installed versions match dist-tag
+        if: ${{ env.SKIP_REMAINING != 'true' }}
         env:
           DIST_TAG: ${{ matrix.dist_tag }}
         run: |
@@ -151,6 +172,7 @@ jobs:
           echo "Versions match: sdk=$installed_sdk protocol=$installed_proto"
 
       - name: ESM smoke import
+        if: ${{ env.SKIP_REMAINING != 'true' }}
         run: |
           cd /tmp/smoke
           node --input-type=module -e "
@@ -168,6 +190,7 @@ jobs:
           "
 
       - name: CJS smoke require
+        if: ${{ env.SKIP_REMAINING != 'true' }}
         run: |
           cd /tmp/smoke
           node -e "
@@ -181,6 +204,7 @@ jobs:
           "
 
       - name: DISC-1255 regression check on published bundle
+        if: ${{ env.SKIP_REMAINING != 'true' }}
         run: |
           cd /tmp/smoke
           node -e "
