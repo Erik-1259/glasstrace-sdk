@@ -7,8 +7,11 @@ import {
   wrapCJSExport,
   identityFingerprint,
   scaffoldNextConfig,
+  scaffoldInstrumentation,
   injectRegisterGlasstrace,
   hasRegisterGlasstraceCall,
+  resolveInstrumentationTarget,
+  appendRegisterFunction,
 } from "../../../../packages/sdk/src/cli/scaffolder.js";
 
 // ---------------------------------------------------------------------------
@@ -529,5 +532,295 @@ describe("hasRegisterGlasstraceCall", () => {
       "  registerGlasstrace();",
     ].join("\n");
     expect(hasRegisterGlasstraceCall(content)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveInstrumentationTarget (DISC-493 Issue 1)
+// ---------------------------------------------------------------------------
+
+describe("resolveInstrumentationTarget", () => {
+  it("targets root when the project has no src/ directory", () => {
+    const dir = createTmpDir();
+    const result = resolveInstrumentationTarget(dir);
+    expect(result.conflict).toBe(false);
+    expect(result.layout).toBe("root");
+    expect(result.target).toBe(path.join(dir, "instrumentation.ts"));
+    expect(result.existing).toEqual([]);
+  });
+
+  it("targets src/ when the project has a src/ directory and no instrumentation yet", () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    const result = resolveInstrumentationTarget(dir);
+    expect(result.conflict).toBe(false);
+    expect(result.layout).toBe("src");
+    expect(result.target).toBe(path.join(dir, "src", "instrumentation.ts"));
+    expect(result.existing).toEqual([]);
+  });
+
+  it("prefers existing src/instrumentation.ts over a src/ directory guess", () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "src", "instrumentation.ts"), "export async function register() {}\n");
+    const result = resolveInstrumentationTarget(dir);
+    expect(result.conflict).toBe(false);
+    expect(result.layout).toBe("src");
+    expect(result.target).toBe(path.join(dir, "src", "instrumentation.ts"));
+    expect(result.existing).toEqual([path.join(dir, "src", "instrumentation.ts")]);
+  });
+
+  it("prefers existing root instrumentation.ts when no src/ variant exists", () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "instrumentation.ts"), "export async function register() {}\n");
+    const result = resolveInstrumentationTarget(dir);
+    // src/ exists but the user already committed to root — honour that
+    expect(result.conflict).toBe(false);
+    expect(result.layout).toBe("root");
+    expect(result.target).toBe(path.join(dir, "instrumentation.ts"));
+  });
+
+  it("detects conflict when both root and src/ instrumentation files exist", () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "instrumentation.ts"), "export async function register() {}\n");
+    fs.writeFileSync(path.join(dir, "src", "instrumentation.ts"), "export async function register() {}\n");
+    const result = resolveInstrumentationTarget(dir);
+    expect(result.conflict).toBe(true);
+    expect(result.target).toBeNull();
+    expect(result.layout).toBeNull();
+    expect(result.existing).toContain(path.join(dir, "instrumentation.ts"));
+    expect(result.existing).toContain(path.join(dir, "src", "instrumentation.ts"));
+  });
+
+  it("detects .js and .mjs instrumentation variants", () => {
+    const dir = createTmpDir();
+    fs.writeFileSync(path.join(dir, "instrumentation.mjs"), "export async function register() {}\n");
+    const result = resolveInstrumentationTarget(dir);
+    expect(result.conflict).toBe(false);
+    expect(result.layout).toBe("root");
+    expect(result.target).toBe(path.join(dir, "instrumentation.mjs"));
+  });
+
+  it("ignores a src/ path that is a file rather than a directory", () => {
+    const dir = createTmpDir();
+    // A file literally named `src` should not trigger src/-layout detection
+    fs.writeFileSync(path.join(dir, "src"), "");
+    const result = resolveInstrumentationTarget(dir);
+    expect(result.conflict).toBe(false);
+    expect(result.layout).toBe("root");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// appendRegisterFunction
+// ---------------------------------------------------------------------------
+
+describe("appendRegisterFunction", () => {
+  it("appends an import and a register() function to an empty file", () => {
+    const result = appendRegisterFunction("");
+    expect(result).toContain('import { registerGlasstrace } from "@glasstrace/sdk"');
+    expect(result).toContain("export async function register()");
+    expect(result).toContain("registerGlasstrace()");
+  });
+
+  it("preserves existing content when appending", () => {
+    const existing =
+      'import * as Sentry from "@sentry/nextjs";\n' +
+      'Sentry.init({ dsn: "https://example@sentry.io/123" });\n';
+    const result = appendRegisterFunction(existing);
+    expect(result).toContain("Sentry.init");
+    expect(result).toContain('import * as Sentry from "@sentry/nextjs"');
+    expect(result).toContain("export async function register()");
+    expect(result).toContain("registerGlasstrace()");
+  });
+
+  it("does not add a duplicate import when @glasstrace/sdk is already imported", () => {
+    const existing =
+      'import { withGlasstraceConfig } from "@glasstrace/sdk";\n';
+    const result = appendRegisterFunction(existing);
+    const matches = result.match(/@glasstrace\/sdk/g);
+    expect(matches?.length).toBe(1);
+    // The existing specifier is preserved and registerGlasstrace is added
+    expect(result).toContain("withGlasstraceConfig");
+    expect(result).toContain("registerGlasstrace");
+  });
+
+  it("adds a separate import when the existing glasstrace import is namespaced", () => {
+    const existing = 'import * as sdk from "@glasstrace/sdk";\n';
+    const result = appendRegisterFunction(existing);
+    // We can't safely rewrite a namespace import — add a destructured one
+    expect(result).toContain('import { registerGlasstrace } from "@glasstrace/sdk"');
+    expect(result).toContain('import * as sdk from "@glasstrace/sdk"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scaffoldInstrumentation — src/ layout + merge behavior (DISC-493 Issue 1)
+// ---------------------------------------------------------------------------
+
+describe("scaffoldInstrumentation — src/ layout detection", () => {
+  it("writes to src/instrumentation.ts when src/ exists", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    const result = await scaffoldInstrumentation(dir, { force: true });
+    expect(result.action).toBe("created");
+    expect(result.layout).toBe("src");
+    expect(fs.existsSync(path.join(dir, "src", "instrumentation.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "instrumentation.ts"))).toBe(false);
+  });
+
+  it("writes to root instrumentation.ts when src/ is absent", async () => {
+    const dir = createTmpDir();
+    const result = await scaffoldInstrumentation(dir, { force: true });
+    expect(result.action).toBe("created");
+    expect(result.layout).toBe("root");
+    expect(fs.existsSync(path.join(dir, "instrumentation.ts"))).toBe(true);
+  });
+
+  it("appends to existing src/instrumentation.ts without a register() function", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(
+      path.join(dir, "src", "instrumentation.ts"),
+      'import * as Sentry from "@sentry/nextjs";\n',
+    );
+    const result = await scaffoldInstrumentation(dir, { force: true });
+    expect(result.action).toBe("appended");
+    expect(result.layout).toBe("src");
+    const content = fs.readFileSync(path.join(dir, "src", "instrumentation.ts"), "utf-8");
+    expect(content).toContain("Sentry");
+    expect(content).toContain("registerGlasstrace()");
+    expect(content).toContain("export async function register()");
+  });
+
+  it("injects into existing register() function in src/instrumentation.ts", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(
+      path.join(dir, "src", "instrumentation.ts"),
+      'import * as Sentry from "@sentry/nextjs";\n\nexport async function register() {\n  Sentry.init({ dsn: "https://example@sentry.io/123" });\n}\n',
+    );
+    const result = await scaffoldInstrumentation(dir, { force: true });
+    expect(result.action).toBe("injected");
+    expect(result.layout).toBe("src");
+    const content = fs.readFileSync(path.join(dir, "src", "instrumentation.ts"), "utf-8");
+    expect(content).toContain("registerGlasstrace()");
+    expect(content).toContain("Sentry.init");
+    // registerGlasstrace must appear before Sentry.init so the OTel
+    // provider is claimed first (DISC-493 Issue 4 context).
+    expect(content.indexOf("registerGlasstrace()")).toBeLessThan(
+      content.indexOf("Sentry.init"),
+    );
+  });
+
+  it("is idempotent when src/instrumentation.ts already registers glasstrace", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(
+      path.join(dir, "src", "instrumentation.ts"),
+      'import { registerGlasstrace } from "@glasstrace/sdk";\nexport async function register() { registerGlasstrace(); }\n',
+    );
+    const result = await scaffoldInstrumentation(dir, { force: true });
+    expect(result.action).toBe("already-registered");
+    expect(result.layout).toBe("src");
+  });
+
+  it("returns conflict when both root and src/ instrumentation files exist", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "instrumentation.ts"), "export async function register() {}\n");
+    fs.writeFileSync(
+      path.join(dir, "src", "instrumentation.ts"),
+      "export async function register() {}\n",
+    );
+    const result = await scaffoldInstrumentation(dir, { force: true });
+    expect(result.action).toBe("conflict");
+    // Must not have written a third file or mutated either existing one
+    const rootContent = fs.readFileSync(path.join(dir, "instrumentation.ts"), "utf-8");
+    const srcContent = fs.readFileSync(path.join(dir, "src", "instrumentation.ts"), "utf-8");
+    expect(rootContent).toBe("export async function register() {}\n");
+    expect(srcContent).toBe("export async function register() {}\n");
+    // The conflict result points at src/ as the recommended merge target
+    expect(result.filePath).toBe(path.join(dir, "src", "instrumentation.ts"));
+    expect(result.conflictingPath).toBe(path.join(dir, "instrumentation.ts"));
+  });
+});
+
+describe("scaffoldInstrumentation — merge prompt", () => {
+  it("skips the write when the prompt returns false (no --force)", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(
+      path.join(dir, "src", "instrumentation.ts"),
+      'import * as Sentry from "@sentry/nextjs";\n',
+    );
+    let promptCalls = 0;
+    const result = await scaffoldInstrumentation(dir, {
+      prompt: async () => {
+        promptCalls++;
+        return false;
+      },
+    });
+    expect(promptCalls).toBe(1);
+    expect(result.action).toBe("skipped");
+    // File should be unchanged
+    const content = fs.readFileSync(path.join(dir, "src", "instrumentation.ts"), "utf-8");
+    expect(content).toBe('import * as Sentry from "@sentry/nextjs";\n');
+    expect(content).not.toContain("registerGlasstrace");
+  });
+
+  it("honors --force (no prompt) when merging into an existing file", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(
+      path.join(dir, "src", "instrumentation.ts"),
+      'import * as Sentry from "@sentry/nextjs";\n',
+    );
+    let promptCalls = 0;
+    const result = await scaffoldInstrumentation(dir, {
+      force: true,
+      prompt: async () => {
+        promptCalls++;
+        return false; // Would say no, but --force must bypass the prompt
+      },
+    });
+    expect(promptCalls).toBe(0);
+    expect(result.action).toBe("appended");
+    const content = fs.readFileSync(path.join(dir, "src", "instrumentation.ts"), "utf-8");
+    expect(content).toContain("registerGlasstrace()");
+  });
+
+  it("does not prompt when creating a fresh file (no existing content to preserve)", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    let promptCalls = 0;
+    const result = await scaffoldInstrumentation(dir, {
+      prompt: async () => {
+        promptCalls++;
+        return false;
+      },
+    });
+    expect(promptCalls).toBe(0);
+    expect(result.action).toBe("created");
+  });
+
+  it("does not prompt when the file is already registered", async () => {
+    const dir = createTmpDir();
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(
+      path.join(dir, "src", "instrumentation.ts"),
+      'import { registerGlasstrace } from "@glasstrace/sdk";\nexport async function register() { registerGlasstrace(); }\n',
+    );
+    let promptCalls = 0;
+    const result = await scaffoldInstrumentation(dir, {
+      prompt: async () => {
+        promptCalls++;
+        return false;
+      },
+    });
+    expect(promptCalls).toBe(0);
+    expect(result.action).toBe("already-registered");
   });
 });
