@@ -128,12 +128,14 @@ jobs:
         run: |
           set -euo pipefail
           cd /tmp/smoke
-          # Read package.json via fs, not require(). The SDK's exports
-          # field only exposes `.` and `./drizzle`, so Node 22+ rejects
+          # Read package.json via fs, not require(). Older
+          # already-published SDK versions on npm (for example 0.17.0)
+          # did not export `./package.json`, so Node 22+ rejects
           # `require('@glasstrace/sdk/package.json')` with
           # ERR_PACKAGE_PATH_NOT_EXPORTED. fs is unaffected by exports
-          # and mirrors what tooling like npm / pnpm do internally when
-          # they need to inspect installed versions.
+          # and keeps this post-publish smoke compatible with those
+          # versions while still mirroring what npm / pnpm do when they
+          # need to inspect installed versions.
           expected_sdk=$(npm view "@glasstrace/sdk" "dist-tags.$DIST_TAG")
           installed_sdk=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('node_modules/@glasstrace/sdk/package.json', 'utf8')).version)")
           if [ "$expected_sdk" != "$installed_sdk" ]; then
