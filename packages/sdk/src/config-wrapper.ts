@@ -57,11 +57,90 @@ function isTurbopackBuild(): boolean {
 }
 
 /**
+ * Package name the wrapper adds to Next's server-external-packages list.
+ * Kept as a module-level constant so tests can reference the exact string
+ * without risk of drift between implementation and assertion.
+ */
+const SDK_PACKAGE_NAME = "@glasstrace/sdk";
+
+/**
+ * Pushes `@glasstrace/sdk` onto both keys Next.js uses to mark a package
+ * as server-external (loaded via Node's `require()` at runtime instead of
+ * bundled through webpack/Turbopack).
+ *
+ * Next 15+ reads the stable top-level `serverExternalPackages`. Next 14 reads
+ * the legacy `experimental.serverComponentsExternalPackages`. Writing both is
+ * harmless on every supported Next version — the key the running Next does
+ * not recognise is simply ignored — and avoids the need to detect the Next
+ * version at config-time (which is not cleanly possible from inside a
+ * `next.config.{js,ts}` callback).
+ *
+ * Dedupe is intentional: if the user already added `@glasstrace/sdk` to
+ * either array, the entry is not duplicated. User entries are preserved in
+ * their original order; the SDK entry is appended.
+ *
+ * This closes the `next dev --webpack` failure mode from DISC-1257: the
+ * webpack dev bundler does not externalize any `node:` scheme, so a bundled
+ * SDK chunk that imports `node:child_process` (and similar) crashes on
+ * first request. Treating the SDK as a server-external package sidesteps
+ * the bundler entirely on the instrumentation path.
+ *
+ * Mutates the `config` bag in place; callers pass the shallow-copied bag
+ * owned by `withGlasstraceConfig`, so the user's original reference is not
+ * affected.
+ */
+function ensureServerExternal(config: Record<string, unknown>): void {
+  // Next 15+ stable key: top-level `serverExternalPackages`.
+  const existingStable = config.serverExternalPackages;
+  const stable: string[] = Array.isArray(existingStable)
+    ? // Clone so we never mutate a caller-owned array in place.
+      existingStable.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  if (!stable.includes(SDK_PACKAGE_NAME)) {
+    stable.push(SDK_PACKAGE_NAME);
+  }
+  config.serverExternalPackages = stable;
+
+  // Next 14 legacy key: `experimental.serverComponentsExternalPackages`.
+  const existingExperimental = config.experimental;
+  const experimental: Record<string, unknown> =
+    existingExperimental != null && typeof existingExperimental === "object"
+      ? { ...(existingExperimental as Record<string, unknown>) }
+      : {};
+  const existingLegacy = experimental.serverComponentsExternalPackages;
+  const legacy: string[] = Array.isArray(existingLegacy)
+    ? existingLegacy.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  if (!legacy.includes(SDK_PACKAGE_NAME)) {
+    legacy.push(SDK_PACKAGE_NAME);
+  }
+  experimental.serverComponentsExternalPackages = legacy;
+  config.experimental = experimental;
+}
+
+/**
  * Wraps the developer's Next.js config to enable source map generation
  * and upload .map files to the ingestion API at build time.
  *
  * The build NEVER fails because of Glasstrace — all errors are caught
  * and logged as warnings.
+ *
+ * ## What the wrapper configures for you
+ *
+ * - `experimental.serverSourceMaps: true` — enables server-side source maps
+ *   so Glasstrace can resolve stack traces back to your source.
+ * - `serverExternalPackages: ["@glasstrace/sdk"]` (Next 15+) and
+ *   `experimental.serverComponentsExternalPackages: ["@glasstrace/sdk"]`
+ *   (Next 14) — tells Next to load the SDK via Node's `require()` at runtime
+ *   instead of bundling it through webpack or Turbopack. This is the same
+ *   pattern Prisma, `@vercel/otel`, Sentry, `sharp`, and `bcrypt` ship with.
+ *   It closes the `next dev --webpack` crash from DISC-1257 and is applied
+ *   unconditionally for consistency with production builds.
+ * - An empty `turbopack: {}` when none is set, so Next 16 does not reject
+ *   the config for setting `webpack` without a companion `turbopack` key
+ *   (DISC-1256).
+ * - A `webpack` hook that collects and uploads `.map` files on client-side
+ *   production builds.
  *
  * ## Turbopack
  *
@@ -109,6 +188,13 @@ export function withGlasstraceConfig<T extends NextConfig>(nextConfig: T): T {
     ...existingExperimental,
     serverSourceMaps: true,
   };
+
+  // Mark the SDK as a server-external package (DISC-1257). This must run
+  // after the `serverSourceMaps` assignment above because `ensureServerExternal`
+  // also writes to `bag.experimental` — calling it first would have its work
+  // clobbered by the spread. `ensureServerExternal` itself preserves any
+  // existing `experimental` keys (including `serverSourceMaps`) by spreading.
+  ensureServerExternal(bag);
 
   // Seed an empty Turbopack config when the user has not set one. Next 16
   // refuses builds that set `webpack` without a companion `turbopack` key

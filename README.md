@@ -76,6 +76,24 @@ import { withGlasstraceConfig } from "@glasstrace/sdk";
 export default withGlasstraceConfig({ reactStrictMode: true });
 ```
 
+`withGlasstraceConfig()` configures three things for you:
+
+- **Server source maps** — `experimental.serverSourceMaps` is enabled so
+  Glasstrace can resolve stack traces back to your source.
+- **Turbopack/webpack parity** — an empty `turbopack: {}` is seeded when
+  none is set so Next 16 does not reject builds that configure `webpack`
+  without a companion `turbopack` key.
+- **Server-external SDK** — `@glasstrace/sdk` is added to
+  `serverExternalPackages` (Next 15+) and
+  `experimental.serverComponentsExternalPackages` (Next 14) so the SDK
+  is loaded via Node's `require()` at runtime instead of bundled through
+  webpack or Turbopack. This mirrors the pattern used by Prisma,
+  `@vercel/otel`, Sentry, `sharp`, and `bcrypt`.
+
+Monorepo users editing a forked `@glasstrace/sdk` as a workspace dep and
+wanting live HMR of SDK source should remove `@glasstrace/sdk` from
+`serverExternalPackages` after calling `withGlasstraceConfig()`.
+
 ### Manual Error Capture
 
 Record errors explicitly as span events, independent of automatic

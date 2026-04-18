@@ -283,6 +283,120 @@ describe("withGlasstraceConfig", () => {
     }
   });
 
+  // --- DISC-1257 regression coverage: serverExternalPackages push ---
+
+  it("pushes @glasstrace/sdk onto serverExternalPackages for an empty config", () => {
+    const result = withGlasstraceConfig({});
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages;
+    expect(stable).toEqual(["@glasstrace/sdk"]);
+  });
+
+  it("pushes @glasstrace/sdk onto experimental.serverComponentsExternalPackages for an empty config", () => {
+    const result = withGlasstraceConfig({});
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental ?? {};
+    expect(experimental.serverComponentsExternalPackages).toEqual([
+      "@glasstrace/sdk",
+    ]);
+  });
+
+  it("preserves user-provided serverExternalPackages entries (Next 15+ shape)", () => {
+    const result = withGlasstraceConfig({
+      serverExternalPackages: ["prisma", "@prisma/client"],
+    });
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages;
+    // User entries first, SDK appended.
+    expect(stable).toEqual(["prisma", "@prisma/client", "@glasstrace/sdk"]);
+  });
+
+  it("preserves user-provided experimental.serverComponentsExternalPackages entries (Next 14 shape)", () => {
+    const result = withGlasstraceConfig({
+      experimental: {
+        serverComponentsExternalPackages: ["prisma"],
+      },
+    });
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental ?? {};
+    expect(experimental.serverComponentsExternalPackages).toEqual([
+      "prisma",
+      "@glasstrace/sdk",
+    ]);
+  });
+
+  it("does not duplicate @glasstrace/sdk if the user already added it (stable key)", () => {
+    const result = withGlasstraceConfig({
+      serverExternalPackages: ["@glasstrace/sdk", "prisma"],
+    });
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages;
+    expect(stable).toEqual(["@glasstrace/sdk", "prisma"]);
+  });
+
+  it("does not duplicate @glasstrace/sdk if the user already added it (legacy key)", () => {
+    const result = withGlasstraceConfig({
+      experimental: {
+        serverComponentsExternalPackages: ["@glasstrace/sdk"],
+      },
+    });
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental ?? {};
+    expect(experimental.serverComponentsExternalPackages).toEqual([
+      "@glasstrace/sdk",
+    ]);
+  });
+
+  it("preserves unrelated experimental keys while adding the external packages entry", () => {
+    const result = withGlasstraceConfig({
+      experimental: { typedRoutes: true, ppr: "incremental" },
+    });
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental ?? {};
+    expect(experimental.typedRoutes).toBe(true);
+    expect(experimental.ppr).toBe("incremental");
+    expect(experimental.serverSourceMaps).toBe(true);
+    expect(experimental.serverComponentsExternalPackages).toEqual([
+      "@glasstrace/sdk",
+    ]);
+  });
+
+  it("does not mutate the caller's config object or arrays", () => {
+    const userExternals = ["prisma"];
+    const userExperimentalExternals = ["bcrypt"];
+    const userConfig = {
+      serverExternalPackages: userExternals,
+      experimental: {
+        serverComponentsExternalPackages: userExperimentalExternals,
+        typedRoutes: true,
+      },
+    };
+    const snapshot = JSON.parse(JSON.stringify(userConfig)) as typeof userConfig;
+
+    const result = withGlasstraceConfig(userConfig);
+
+    // Original config references and arrays must be untouched.
+    expect(userConfig).toEqual(snapshot);
+    expect(userExternals).toEqual(["prisma"]);
+    expect(userExperimentalExternals).toEqual(["bcrypt"]);
+
+    // But the returned config carries the additions.
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages as string[];
+    expect(stable).toEqual(["prisma", "@glasstrace/sdk"]);
+    expect(stable).not.toBe(userExternals);
+
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental as Record<string, unknown>;
+    expect(experimental.serverComponentsExternalPackages).toEqual([
+      "bcrypt",
+      "@glasstrace/sdk",
+    ]);
+    expect(experimental.serverComponentsExternalPackages).not.toBe(
+      userExperimentalExternals,
+    );
+  });
+
   it("does not warn about Turbopack when --webpack flag is present", () => {
     _resetTurbopackWarningForTesting();
     const originalArgv = process.argv;
