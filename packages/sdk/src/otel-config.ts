@@ -298,6 +298,43 @@ async function runRegistrationPath(
     }
 
     (vercelOtel.registerOTel as (opts: Record<string, unknown>) => void)(otelConfig);
+
+    // Register a shutdown hook so buffered spans are flushed on SIGTERM.
+    // @vercel/otel does not install its own signal or beforeExit handlers
+    // (verified empirically in DISC-1250 / vercel-shutdown.test.ts): it
+    // constructs an internal Sdk instance and discards the reference, making
+    // provider.shutdown() unreachable via any ambient mechanism. Without this
+    // hook, spans buffered in the BatchSpanProcessor are lost when the Vercel
+    // runtime delivers SIGTERM to the function worker (DISC-1263).
+    //
+    // Signal handlers are registered earlier in registerGlasstrace() via
+    // registerSignalHandlers() (DISC-1249). This hook plugs into the existing
+    // coordinator; registerBeforeExitTrigger() covers the event-loop-drain path.
+    // Capture the concrete provider now (registration time) rather than at hook
+    // execution time. If something replaced the global provider between now and
+    // shutdown, we still flush the correct one — matching the pattern Scenario A
+    // uses when capturing `provider` in a lexical closure.
+    // @vercel/otel wraps its provider in a ProxyTracerProvider; unwrap once
+    // to reach the concrete BasicTracerProvider that exposes shutdown().
+    const vercelProxy = otelApi.trace.getTracerProvider() as unknown as {
+      getDelegate?: () => { shutdown?: () => Promise<void> };
+    };
+    const vercelConcreteProvider = typeof vercelProxy.getDelegate === "function"
+      ? vercelProxy.getDelegate()
+      : (vercelProxy as { shutdown?: () => Promise<void> });
+    registerShutdownHook({
+      name: "vercel-otel-shutdown",
+      priority: 0,
+      fn: async () => {
+        try {
+          await vercelConcreteProvider.shutdown?.();
+        } catch {
+          // best-effort: provider may already be shut down or not support shutdown
+        }
+      },
+    });
+    registerBeforeExitTrigger();
+
     setOtelState(OtelState.OWNS_PROVIDER);
     emitLifecycleEvent("otel:configured", { state: OtelState.OWNS_PROVIDER, scenario: "E" });
     return;
