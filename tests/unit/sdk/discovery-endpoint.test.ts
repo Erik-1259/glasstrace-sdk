@@ -1,7 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { DiscoveryResponseSchema } from "@glasstrace/protocol";
 import type { AnonApiKey, SessionId } from "@glasstrace/protocol";
-import { createDiscoveryHandler, isAllowedOrigin, buildCorsHeaders } from "../../../packages/sdk/src/discovery-endpoint.js";
+import {
+  createDiscoveryHandler,
+  isAllowedOrigin,
+  buildCorsHeaders,
+  _resetDiscoveryDeprecationWarningForTesting,
+} from "../../../packages/sdk/src/discovery-endpoint.js";
 import type { ClaimState } from "../../../packages/sdk/src/discovery-endpoint.js";
 
 const MOCK_ANON_KEY = ("gt_anon_" + "a".repeat(48)) as AnonApiKey;
@@ -360,6 +365,46 @@ describe("Discovery Endpoint (/__glasstrace/config)", () => {
       const body = await response!.json();
       const result = DiscoveryResponseSchema.safeParse(body);
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe("Deprecation warning (DISC-1127)", () => {
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      _resetDiscoveryDeprecationWarningForTesting();
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    it("emits a deprecation warning on first Glasstrace-path invocation", async () => {
+      const handler = makeHandler();
+      await handler(makeRequest("/__glasstrace/config"));
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const msg = String(warnSpy.mock.calls[0]?.[0] ?? "");
+      expect(msg).toContain("createDiscoveryHandler is deprecated");
+      expect(msg.startsWith("[glasstrace]")).toBe(true);
+      expect(msg).toContain("npx glasstrace init");
+      expect(msg).toContain("public/.well-known/glasstrace.json");
+      expect(msg).toContain("v1.0.0");
+    });
+
+    it("does not repeat the warning on subsequent invocations in the same process", async () => {
+      const handler = makeHandler();
+      await handler(makeRequest("/__glasstrace/config"));
+      await handler(makeRequest("/__glasstrace/config"));
+      await handler(makeRequest("/__glasstrace/config"));
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not fire the warning on non-matching paths", async () => {
+      const handler = makeHandler();
+      await handler(makeRequest("/api/users"));
+      await handler(makeRequest("/"));
+      expect(warnSpy).not.toHaveBeenCalled();
     });
   });
 });

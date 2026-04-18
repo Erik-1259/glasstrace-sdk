@@ -1,6 +1,45 @@
 import type { AnonApiKey, SessionId } from "@glasstrace/protocol";
 
 /**
+ * Tracks whether the runtime-handler deprecation warning has already been
+ * emitted for this process. The warning is noisy by design (we want users
+ * to migrate) but should fire exactly once per process — repeated logs on
+ * every request would drown out real warnings and spam CI output.
+ */
+let runtimeHandlerDeprecationWarned = false;
+
+/**
+ * @internal Reset the deprecation-warning flag. Test-only.
+ */
+export function _resetDiscoveryDeprecationWarningForTesting(): void {
+  runtimeHandlerDeprecationWarned = false;
+}
+
+/**
+ * Emits a one-time `console.warn` explaining that the runtime discovery
+ * handler has been superseded by the static file written by `sdk init`.
+ *
+ * Scheduled for removal in v1.0.0 per the deprecation timeline documented
+ * in the "SDK Discovery Endpoint / Static File" design doc. Kept out of
+ * the module top level so bundlers can tree-shake the warning path when
+ * the handler itself is not imported.
+ *
+ * The `[glasstrace]` prefix matches the SDK-internal log convention so
+ * console capture (see `console-capture.ts`) skips the warning rather
+ * than recording it as a user-facing span event.
+ */
+function warnRuntimeHandlerDeprecatedOnce(): void {
+  if (runtimeHandlerDeprecationWarned) return;
+  runtimeHandlerDeprecationWarned = true;
+  console.warn(
+    "[glasstrace] createDiscoveryHandler is deprecated. " +
+      "Run `npx glasstrace init` to generate a static file at " +
+      "public/.well-known/glasstrace.json (or static/.well-known/glasstrace.json " +
+      "on SvelteKit). The runtime handler will be removed in v1.0.0.",
+  );
+}
+
+/**
  * Checks whether the given Origin header is allowed for CORS access.
  *
  * Allowed origins:
@@ -81,6 +120,11 @@ export function createDiscoveryHandler(
     if (url.pathname !== "/__glasstrace/config") {
       return null;
     }
+
+    // Fire the deprecation notice only when the handler actually serves a
+    // Glasstrace-discovery request — non-matching paths pass through, so
+    // warning there would spam users who never invoked the handler.
+    warnRuntimeHandlerDeprecatedOnce();
 
     // Restrict CORS to known extension origins instead of wildcard
     const origin = request.headers.get("Origin");
