@@ -14,6 +14,9 @@ the backend (private) depend on this package.
 - **Configuration schemas** -- `CaptureConfig`, `GlasstraceOptions`
 - **Wire format schemas** -- `SdkInitResponse`, `DiscoveryResponse`, `SourceMapUploadResponse`
 - **Constants** -- semantic attribute names, default capture config
+- **Session ID derivation** -- `deriveSessionId()` produces the same 16-char
+  hex `SessionId` the SDK uses, so independent clients (SDK, browser
+  extension, tooling) agree on a session without coordination.
 
 ## License
 
