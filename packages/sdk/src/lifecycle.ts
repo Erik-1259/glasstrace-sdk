@@ -621,6 +621,16 @@ export function registerSignalHandlers(): void {
 
   _signalHandlersRegistered = true;
 
+  // Snapshot listener counts BEFORE we install our own handlers. A non-zero
+  // count means another party (Sentry, Datadog, the existing provider) already
+  // owns SIGTERM/SIGINT and will re-raise when it is done flushing. Zero means
+  // nobody else handles the signal — if we don't re-raise, the process hangs.
+  // This check is needed because `coexistenceState === "coexisting"` only tells
+  // us that ANOTHER OTEL PROVIDER exists, not that it installed signal handlers.
+  // A bare BasicTracerProvider has no signal handlers, so we must still re-raise.
+  const otherSigtermListeners = process.listenerCount("SIGTERM");
+  const otherSigintListeners = process.listenerCount("SIGINT");
+
   const handler = (signal: NodeJS.Signals) => {
     void executeShutdown().finally(() => {
       // Remove our handler to avoid re-entry on re-raise.
@@ -628,16 +638,24 @@ export function registerSignalHandlers(): void {
         process.removeListener("SIGTERM", _signalHandler);
         process.removeListener("SIGINT", _signalHandler);
       }
-      // Re-raise the signal to restore default OS behavior ONLY when
-      // Glasstrace owns the provider. In coexistence mode ("coexisting")
-      // the existing provider (e.g. Sentry, Datadog) owns signal shutdown
-      // and will re-raise on its own schedule. Re-raising here would race
-      // against that provider's async flush and could kill the process
+      // Re-raise the signal to restore default OS behavior UNLESS we are in
+      // coexistence mode AND the other provider had its own signal handlers at
+      // registration time. When both conditions hold, that provider owns signal
+      // re-raise and will terminate the process on its own schedule; re-raising
+      // here would race against its async flush and could kill the process
       // before buffered spans are delivered.
-      // During the async-window ("unknown"), re-raise is the safe default
-      // because it preserves standard process termination semantics when
-      // we have no information about provider ownership.
-      if (getCoexistenceState() !== "coexisting") {
+      //
+      // When coexisting but NO pre-existing signal listeners were detected, we
+      // must still re-raise — the other provider (e.g. a bare BasicTracerProvider)
+      // has no signal ownership, so OS default termination will not happen
+      // otherwise and the process would hang indefinitely.
+      //
+      // During the async-window ("unknown"), re-raise is the safe default because
+      // it preserves standard process termination semantics when we have no
+      // information about provider ownership.
+      const otherListeners = signal === "SIGTERM" ? otherSigtermListeners : otherSigintListeners;
+      const otherProviderOwnsSignal = getCoexistenceState() === "coexisting" && otherListeners > 0;
+      if (!otherProviderOwnsSignal) {
         process.kill(process.pid, signal);
       }
     });

@@ -137,7 +137,13 @@ describe("DISC-1265: coexistence-aware signal handler", () => {
   // State: "coexisting" (Scenario B — existing provider owns shutdown)
   // -------------------------------------------------------------------------
 
-  it("state=coexisting: hooks run but signal is NOT re-raised", async () => {
+  it("state=coexisting with pre-existing signal listener: hooks run but signal is NOT re-raised", async () => {
+    // Simulate a provider (Sentry, Datadog) that already installed its own
+    // SIGTERM handler BEFORE Glasstrace. With another listener in place,
+    // the other provider owns re-raise and Glasstrace must not race it.
+    const noop = () => {};
+    process.once("SIGTERM", noop);
+
     setCoexistenceState("coexisting");
 
     let hookRan = false;
@@ -160,9 +166,33 @@ describe("DISC-1265: coexistence-aware signal handler", () => {
     expect(getCoreState()).toBe(CoreState.SHUTDOWN);
     // The existing provider owns re-raise — we must not call process.kill().
     expect(killSpy).not.toHaveBeenCalled();
+    // Clean up the noop listener if it hasn't fired yet.
+    process.removeListener("SIGTERM", noop);
   });
 
-  it("state=coexisting: heartbeat hook fires on exit", async () => {
+  it("state=coexisting with NO pre-existing signal listeners: still re-raises to prevent process hang", async () => {
+    // Codex P1: coexistenceState=coexisting only means another OTel PROVIDER
+    // exists — it does NOT guarantee that provider installed signal handlers.
+    // A bare BasicTracerProvider has no signal handlers; if we skip re-raise
+    // here, the process hangs indefinitely on SIGTERM.
+    // No other listener installed before registerSignalHandlers().
+    setCoexistenceState("coexisting");
+    registerSignalHandlers();
+
+    process.emit("SIGTERM", "SIGTERM");
+
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+    }
+
+    expect(getCoreState()).toBe(CoreState.SHUTDOWN);
+    // Must re-raise — nobody else will terminate the process.
+    expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGTERM");
+  });
+
+  it("state=coexisting with pre-existing listener: heartbeat hook fires on exit", async () => {
+    const noop = () => {};
+    process.once("SIGINT", noop);
     setCoexistenceState("coexisting");
 
     const hookLog: string[] = [];
@@ -191,9 +221,12 @@ describe("DISC-1265: coexistence-aware signal handler", () => {
     // Both hooks fire (priority order: 5 before 10).
     expect(hookLog).toEqual(["coexistence-flush", "heartbeat-flush"]);
     expect(killSpy).not.toHaveBeenCalled();
+    process.removeListener("SIGINT", noop);
   });
 
-  it("state=coexisting: no re-raise on SIGINT either", async () => {
+  it("state=coexisting with pre-existing listener: no re-raise on SIGINT", async () => {
+    const noop = () => {};
+    process.once("SIGINT", noop);
     setCoexistenceState("coexisting");
     registerSignalHandlers();
 
@@ -211,21 +244,26 @@ describe("DISC-1265: coexistence-aware signal handler", () => {
   // Scenario B startup window race (Codex review finding on #168)
   // -------------------------------------------------------------------------
 
-  it("Scenario B: synchronous setCoexistenceState prevents re-raise even before configureOtel() async probe", async () => {
-    // Reproduces the exact race found in the Codex review: when an external
-    // provider is detected synchronously in registerGlasstrace(), we must set
-    // coexistenceState="coexisting" BEFORE installing the signal handler so
-    // that a signal arriving in the configureOtel() async tick window does not
-    // re-raise and terminate the process prematurely.
+  it("Scenario B: synchronous setCoexistenceState + existing listener prevents re-raise during async window", async () => {
+    // Reproduces the exact race: when an external provider (e.g. Sentry) is
+    // detected synchronously in registerGlasstrace(), we set coexistenceState
+    // BEFORE installing our handler so signals in the configureOtel() async
+    // tick window are handled correctly. The pre-existing listener represents
+    // the other framework's own signal handler.
     //
     // Pattern from registerGlasstrace():
     //   1. anotherProviderRegistered = true (synchronous probe)
-    //   2. setCoexistenceState("coexisting")      ← must come before handler
+    //   2. setCoexistenceState("coexisting")      ← before handler
     //   3. registerSignalHandlers()
     //   4. ... async configureOtel() still pending ...
     //   5. SIGTERM arrives while step 4 is awaiting
 
-    setCoexistenceState("coexisting");  // step 2 (simulates register.ts)
+    // Simulate the existing provider's signal handler (step 0 — installed by
+    // Sentry/Datadog before registerGlasstrace() ran).
+    const existingProviderHandler = () => {};
+    process.once("SIGTERM", existingProviderHandler);
+
+    setCoexistenceState("coexisting");  // step 2
     registerSignalHandlers();           // step 3
 
     // step 5: signal arrives while configureOtel() async probe is still pending
@@ -235,9 +273,10 @@ describe("DISC-1265: coexistence-aware signal handler", () => {
       await Promise.resolve();
     }
 
-    // Must NOT re-raise — the existing provider owns signal shutdown.
+    // Must NOT re-raise — the existing provider (with its own handler) owns shutdown.
     expect(killSpy).not.toHaveBeenCalled();
     expect(getCoreState()).toBe(CoreState.SHUTDOWN);
+    process.removeListener("SIGTERM", existingProviderHandler);
   });
 
   // -------------------------------------------------------------------------
