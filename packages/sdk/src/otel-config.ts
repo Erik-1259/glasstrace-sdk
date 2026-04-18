@@ -310,20 +310,24 @@ async function runRegistrationPath(
     // Signal handlers are registered earlier in registerGlasstrace() via
     // registerSignalHandlers() (DISC-1249). This hook plugs into the existing
     // coordinator; registerBeforeExitTrigger() covers the event-loop-drain path.
+    // Capture the concrete provider now (registration time) rather than at hook
+    // execution time. If something replaced the global provider between now and
+    // shutdown, we still flush the correct one — matching the pattern Scenario A
+    // uses when capturing `provider` in a lexical closure.
+    // @vercel/otel wraps its provider in a ProxyTracerProvider; unwrap once
+    // to reach the concrete BasicTracerProvider that exposes shutdown().
+    const vercelProxy = otelApi.trace.getTracerProvider() as unknown as {
+      getDelegate?: () => { shutdown?: () => Promise<void> };
+    };
+    const vercelConcreteProvider = typeof vercelProxy.getDelegate === "function"
+      ? vercelProxy.getDelegate()
+      : (vercelProxy as { shutdown?: () => Promise<void> });
     registerShutdownHook({
       name: "vercel-otel-shutdown",
       priority: 0,
       fn: async () => {
         try {
-          // @vercel/otel wraps the provider in a ProxyTracerProvider; unwrap
-          // to reach the concrete BasicTracerProvider that has shutdown().
-          const proxy = otelApi.trace.getTracerProvider() as unknown as {
-            getDelegate?: () => { shutdown?: () => Promise<void> };
-          };
-          const concrete = typeof proxy.getDelegate === "function"
-            ? proxy.getDelegate()
-            : (proxy as { shutdown?: () => Promise<void> });
-          await concrete.shutdown?.();
+          await vercelConcreteProvider.shutdown?.();
         } catch {
           // best-effort: provider may already be shut down or not support shutdown
         }
