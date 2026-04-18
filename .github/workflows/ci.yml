@@ -65,40 +65,120 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm run test
-
+      # Build runs before Test so the bundle-output tests (e.g. the
+      # DISC-1257 shim-regression guard in `tests/unit/sdk/bundle-shim-regression.test.ts`)
+      # can load the emitted `packages/sdk/dist/index.js` and
+      # `packages/sdk/dist/index.cjs`. Those tests self-skip when
+      # `dist/` is absent, so running Test first would silently bypass
+      # them in CI.
       - name: Build
         run: npm run build
 
-      # DISC-1255 regression guard: ensure the emitted SDK bundle does not
-      # contain any literal `import("@vercel/blob/client")` or
-      # `import("@vercel/otel")` calls. Those literals cause webpack / tsup /
-      # esbuild to resolve the specifier at build time and fail for consumers
-      # without the optional peer dependency installed. The SDK hides these
-      # specifiers behind a `Function("id", "return import(id)")` indirection
-      # so they must never appear as literal `import(...)` calls in shipped JS.
-      # The check intentionally only scans emitted JS (`.js` / `.cjs`) — source
-      # maps and `.d.ts` files legitimately reference the specifier.
-      - name: Check for bundled optional peer-dep specifiers
+      - name: Test
+        run: npm run test
+
+      # Bundle-output regression guards. The emitted SDK JS must not contain
+      # patterns that are known to break consumer bundlers:
+      #
+      # - DISC-1255: literal `import("@vercel/blob/client")` or
+      #   `import("@vercel/otel")` calls. Those cause webpack / tsup / esbuild
+      #   to resolve the specifier at build time and fail for consumers
+      #   without the optional peer dependency installed. The SDK hides these
+      #   specifiers behind a `Function("id", "return import(id)")`
+      #   indirection, so literal `import(...)` calls must never appear in
+      #   shipped JS.
+      #
+      # - DISC-1257: two independent tsup defaults, both of which break
+      #   `next dev --webpack`:
+      #     (a) the stock `esm_shims.js` header, which marks the injected
+      #         import path from "path";
+      #         import { fileURLToPath } from "url";
+      #         pair used to synthesize `__dirname`/`__filename` in ESM
+      #         output.
+      #     (b) `removeNodeProtocol: true`, which rewrites SDK-source
+      #         `node:fs/promises` imports to `fs/promises` before emit.
+      #   Both forms produce unprefixed Node-builtin specifiers that the
+      #   webpack dev bundler does not externalize. The SDK ships with
+      #   `shims: false` AND `removeNodeProtocol: false` in
+      #   `packages/sdk/tsup.config.ts` and must not regress on either.
+      #
+      # The check intentionally only scans emitted JS (`.js` / `.cjs`) —
+      # source maps and `.d.ts` files legitimately reference the specifiers.
+      - name: Check shipped bundle for known-bad patterns
         run: |
           set -euo pipefail
-          violations=$(
+          status=0
+
+          peer_dep_violations=$(
             grep -RhnE 'import\s*\(\s*["'\''](@vercel/blob/client|@vercel/otel)["'\'']\s*\)' \
               packages/sdk/dist \
               --include='*.js' --include='*.cjs' \
               || true
           )
-          if [ -n "$violations" ]; then
+          if [ -n "$peer_dep_violations" ]; then
             echo "::error::Literal import() of an optional peer dependency found in shipped bundle."
             echo "This will break webpack/tsup/esbuild builds for consumers without the peer dep installed."
             echo "Route the import through the Function()-based dynamic-import evasion helper instead. See DISC-1255."
             echo ""
             echo "Offending lines:"
-            echo "$violations"
-            exit 1
+            echo "$peer_dep_violations"
+            status=1
           fi
-          echo "No literal optional-peer-dep import() calls found in shipped bundle."
+
+          # `-F` forces fixed-string matching so the slashes and dots in the
+          # marker are not reinterpreted. `--include` filters go before the
+          # pattern and directory — placing them after would require a `--`
+          # to end option parsing, which GNU grep would then read as
+          # additional positional file paths and silently scan everything
+          # (including source maps), producing spurious failures.
+          shim_violations=$(
+            grep -Rln --include='*.js' --include='*.cjs' \
+              -F '// ../../node_modules/tsup/assets/esm_shims.js' \
+              packages/sdk/dist \
+              || true
+          )
+          if [ -n "$shim_violations" ]; then
+            echo "::error::tsup ESM shim header detected in shipped bundle."
+            echo "The shim injects static top-level imports of 'path' and 'url' that break next dev --webpack."
+            echo "Set \`shims: false\` in packages/sdk/tsup.config.ts and replace any __dirname / __filename"
+            echo "usage with fileURLToPath(import.meta.url). See DISC-1257."
+            echo ""
+            echo "Offending files:"
+            echo "$shim_violations"
+            status=1
+          fi
+
+          # DISC-1257 part two: tsup's `removeNodeProtocol: true` default
+          # rewrites every SDK-source `node:fs/promises` / `node:path` /
+          # etc. import to the unprefixed form, which `next dev --webpack`
+          # cannot resolve. The SDK disables that default. This check
+          # asserts that at least one emitted SDK bundle still contains a
+          # `node:`-prefixed specifier — i.e. the override is in effect
+          # and the SDK source has not been rewritten away from `node:*`.
+          #
+          # We intentionally check for presence rather than the absence
+          # of unprefixed forms: bundled third-party deps (e.g.
+          # `@opentelemetry/resources`) legitimately use unprefixed
+          # `fs`/`util` and we do not want to gate on their internals.
+          node_prefix_hits=$(
+            grep -REl --include='*.js' --include='*.cjs' \
+              -e 'from "node:' -e "from 'node:" \
+              -e 'require\("node:' -e "require\\('node:" \
+              packages/sdk/dist \
+              || true
+          )
+          if [ -z "$node_prefix_hits" ]; then
+            echo "::error::No \`node:\`-prefixed Node built-in imports found in shipped bundle."
+            echo "tsup's \`removeNodeProtocol: true\` default has rewritten SDK-source \`node:\` specifiers"
+            echo "to the unprefixed form, which breaks next dev --webpack. Set \`removeNodeProtocol: false\`"
+            echo "in packages/sdk/tsup.config.ts. See DISC-1257."
+            status=1
+          fi
+
+          if [ "$status" -eq 0 ]; then
+            echo "No known-bad bundle patterns found in shipped SDK output."
+          fi
+          exit "$status"
 
       - name: Pack (verify publishable)
         run: |
@@ -140,8 +220,10 @@ jobs:
           # Node.js built-ins are externalized because the SDK is a server-
           # side package — the goal is verifying the module graph resolves,
           # not eliminating all Node.js references.
-          # Both prefixed (node:fs) and unprefixed (fs) forms are needed
-          # because tsup strips the node: prefix during bundling.
+          # Both prefixed (node:fs) and unprefixed (fs) forms are listed:
+          # the SDK's own source uses the `node:`-prefixed form (see
+          # DISC-1257) while bundled third-party dependencies inline their
+          # own unprefixed `fs` / `path` / `util` imports.
           npx esbuild --bundle --platform=browser --outfile=out.js \
             --external:@opentelemetry/* \
             --external:'node:*' \
@@ -223,10 +305,16 @@ jobs:
     name: Next.js compatibility (webpack + Turbopack)
     runs-on: ubuntu-latest
     needs: test
-    # DISC-1255 and DISC-1256 regression coverage: scaffold a bare Next.js
-    # project, install the packed SDK tarball, apply `withGlasstraceConfig`
-    # to a minimal `next.config.ts`, and run `next build` in both the
-    # Turbopack-default path and the `--webpack` path. Both must exit 0.
+    # DISC-1255, DISC-1256, and DISC-1257 regression coverage: scaffold a
+    # bare Next.js project, install the packed SDK tarball, apply
+    # `withGlasstraceConfig` to a minimal `next.config.ts`, and exercise
+    # three entry points:
+    #   1. `next build` (Turbopack default in Next 16)
+    #   2. `next build --webpack`
+    #   3. `next dev --webpack` (live dev server + GET / smoke)
+    # All three must succeed. (3) is the DISC-1257-specific guard — the
+    # dev bundler path does not externalize Node built-ins, so SDK chunks
+    # emitted with tsup's ESM shim fail at runtime on this path only.
     steps:
       - uses: actions/checkout@v6
 
@@ -307,6 +395,30 @@ jobs:
           cat > app/page.tsx <<'PAGE'
           export default function Page() { return <main>ok</main>; }
           PAGE
+          # DISC-1257 repro path: the failure mode requires the SDK's
+          # instrumentation entry to be pulled through webpack's dev
+          # bundler. Without `instrumentation.ts`, Next never needs to
+          # resolve `@glasstrace/sdk/dist/**/chunk-*.js`, so the shim
+          # chunk never surfaces and the smoke would pass even with the
+          # regression present. The `register()` hook is Next's official
+          # extension point for the instrumentation graph.
+          #
+          # Endpoint points at a closed local port so the SDK's
+          # fire-and-forget init POST fails immediately without leaving
+          # pending network I/O. The apiKey is a non-secret placeholder
+          # — the SDK will short-circuit to anonymous mode after the
+          # init call errors out, which is fine for a compile-time
+          # regression guard.
+          cat > instrumentation.ts <<'INSTRUMENTATION'
+          export async function register() {
+            const { registerGlasstrace } = await import("@glasstrace/sdk");
+            registerGlasstrace({
+              apiKey: "gt_ci_smoke_placeholder",
+              endpoint: "http://127.0.0.1:9",
+              forceEnable: true,
+            });
+          }
+          INSTRUMENTATION
 
       - name: next build (Turbopack default, DISC-1256)
         working-directory: /tmp/next-compat
@@ -315,6 +427,108 @@ jobs:
       - name: next build --webpack (DISC-1255 + DISC-1256)
         working-directory: /tmp/next-compat
         run: npx next build --webpack
+
+      # DISC-1257 regression guard: `next dev --webpack` must start without
+      # `Module not found` errors for Node built-ins (`path`, `fs/promises`)
+      # that tsup's ESM shim used to inject at the top of SDK chunks.
+      # Unlike `next build --webpack`, the dev bundler path does not
+      # externalize those built-ins, so a regression here (e.g. someone
+      # flipping `shims: true` back on) is only caught by a live dev
+      # server smoke. The step:
+      #   1. starts `next dev --webpack` in the background, capturing logs
+      #   2. waits up to ~60s for the "Ready" marker
+      #   3. asserts `GET /` returns 200
+      #   4. kills the child process and waits for it to exit so the CI
+      #      runner does not leak an orphan dev server
+      # The outer step timeout caps the entire smoke at ~90s.
+      - name: next dev --webpack smoke (DISC-1257)
+        working-directory: /tmp/next-compat
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          PORT=4700
+          LOG=/tmp/next-compat/next-dev.log
+          : > "$LOG"
+
+          # Start the dev server in the background. `setsid` puts it in a
+          # new process group so we can kill the whole tree cleanly on exit.
+          setsid npx next dev --webpack --port "$PORT" > "$LOG" 2>&1 &
+          DEV_PID=$!
+          DEV_PGID=$(ps -o pgid= "$DEV_PID" | tr -d ' ')
+
+          cleanup() {
+            echo "Stopping next dev (pid=$DEV_PID pgid=$DEV_PGID)..."
+            # SIGTERM the whole process group first, escalate to SIGKILL
+            # if it does not exit within 10s.
+            kill -TERM "-$DEV_PGID" 2>/dev/null || true
+            for _ in $(seq 1 10); do
+              if ! kill -0 "$DEV_PID" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            if kill -0 "$DEV_PID" 2>/dev/null; then
+              echo "next dev did not exit on SIGTERM; sending SIGKILL"
+              kill -KILL "-$DEV_PGID" 2>/dev/null || true
+            fi
+            # Wait so the CI runner does not leave a zombie child.
+            wait "$DEV_PID" 2>/dev/null || true
+            echo "--- next dev log (tail) ---"
+            tail -n 200 "$LOG" || true
+          }
+          trap cleanup EXIT
+
+          # Wait for the "Ready" marker or a fatal `Module not found` error
+          # — whichever appears first. 60s should be ample on a GitHub
+          # runner; we exit early if the server reports readiness sooner.
+          echo "Waiting for next dev ready marker..."
+          for i in $(seq 1 60); do
+            if grep -q "Module not found" "$LOG"; then
+              echo "::error::next dev --webpack reported Module not found. DISC-1257 regression."
+              exit 1
+            fi
+            if grep -qE "Ready in [0-9]+" "$LOG"; then
+              echo "next dev ready after ~${i}s"
+              break
+            fi
+            if ! kill -0 "$DEV_PID" 2>/dev/null; then
+              echo "::error::next dev exited before reporting Ready."
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if ! grep -qE "Ready in [0-9]+" "$LOG"; then
+            echo "::error::next dev --webpack did not become Ready within 60s."
+            exit 1
+          fi
+
+          # Hit the root route. First request triggers compilation, which
+          # under webpack-dev can take a few seconds; retry briefly so a
+          # slow compile doesn't flake the check.
+          echo "Requesting GET / ..."
+          status=""
+          for _ in $(seq 1 20); do
+            status=$(curl -s -o /tmp/next-compat/response.html -w "%{http_code}" "http://127.0.0.1:$PORT/" || echo "000")
+            if [ "$status" = "200" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$status" != "200" ]; then
+            echo "::error::GET / returned $status (expected 200). DISC-1257 regression."
+            exit 1
+          fi
+
+          # Re-scan the log one last time for Module not found that may have
+          # surfaced only after the first request triggered a recompile.
+          if grep -q "Module not found" "$LOG"; then
+            echo "::error::next dev --webpack reported Module not found after serving request. DISC-1257 regression."
+            exit 1
+          fi
+
+          echo "next dev --webpack smoke passed: Ready, GET / = 200, no Module not found."
 
       - name: Cleanup scaffold
         if: always()

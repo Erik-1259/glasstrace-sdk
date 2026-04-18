@@ -283,6 +283,283 @@ describe("withGlasstraceConfig", () => {
     }
   });
 
+  // --- DISC-1257 regression coverage: serverExternalPackages push ---
+
+  it("pushes @glasstrace/sdk onto serverExternalPackages for an empty config", () => {
+    const result = withGlasstraceConfig({});
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages;
+    expect(stable).toEqual(["@glasstrace/sdk"]);
+  });
+
+  it("does not write the deprecated experimental.serverComponentsExternalPackages key", () => {
+    const result = withGlasstraceConfig({});
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental ?? {};
+    // Next 16 logs a deprecation warning for the legacy key; we only write
+    // the stable Next 15+ top-level key now.
+    expect(experimental.serverComponentsExternalPackages).toBeUndefined();
+  });
+
+  it("preserves user-provided serverExternalPackages entries (Next 15+ shape)", () => {
+    const result = withGlasstraceConfig({
+      serverExternalPackages: ["prisma", "@prisma/client"],
+    });
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages;
+    // User entries first, SDK appended.
+    expect(stable).toEqual(["prisma", "@prisma/client", "@glasstrace/sdk"]);
+  });
+
+  it("leaves user-provided experimental.serverComponentsExternalPackages untouched", () => {
+    // The legacy key is no longer managed by the wrapper; if a user has it
+    // explicitly (e.g. for Next 14), we neither add to nor strip from it.
+    const result = withGlasstraceConfig({
+      experimental: {
+        serverComponentsExternalPackages: ["prisma"],
+      },
+    });
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental ?? {};
+    expect(experimental.serverComponentsExternalPackages).toEqual(["prisma"]);
+  });
+
+  it("does not duplicate @glasstrace/sdk if the user already added it (stable key)", () => {
+    const result = withGlasstraceConfig({
+      serverExternalPackages: ["@glasstrace/sdk", "prisma"],
+    });
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages;
+    expect(stable).toEqual(["@glasstrace/sdk", "prisma"]);
+  });
+
+  it("preserves unrelated experimental keys while adding the external packages entry", () => {
+    const result = withGlasstraceConfig({
+      experimental: { typedRoutes: true, ppr: "incremental" },
+    });
+    const experimental = (result as { experimental?: Record<string, unknown> })
+      .experimental ?? {};
+    expect(experimental.typedRoutes).toBe(true);
+    expect(experimental.ppr).toBe("incremental");
+    expect(experimental.serverSourceMaps).toBe(true);
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages;
+    expect(stable).toEqual(["@glasstrace/sdk"]);
+  });
+
+  it("does not mutate the caller's config object or arrays", () => {
+    const userExternals = ["prisma"];
+    const userConfig = {
+      serverExternalPackages: userExternals,
+      experimental: {
+        typedRoutes: true,
+      },
+    };
+    const snapshot = JSON.parse(JSON.stringify(userConfig)) as typeof userConfig;
+
+    const result = withGlasstraceConfig(userConfig);
+
+    // Original config references and arrays must be untouched.
+    expect(userConfig).toEqual(snapshot);
+    expect(userExternals).toEqual(["prisma"]);
+
+    // But the returned config carries the addition.
+    const stable = (result as { serverExternalPackages?: unknown })
+      .serverExternalPackages as string[];
+    expect(stable).toEqual(["prisma", "@glasstrace/sdk"]);
+    expect(stable).not.toBe(userExternals);
+  });
+
+  // --- DISC-1257 regression coverage: webpack `node:*` externals ---
+
+  // Shape of an entry in webpack's array-of-externals. Functions here
+  // receive `(data, callback)` where `data.request` carries the import
+  // specifier. We mirror that shape below to drive the SDK's handler
+  // without pulling in webpack as a test dep.
+  type ExternalsFnEntry = (
+    data: { request?: string },
+    callback: (err: Error | null, result?: string) => void,
+  ) => void;
+
+  function invokeSdkExternalsFn(
+    webpackConfig: Record<string, unknown>,
+    context: Record<string, unknown> = { isServer: true, dev: true },
+  ): ExternalsFnEntry {
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)(webpackConfig, context);
+    const externals = wrapped.externals as unknown[];
+    // The SDK handler is always the final entry so user externals take
+    // precedence. The cast is safe because `appendNodeSchemeExternal`
+    // only appends function entries.
+    const handler = externals[externals.length - 1] as ExternalsFnEntry;
+    expect(typeof handler).toBe("function");
+    return handler;
+  }
+
+  it("externalizes node:* requests as `commonjs node:...`", () => {
+    const handler = invokeSdkExternalsFn({});
+    const cb = vi.fn();
+    handler({ request: "node:child_process" }, cb);
+    expect(cb).toHaveBeenCalledWith(null, "commonjs node:child_process");
+  });
+
+  it("externalizes bare Node built-in requests as `commonjs <name>`", () => {
+    // OTel exporters use the bare form (`import * as zlib from "zlib"`).
+    // Next dev's webpack pipeline does not auto-externalize these, so the
+    // SDK's handler must cover both `node:`-prefixed and bare built-ins.
+    const handler = invokeSdkExternalsFn({});
+    const cb = vi.fn();
+    handler({ request: "zlib" }, cb);
+    expect(cb).toHaveBeenCalledWith(null, "commonjs zlib");
+  });
+
+  it("externalizes bare Node built-in subpaths as `commonjs <name>`", () => {
+    // `fs/promises`, `stream/web`, etc. are reported as built-ins by
+    // `node:module.isBuiltin`. The handler preserves the exact specifier.
+    const handler = invokeSdkExternalsFn({});
+    const cb = vi.fn();
+    handler({ request: "fs/promises" }, cb);
+    expect(cb).toHaveBeenCalledWith(null, "commonjs fs/promises");
+  });
+
+  it("passes through third-party package requests untouched", () => {
+    const handler = invokeSdkExternalsFn({});
+    const cb = vi.fn();
+    handler({ request: "react" }, cb);
+    // Pass-through = callback called with (null) and no `result` arg.
+    expect(cb).toHaveBeenCalledWith(null);
+  });
+
+  it("passes through relative-path requests untouched", () => {
+    const handler = invokeSdkExternalsFn({});
+    const cb = vi.fn();
+    handler({ request: "./local-module" }, cb);
+    expect(cb).toHaveBeenCalledWith(null);
+  });
+
+  it("passes through an undefined request untouched", () => {
+    const handler = invokeSdkExternalsFn({});
+    const cb = vi.fn();
+    handler({}, cb);
+    expect(cb).toHaveBeenCalledWith(null);
+  });
+
+  it("appends the handler to an existing externals array, preserving user entries", () => {
+    const userEntry1 = { react: "React" };
+    const userEntry2 = /^some-regex$/;
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)(
+      { externals: [userEntry1, userEntry2] },
+      { isServer: true, dev: true },
+    );
+    const externals = wrapped.externals as unknown[];
+    expect(externals).toHaveLength(3);
+    expect(externals[0]).toBe(userEntry1);
+    expect(externals[1]).toBe(userEntry2);
+    expect(typeof externals[2]).toBe("function");
+  });
+
+  it("wraps a non-array externals value (function form) in an array", () => {
+    const userFn = (): void => {};
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)(
+      { externals: userFn },
+      { isServer: true, dev: true },
+    );
+    const externals = wrapped.externals as unknown[];
+    expect(externals).toHaveLength(2);
+    expect(externals[0]).toBe(userFn);
+    expect(typeof externals[1]).toBe("function");
+  });
+
+  it("wraps a non-array externals value (object map form) in an array", () => {
+    const userMap = { react: "React", "react-dom": "ReactDOM" };
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)(
+      { externals: userMap },
+      { isServer: true, dev: true },
+    );
+    const externals = wrapped.externals as unknown[];
+    expect(externals).toHaveLength(2);
+    expect(externals[0]).toBe(userMap);
+    expect(typeof externals[1]).toBe("function");
+  });
+
+  it("initialises an array when no externals were set", () => {
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)({}, { isServer: true, dev: true });
+    const externals = wrapped.externals as unknown[];
+    expect(Array.isArray(externals)).toBe(true);
+    expect(externals).toHaveLength(1);
+    expect(typeof externals[0]).toBe("function");
+  });
+
+  it("does NOT append the externals handler on client-side compilations", () => {
+    // Client compilations rely on Next's browser polyfills / fallbacks for
+    // packages like `buffer`, `stream`, `crypto`. Emitting a `commonjs`
+    // external for these in the client bundle would bypass the fallbacks
+    // and inject `require(...)` calls that fail in the browser.
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)({}, { isServer: false, dev: true });
+    // Client-side pass: externals should be untouched (undefined, since
+    // the user didn't set any), not an array containing the SDK's handler.
+    expect(wrapped.externals).toBeUndefined();
+  });
+
+  it("preserves user-supplied externals on client-side compilations", () => {
+    const userFn = vi.fn();
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)(
+      { externals: userFn },
+      { isServer: false, dev: true },
+    );
+    // Client-side pass: user's externals shape is left exactly as passed
+    // in, with no SDK handler appended.
+    expect(wrapped.externals).toBe(userFn);
+  });
+
+  it("runs the user's webpack hook before appending externals", () => {
+    const callOrder: string[] = [];
+    const userWebpack = vi.fn((config: Record<string, unknown>) => {
+      callOrder.push("user");
+      config.customFlag = true;
+      return config;
+    });
+    const result = withGlasstraceConfig({ webpack: userWebpack });
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)({}, { isServer: true, dev: true });
+    callOrder.push("sdk");
+    expect(userWebpack).toHaveBeenCalledOnce();
+    expect(wrapped.customFlag).toBe(true);
+    const externals = wrapped.externals as unknown[];
+    expect(externals).toHaveLength(1);
+    expect(typeof externals[0]).toBe("function");
+    expect(callOrder).toEqual(["user", "sdk"]);
+  });
+
   it("does not warn about Turbopack when --webpack flag is present", () => {
     _resetTurbopackWarningForTesting();
     const originalArgv = process.argv;
