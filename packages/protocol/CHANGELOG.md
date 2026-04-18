@@ -1,5 +1,11 @@
 # @glasstrace/protocol
 
+## 0.19.0
+
+### Minor Changes
+
+- b204dbf: Export `deriveSessionId()` for client-side session ID derivation (DISC-1266). Enables consumers (e.g. the Glasstrace browser extension) to derive the same `SessionId` the SDK produces from the same inputs. The implementation is a pure-JavaScript SHA-256 so every runtime — Node CJS, Node ESM, modern browsers, Vercel Edge, Cloudflare Workers — produces a byte-identical result.
+
 ## 0.17.1
 
 ### Patch Changes
