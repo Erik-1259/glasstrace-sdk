@@ -287,20 +287,28 @@ export function withGlasstraceConfig<T extends NextConfig>(nextConfig: T): T {
     }
 
     // DISC-1257: externalize Node.js built-in imports for the webpack path.
+    const webpackContext = context as WebpackContext;
+
     // Next's `serverExternalPackages` only influences RSC / Route Handler
     // bundling; the instrumentation path under `next dev --webpack` still
     // runs transitive SDK imports through the dev bundler, which crashes
     // on any built-in module — `UnhandledSchemeError` for `node:*` and
     // `Can't resolve 'zlib'` / `'stream'` / etc. for bare specifiers used
     // by OTel's exporter dependencies (vercel/next.js#58003, #28774).
+    //
     // Telling webpack to externalize every Node built-in as a runtime
-    // CommonJS require resolves the crash for every webpack code path —
-    // production build, dev server, instrumentation hook — without
-    // special-casing Next's internals. Turbopack ignores this field and
-    // resolves Node built-ins natively.
-    appendNodeSchemeExternal(result);
-
-    const webpackContext = context as WebpackContext;
+    // CommonJS require resolves the crash on every SERVER webpack code
+    // path — production build, dev server, instrumentation hook. We
+    // scope it to `webpackContext.isServer` so client-side compilations
+    // (where Next applies browser polyfills / fallbacks for things like
+    // `buffer` / `stream` / `crypto`) are not affected. Emitting
+    // `commonjs` externals on the client would bypass those fallbacks
+    // and inject `require(...)` at runtime, which fails in the browser.
+    // Turbopack ignores this field and resolves Node built-ins natively
+    // on both client and server.
+    if (webpackContext.isServer) {
+      appendNodeSchemeExternal(result);
+    }
 
     // Only run source map upload on client-side production builds (not server, not dev)
     if (!webpackContext.isServer && webpackContext.dev === false) {

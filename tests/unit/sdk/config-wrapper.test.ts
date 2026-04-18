@@ -509,6 +509,36 @@ describe("withGlasstraceConfig", () => {
     expect(typeof externals[0]).toBe("function");
   });
 
+  it("does NOT append the externals handler on client-side compilations", () => {
+    // Client compilations rely on Next's browser polyfills / fallbacks for
+    // packages like `buffer`, `stream`, `crypto`. Emitting a `commonjs`
+    // external for these in the client bundle would bypass the fallbacks
+    // and inject `require(...)` calls that fail in the browser.
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)({}, { isServer: false, dev: true });
+    // Client-side pass: externals should be untouched (undefined, since
+    // the user didn't set any), not an array containing the SDK's handler.
+    expect(wrapped.externals).toBeUndefined();
+  });
+
+  it("preserves user-supplied externals on client-side compilations", () => {
+    const userFn = vi.fn();
+    const result = withGlasstraceConfig({});
+    const wrapped = (result.webpack as (
+      c: Record<string, unknown>,
+      ctx: Record<string, unknown>,
+    ) => Record<string, unknown>)(
+      { externals: userFn },
+      { isServer: false, dev: true },
+    );
+    // Client-side pass: user's externals shape is left exactly as passed
+    // in, with no SDK handler appended.
+    expect(wrapped.externals).toBe(userFn);
+  });
+
   it("runs the user's webpack hook before appending externals", () => {
     const callOrder: string[] = [];
     const userWebpack = vi.fn((config: Record<string, unknown>) => {
