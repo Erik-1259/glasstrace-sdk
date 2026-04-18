@@ -240,9 +240,16 @@ export class GlasstraceExporter implements SpanExporter {
       // DISC-1254 covers that path. Label "detected" not "confirmed" to
       // leave room for rare false-positive cases (legacy form POSTs,
       // hand-rolled page-route POST handlers).
-      if (method === "POST" && route) {
-        const isApiRoute = route === "/api" || route.startsWith("/api/");
-        const isInternalRoute = route.startsWith("/_next/");
+      //
+      // `route` may come from `http.route` (a bare path like "/login") or
+      // fall back to `span.name` (which Next.js formats as "POST /login",
+      // sometimes "middleware POST", etc.). We normalize to the leading
+      // path segment before matching so a span named "POST /api/auth"
+      // does not slip past the `/api/` guard and get falsely flagged.
+      const actionRoute = extractLeadingPath(route);
+      if (method === "POST" && actionRoute) {
+        const isApiRoute = actionRoute === "/api" || actionRoute.startsWith("/api/");
+        const isInternalRoute = actionRoute.startsWith("/_next/");
         if (!isApiRoute && !isInternalRoute) {
           extra[ATTR.NEXT_ACTION_DETECTED] = true;
           // Developer-facing nudge (once per process): when a Server Action
@@ -577,6 +584,39 @@ function getExceptionEventDetails(span: ReadableSpan): {
     type: typeof type === "string" ? type : undefined,
     message: typeof message === "string" ? message : undefined,
   };
+}
+
+/**
+ * Extracts the leading path from a route-or-span-name string so the
+ * Server Action heuristic (DISC-1253) can match reliably regardless of
+ * whether the value came from `http.route` (bare path, e.g. "/login")
+ * or from `span.name` (Next.js-formatted, e.g. "POST /login" or
+ * "middleware POST /login").
+ *
+ * Returns the first `/…`-prefixed token, or `undefined` if no such
+ * token is present. Empty input yields `undefined` so callers can use
+ * the result as a truthy guard.
+ */
+export function extractLeadingPath(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+
+  // Fast path: already a bare path.
+  if (trimmed.startsWith("/")) {
+    const firstSpace = trimmed.indexOf(" ");
+    return firstSpace === -1 ? trimmed : trimmed.slice(0, firstSpace);
+  }
+
+  // Fallback: scan for the first whitespace-separated token that looks
+  // like a path. Handles "POST /login", "middleware POST /login", etc.
+  for (const token of trimmed.split(/\s+/)) {
+    if (token.startsWith("/")) {
+      return token;
+    }
+  }
+
+  return undefined;
 }
 
 /**
