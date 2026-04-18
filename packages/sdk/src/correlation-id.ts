@@ -104,7 +104,7 @@ function readHeader(
   const asFetch = headers as FetchHeadersLike;
   if (typeof asFetch.get === "function") {
     const raw = asFetch.get(HEADER_NAME);
-    return normalize(raw);
+    return firstToken(raw);
   }
 
   // Node IncomingMessage headers: case-insensitive dictionary lookup.
@@ -129,22 +129,44 @@ function readHeader(
  * Picks the first value from a possibly-array header and trims it.
  * Correlation IDs are logically single-valued; when duplicated we keep
  * the first occurrence and drop the rest.
+ *
+ * Also handles the comma-joined form that intermediaries (and some
+ * Node.js HTTP stacks) produce when the same header is sent multiple
+ * times — `x-gt-cid: cid1, x-gt-cid: cid2` may surface as the single
+ * string `"cid1, cid2"` via `Headers.get()` or `IncomingMessage.headers`.
+ * Storing that raw merged value would both fail correlation and
+ * silently suppress the DISC-1253 Server Action nudge (which only
+ * checks attribute presence, not validity). We split on commas and
+ * keep the first non-empty token.
  */
 function firstValue(value: string | string[] | undefined): string | undefined {
   if (Array.isArray(value)) {
     for (const entry of value) {
-      const trimmed = normalize(entry);
-      if (trimmed) return trimmed;
+      const token = firstToken(entry);
+      if (token) return token;
     }
     return undefined;
   }
-  return normalize(value);
+  return firstToken(value);
 }
 
-function normalize(value: string | null | undefined): string | undefined {
+/**
+ * Extracts the first comma-separated token from a header-like string
+ * and normalizes it. Returns undefined when no non-empty token exists
+ * within the length bound.
+ */
+function firstToken(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return undefined;
-  if (trimmed.length > MAX_CID_LENGTH) return undefined;
-  return trimmed;
+  // Split on commas (HTTP list-header separator). Trim each token and
+  // return the first non-empty one that fits within MAX_CID_LENGTH.
+  // A single un-merged header has no commas and this reduces to the
+  // previous normalize() behavior.
+  const parts = value.split(",");
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.length > MAX_CID_LENGTH) return undefined;
+    return trimmed;
+  }
+  return undefined;
 }

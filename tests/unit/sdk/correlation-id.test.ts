@@ -112,6 +112,65 @@ describe("captureCorrelationId (DISC-1253)", () => {
     });
   });
 
+  it("keeps only the first token when duplicates are comma-joined (Node merged headers)", () => {
+    // Some intermediaries and Node HTTP stacks surface duplicate
+    // `x-gt-cid` headers as a single comma-joined string. Codex P2 on
+    // PR #156: storing the raw merged value would produce an invalid
+    // correlation ID AND silently suppress the Server Action nudge
+    // (the enrichment check only tests attribute presence).
+    withActiveSpan((span) => {
+      const req = {
+        headers: { "x-gt-cid": `${TEST_CID}, cid_other` },
+      };
+
+      captureCorrelationId(req);
+
+      expect(span.setAttribute).toHaveBeenCalledWith(CORRELATION_ATTR, TEST_CID);
+      expect(span.setAttribute).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("handles comma-joined duplicates via Fetch-API Headers.get()", () => {
+    withActiveSpan((span) => {
+      const req = new Request("http://example.test/", {
+        headers: { "x-gt-cid": `${TEST_CID}, cid_other` },
+      });
+
+      captureCorrelationId(req);
+
+      expect(span.setAttribute).toHaveBeenCalledWith(CORRELATION_ATTR, TEST_CID);
+    });
+  });
+
+  it("skips empty leading tokens in comma-joined duplicates", () => {
+    withActiveSpan((span) => {
+      const req = {
+        headers: { "x-gt-cid": ` , ${TEST_CID}, cid_other` },
+      };
+
+      captureCorrelationId(req);
+
+      expect(span.setAttribute).toHaveBeenCalledWith(CORRELATION_ATTR, TEST_CID);
+    });
+  });
+
+  it("rejects comma-joined duplicates where the first token exceeds the length cap", () => {
+    // If the first token in the merged header is longer than the cap,
+    // the whole header is rejected — we do NOT silently fall back to
+    // the second token because the first token being oversized
+    // indicates an unexpected / hostile shape.
+    withActiveSpan((span) => {
+      const oversized = "x".repeat(200);
+      const req = {
+        headers: { "x-gt-cid": `${oversized}, ${TEST_CID}` },
+      };
+
+      captureCorrelationId(req);
+
+      expect(span.setAttribute).not.toHaveBeenCalled();
+    });
+  });
+
   it("does NOT set attribute when header is absent", () => {
     withActiveSpan((span) => {
       const req = { headers: {} };
