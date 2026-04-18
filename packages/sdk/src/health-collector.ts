@@ -93,6 +93,18 @@ export function collectHealthReport(sdkVersion: string): SdkHealthReport | null 
  * (e.g., spans exported during the init HTTP call). Values are clamped
  * to 0 to guard against edge cases.
  *
+ * Core invariant (DISC-1123): for any finite counter C and finite reported
+ * value, after acknowledge:
+ *   C_new = max(0, C_before_ack - reported_value)
+ * This guarantees:
+ *   1. Reported finite, non-negative values are removed exactly once
+ *      (no double-counting).
+ *   2. Activity between snapshot and acknowledge is preserved (not lost).
+ *   3. The counter never goes negative (clamp prevents underflow).
+ * Corruption vectors guarded: non-finite report fields (NaN/±Infinity)
+ * preserve the counter; negative finite report fields are clamped to 0
+ * before subtraction.
+ *
  * `lastConfigSyncAt` is NOT affected — config age measures time since
  * the last successful sync, not the last acknowledgment.
  */

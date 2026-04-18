@@ -285,6 +285,7 @@ describe("generateInfoSection", () => {
     it("contains tool descriptions", () => {
       const info = generateInfoSection(makeAgent("claude"), ENDPOINT);
       expect(info).toContain("get_latest_error");
+      expect(info).toContain("get_error_list");
       expect(info).toContain("get_trace");
       expect(info).toContain("get_root_cause");
       expect(info).toContain("get_test_suggestions");

@@ -237,6 +237,46 @@ describe("health-collector", () => {
       expect(nextReport?.tracesExportedSinceLastInit).toBe(15);
       expect(nextReport?.initFailures).toBe(1);
     });
+
+    it("core invariant: C_new = max(0, C_before - reported), post-snapshot activity preserved (DISC-1123)", () => {
+      // Codifies the DISC-1123 core invariant for acknowledgeHealthReport:
+      //   1. Reported values are subtracted exactly once — no double-counting.
+      //   2. Activity that occurs between snapshot and acknowledge is preserved.
+      //   3. Counters never go negative — underflow is clamped to 0.
+      //
+      // Three-phase simulation matching the real backgroundInit flow.
+
+      // Phase 1: activity before snapshot
+      recordSpansExported(20);
+      recordSpansDropped(4);
+      recordInitFailure();
+      recordInitFailure();
+
+      // Phase 2: snapshot (simulating collectHealthReport called by backgroundInit)
+      const snapshot = collectHealthReport("1.0.0")!;
+      expect(snapshot.tracesExportedSinceLastInit).toBe(20);
+      expect(snapshot.tracesDropped).toBe(4);
+      expect(snapshot.initFailures).toBe(2);
+
+      // Phase 3: concurrent activity between snapshot and acknowledge
+      // (spans exported while the init HTTP call was in flight)
+      recordSpansExported(7);
+      recordSpansDropped(1);
+
+      // Acknowledge: only the snapshot values are subtracted
+      acknowledgeHealthReport(snapshot);
+
+      // Post-acknowledge: counters equal the post-snapshot increments only
+      const after = collectHealthReport("1.0.0")!;
+      expect(after.tracesExportedSinceLastInit).toBe(7); // (20+7) - 20 = 7
+      expect(after.tracesDropped).toBe(1);               // (4+1)  - 4  = 1
+      expect(after.initFailures).toBe(0);                // (2+0)  - 2  = 0
+
+      // Invariant 3: counters are non-negative after acknowledge
+      expect(after.tracesExportedSinceLastInit).toBeGreaterThanOrEqual(0);
+      expect(after.tracesDropped).toBeGreaterThanOrEqual(0);
+      expect(after.initFailures).toBeGreaterThanOrEqual(0);
+    });
   });
 
   describe("Input validation", () => {
