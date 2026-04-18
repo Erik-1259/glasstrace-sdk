@@ -1,3 +1,5 @@
+import { isBuiltin as isNodeBuiltin } from "node:module";
+
 /**
  * Structural view of Next.js's `NextConfig`. The SDK does not import Next's
  * type directly because Next is not a peer dependency — this wrapper must
@@ -64,26 +66,89 @@ function isTurbopackBuild(): boolean {
 const SDK_PACKAGE_NAME = "@glasstrace/sdk";
 
 /**
- * Pushes `@glasstrace/sdk` onto both keys Next.js uses to mark a package
- * as server-external (loaded via Node's `require()` at runtime instead of
- * bundled through webpack/Turbopack).
+ * Signature of a webpack 5 externals function in the array-of-entries form.
+ * The `data` argument carries the import request; the `callback` signals
+ * either an externalization decision (`"commonjs <specifier>"`) or a
+ * pass-through (no second argument).
  *
- * Next 15+ reads the stable top-level `serverExternalPackages`. Next 14 reads
- * the legacy `experimental.serverComponentsExternalPackages`. Writing both is
- * harmless on every supported Next version — the key the running Next does
- * not recognise is simply ignored — and avoids the need to detect the Next
- * version at config-time (which is not cleanly possible from inside a
- * `next.config.{js,ts}` callback).
+ * Typed structurally rather than importing from `webpack` to keep the SDK
+ * free of a webpack peer dependency.
+ */
+type WebpackExternalsFn = (
+  data: { request?: string; context?: string; contextInfo?: unknown; getResolve?: unknown },
+  callback: (err: Error | null, result?: string) => void,
+) => void;
+
+/**
+ * Appends an externals entry to a webpack config that rewrites every
+ * Node.js built-in import into a runtime CommonJS `require()`. This is
+ * the piece of DISC-1257 that actually fixes `next dev --webpack`:
+ * webpack dev-mode ships no default handler for the `node:` URI scheme
+ * AND does not auto-externalize bare built-ins pulled through transitive
+ * SDK dependencies (e.g. `import * as zlib from "zlib"` inside an OTel
+ * exporter). Either form crashes the first render — `UnhandledSchemeError`
+ * for `node:*`, `Can't resolve 'zlib'` for bare built-ins — unless the
+ * wrapper tells webpack to treat them as runtime externals.
+ *
+ * Membership is decided by Node's own `isBuiltin` helper
+ * (`node:module`, available since Node 18.6; SDK `engines` floor is
+ * Node >= 20), so the list of built-ins stays authoritative across
+ * Node versions — no hand-maintained allowlist to drift out of date.
+ *
+ * Webpack 5 accepts externals as a string, RegExp, object, function, or
+ * array of any mixture of those. Next.js itself uses the array form. The
+ * helper preserves whatever the user (or Next) already supplied:
+ * - Array: append the new entry, user entries keep their positions.
+ * - Function or object: wrap in an array with the user entry first so it
+ *   takes precedence over the SDK's handler.
+ * - Missing / nullish: initialise as a single-entry array.
+ *
+ * The emitted `commonjs <request>` form preserves whichever specifier the
+ * caller used (prefixed or bare), which Node resolves natively on Node
+ * >= 14.18 — well below the SDK's `engines` floor of Node >= 20.
+ */
+function appendNodeSchemeExternal(webpackConfig: Record<string, unknown>): void {
+  const nodeBuiltinExternal: WebpackExternalsFn = (data, callback) => {
+    const request = data.request;
+    if (typeof request === "string" && isNodeBuiltin(request)) {
+      callback(null, "commonjs " + request);
+      return;
+    }
+    callback(null);
+  };
+
+  const existing = webpackConfig.externals;
+  if (Array.isArray(existing)) {
+    webpackConfig.externals = [...existing, nodeBuiltinExternal];
+  } else if (existing == null) {
+    webpackConfig.externals = [nodeBuiltinExternal];
+  } else {
+    // Function, object-map, RegExp, or string form — preserve as the first
+    // array entry so user/Next externals resolve before the SDK's fallback.
+    webpackConfig.externals = [existing, nodeBuiltinExternal];
+  }
+}
+
+/**
+ * Pushes `@glasstrace/sdk` onto Next.js's `serverExternalPackages` list so
+ * the package is loaded via Node's `require()` at runtime instead of
+ * bundled through webpack/Turbopack.
+ *
+ * Only the Next 15+ stable top-level key is written. The Next 14 legacy
+ * `experimental.serverComponentsExternalPackages` key was dropped because
+ * Next 16 logs a deprecation warning for it on every build. Next 14 is
+ * EOL; webpack-dev users on Next 14 are covered by the companion
+ * `node:*` externals function installed below, and Turbopack users on
+ * Next 14 were already unaffected.
  *
  * Dedupe is intentional: if the user already added `@glasstrace/sdk` to
- * either array, the entry is not duplicated. User entries are preserved in
+ * the array, the entry is not duplicated. User entries are preserved in
  * their original order; the SDK entry is appended.
  *
- * This closes the `next dev --webpack` failure mode from DISC-1257: the
- * webpack dev bundler does not externalize any `node:` scheme, so a bundled
- * SDK chunk that imports `node:child_process` (and similar) crashes on
- * first request. Treating the SDK as a server-external package sidesteps
- * the bundler entirely on the instrumentation path.
+ * Note that `serverExternalPackages` only affects RSC and Route Handler
+ * bundling — it does NOT externalize the instrumentation path under
+ * `next dev --webpack` (see vercel/next.js#58003, #28774). The full fix
+ * for DISC-1257 pairs this write with the `node:*` externals function.
  *
  * Mutates the `config` bag in place; callers pass the shallow-copied bag
  * owned by `withGlasstraceConfig`, so the user's original reference is not
@@ -100,22 +165,6 @@ function ensureServerExternal(config: Record<string, unknown>): void {
     stable.push(SDK_PACKAGE_NAME);
   }
   config.serverExternalPackages = stable;
-
-  // Next 14 legacy key: `experimental.serverComponentsExternalPackages`.
-  const existingExperimental = config.experimental;
-  const experimental: Record<string, unknown> =
-    existingExperimental != null && typeof existingExperimental === "object"
-      ? { ...(existingExperimental as Record<string, unknown>) }
-      : {};
-  const existingLegacy = experimental.serverComponentsExternalPackages;
-  const legacy: string[] = Array.isArray(existingLegacy)
-    ? existingLegacy.filter((entry): entry is string => typeof entry === "string")
-    : [];
-  if (!legacy.includes(SDK_PACKAGE_NAME)) {
-    legacy.push(SDK_PACKAGE_NAME);
-  }
-  experimental.serverComponentsExternalPackages = legacy;
-  config.experimental = experimental;
 }
 
 /**
@@ -129,13 +178,21 @@ function ensureServerExternal(config: Record<string, unknown>): void {
  *
  * - `experimental.serverSourceMaps: true` — enables server-side source maps
  *   so Glasstrace can resolve stack traces back to your source.
- * - `serverExternalPackages: ["@glasstrace/sdk"]` (Next 15+) and
- *   `experimental.serverComponentsExternalPackages: ["@glasstrace/sdk"]`
- *   (Next 14) — tells Next to load the SDK via Node's `require()` at runtime
- *   instead of bundling it through webpack or Turbopack. This is the same
+ * - `serverExternalPackages: ["@glasstrace/sdk"]` — tells Next to load the
+ *   SDK via Node's `require()` at runtime instead of bundling it through
+ *   webpack or Turbopack on the RSC / Route Handler paths. This is the same
  *   pattern Prisma, `@vercel/otel`, Sentry, `sharp`, and `bcrypt` ship with.
- *   It closes the `next dev --webpack` crash from DISC-1257 and is applied
- *   unconditionally for consistency with production builds.
+ * - A webpack `externals` entry that marks every Node.js built-in import
+ *   (both `node:*` and bare forms like `zlib` or `stream`) as a runtime
+ *   `commonjs` require. `serverExternalPackages` does not apply to the
+ *   instrumentation path under `next dev --webpack`
+ *   (vercel/next.js#58003, #28774), so any bundled SDK chunk that imports
+ *   `node:child_process` or the bare `zlib` specifier used by
+ *   `@opentelemetry/otlp-exporter-base` would otherwise crash with
+ *   `UnhandledSchemeError` or `Can't resolve 'zlib'`. This entry is the
+ *   actual DISC-1257 fix for the dev-webpack path. Turbopack is
+ *   unaffected — it ignores `config.webpack` and resolves Node built-ins
+ *   natively.
  * - An empty `turbopack: {}` when none is set, so Next 16 does not reject
  *   the config for setting `webpack` without a companion `turbopack` key
  *   (DISC-1256).
@@ -189,11 +246,10 @@ export function withGlasstraceConfig<T extends NextConfig>(nextConfig: T): T {
     serverSourceMaps: true,
   };
 
-  // Mark the SDK as a server-external package (DISC-1257). This must run
-  // after the `serverSourceMaps` assignment above because `ensureServerExternal`
-  // also writes to `bag.experimental` — calling it first would have its work
-  // clobbered by the spread. `ensureServerExternal` itself preserves any
-  // existing `experimental` keys (including `serverSourceMaps`) by spreading.
+  // Mark the SDK as a server-external package (DISC-1257). This covers the
+  // RSC and Route Handler bundlers on Next 15+. The companion `node:*`
+  // externals entry inside the `config.webpack` hook below is what actually
+  // unblocks `next dev --webpack`.
   ensureServerExternal(bag);
 
   // Seed an empty Turbopack config when the user has not set one. Next 16
@@ -229,6 +285,20 @@ export function withGlasstraceConfig<T extends NextConfig>(nextConfig: T): T {
     if (typeof existingWebpack === "function") {
       result = existingWebpack(webpackConfig, context);
     }
+
+    // DISC-1257: externalize Node.js built-in imports for the webpack path.
+    // Next's `serverExternalPackages` only influences RSC / Route Handler
+    // bundling; the instrumentation path under `next dev --webpack` still
+    // runs transitive SDK imports through the dev bundler, which crashes
+    // on any built-in module — `UnhandledSchemeError` for `node:*` and
+    // `Can't resolve 'zlib'` / `'stream'` / etc. for bare specifiers used
+    // by OTel's exporter dependencies (vercel/next.js#58003, #28774).
+    // Telling webpack to externalize every Node built-in as a runtime
+    // CommonJS require resolves the crash for every webpack code path —
+    // production build, dev server, instrumentation hook — without
+    // special-casing Next's internals. Turbopack ignores this field and
+    // resolves Node built-ins natively.
+    appendNodeSchemeExternal(result);
 
     const webpackContext = context as WebpackContext;
 
