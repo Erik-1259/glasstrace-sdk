@@ -191,6 +191,43 @@ describe("GlasstraceExporter", () => {
       expect(enriched.attributes[ATTR.ROUTE]).toBe("GET /health");
     });
 
+    it("falls back to span name when http.route carries a non-string OTel value", () => {
+      // OTel's AttributeValue allows non-string shapes on any attribute
+      // (number, boolean, arrays). A custom instrumentation that emits
+      // http.route as e.g. a number must not disable Glasstrace
+      // enrichment for the span — the heuristic and route extractor
+      // would both throw on `.trim()`/`.startsWith()` if we accepted the
+      // cast at face value. Codex P2 on PR #156.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "GET /health",
+        attributes: { "http.route": 404 as unknown as string },
+      });
+      const callback = vi.fn();
+
+      exporter.export([span], callback);
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ROUTE]).toBe("GET /health");
+      // POST heuristic must also remain safe on a non-string route
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+    });
+
+    it("survives an array-shaped http.route and keeps enrichment flowing", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "GET /health",
+        attributes: { "http.route": ["/a", "/b"] as unknown as string },
+      });
+      const callback = vi.fn();
+
+      exporter.export([span], callback);
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.ROUTE]).toBe("GET /health");
+      expect(enriched.attributes[ATTR.HTTP_METHOD]).toBeUndefined();
+    });
+
     it("enriches error spans with glasstrace.error.*", () => {
       const { exporter, delegate } = createExporter();
       const span = createMockSpan({

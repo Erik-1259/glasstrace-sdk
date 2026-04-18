@@ -198,8 +198,14 @@ export class GlasstraceExporter implements SpanExporter {
       }
 
       // glasstrace.route
-      const route =
-        (attrs["http.route"] as string | undefined) ?? name;
+      // OTel's AttributeValue allows non-string shapes (number, boolean,
+      // array) on `http.route`. A custom instrumentation could set a
+      // non-string there and blow up `.trim()` / `.startsWith()` calls
+      // below; guard with typeof so malformed route attributes fall back
+      // to `name` (always a string per OTel span contract) instead of
+      // disabling all enrichment for the span.
+      const rawRoute = attrs["http.route"];
+      const route = typeof rawRoute === "string" ? rawRoute : name;
       if (route) {
         extra[ATTR.ROUTE] = route;
       }
