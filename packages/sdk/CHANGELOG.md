@@ -1,5 +1,70 @@
 # @glasstrace/sdk
 
+## 0.16.0
+
+### Minor Changes
+
+- 5586a4f: Detect `src/` layout and merge into existing `instrumentation.ts` instead of overwriting (DISC-493 Issue 1). Fixes the silent-init failure on every Next.js app using `src/` as its root layout.
+- c9e95b9: Auto-attach the Glasstrace span processor onto an existing OTel provider (Next.js 16 production, Sentry, Datadog, New Relic) instead of silently giving up. Closes the "no traces exported" black hole documented in DISC-493 Issues 2 and 4. Auto-attach reuses the `createGlasstraceSpanProcessor()` primitive, so the automatic and manual integration paths share identical wiring and idempotence via the branded exporter symbol.
+- e62c206: Bypass Next.js 16's patched `fetch` for `/v1/sdk/init` using `node:https`
+  directly, and verify anon-key registration during CLI `glasstrace init`
+  instead of relying on runtime fire-and-forget. Resolves the silent
+  init-hang (DISC-493 Issue 3) and the silently-unlinked anon-key
+  (DISC-494) in one PR.
+
+  - The SDK now issues its init request via `node:https`, with a 10-second
+    per-request timeout, 500 ms + 1500 ms retry backoff on transport
+    failures, and a 20-second total deadline. Server HTTP 4xx/5xx
+    responses are surfaced immediately and never retried.
+  - `glasstrace init` now blocks on a verification call before reporting
+    success. On failure it exits with code `2` and an error message
+    distinguishing three classes: `fetch failed`, `server rejected the
+key`, and `server returned malformed response`.
+  - No new runtime dependencies — `node:https` is a Node.js core module
+    and adds zero bundle weight to the tsup-inlined SDK.
+  - Set `GLASSTRACE_SKIP_INIT_VERIFY=1` to skip verification for offline
+    installs. CI mode skips verification automatically.
+
+### Patch Changes
+
+- 0a396b5: Fix `next dev --webpack` compatibility with `@glasstrace/sdk`. DISC-1257
+  is a four-part fix that spans the SDK's emit pipeline and the Next.js
+  config wrapper:
+
+  - `shims: false` in tsup. The stock `esm_shims.js` injected static
+    top-level `import path from "path"` and `import { fileURLToPath } from
+"url"` pairs into every emitted ESM chunk to synthesize `__dirname` /
+    `__filename`. The SDK source does not reference any of those symbols,
+    so the shim was dead weight and now disabled.
+  - `removeNodeProtocol: false` in tsup. tsup was rewriting SDK-source
+    `node:fs/promises` / `node:path` / `node:crypto` imports to the
+    unprefixed form before emit. Node 14.18+/16+ supports the `node:`
+    prefix natively, and the SDK already requires Node >= 20, so
+    preserving the prefix verbatim is a straight improvement.
+  - `withGlasstraceConfig()` pushes `@glasstrace/sdk` onto
+    `serverExternalPackages` (Next 15+). Next loads the SDK via Node's
+    `require()` on the RSC and Route Handler paths instead of routing it
+    through webpack — the same pattern Prisma, `@vercel/otel`, Sentry,
+    `sharp`, and `bcrypt` ship with. The Next 14 legacy
+    `experimental.serverComponentsExternalPackages` key is no longer
+    written because Next 16 logs a deprecation warning for it.
+  - `withGlasstraceConfig()` now also installs a webpack `externals`
+    function that rewrites every Node.js built-in import — both `node:*`
+    and the bare form (`zlib`, `stream`, etc.) used by transitive
+    dependencies like `@opentelemetry/otlp-exporter-base` — into a
+    runtime `commonjs` require. Membership is decided by Node's own
+    `isBuiltin` helper so the list stays version-correct automatically.
+    `serverExternalPackages` alone does not reach the
+    `next dev --webpack` instrumentation path (vercel/next.js#58003,
+    #28774); the externals function is what actually unblocks the dev
+    server on webpack, and it's harmless on production webpack builds
+    and Turbopack (which resolves Node built-ins natively and ignores
+    this field).
+
+  Production builds (Turbopack or webpack) were unaffected. Teams running
+  `next dev --webpack` with `@glasstrace/sdk` are now unblocked
+  (DISC-1257).
+
 ## 0.15.1
 
 ### Patch Changes
