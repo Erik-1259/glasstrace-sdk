@@ -182,6 +182,7 @@ export function generateInfoSection(
     "",
     "Available tools:",
     "- `get_latest_error` - Get the most recent error trace from the current session",
+    "- `get_error_list` - List recent errors with filtering and pagination",
     "- `get_trace` - Get a specific trace by ID or URL pattern",
     "- `get_root_cause` - Get the full span tree and root cause analysis for an error",
     "- `get_test_suggestions` - Get test suggestions based on recent errors",

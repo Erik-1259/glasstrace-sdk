@@ -757,6 +757,40 @@ describe("Init Client + Config Cache", () => {
       vi.unstubAllGlobals();
     });
 
+    it("calls recordInitFailure exactly once even when inner catch body throws (DISC-1121)", async () => {
+      // Regression test for DISC-1121: the outer safety-net catch must not
+      // double-count recordInitFailure() when the inner catch body itself throws.
+      //
+      // Scenario: transport throws (triggering inner catch), then console.warn
+      // inside the inner catch also throws (triggering outer catch). The
+      // failureRecorded guard flag ensures the outer catch only calls
+      // recordInitFailure() when the inner catch has not already done so.
+      const failSpy = vi.spyOn(healthCollector, "recordInitFailure");
+
+      // Make console.warn throw exactly once (on the first call inside the
+      // inner catch), then succeed on subsequent calls (so the outer catch's
+      // own console.warn doesn't also throw and surface to Vitest).
+      let warnCallCount = 0;
+      vi.spyOn(console, "warn").mockImplementation(() => {
+        warnCallCount += 1;
+        if (warnCallCount === 1) {
+          throw new Error("simulated console.warn failure");
+        }
+        // Second call (from outer catch) returns normally.
+      });
+
+      installMockTransport({ rejectWith: new HttpsTransportError("fetch failed: network down") });
+
+      const config = makeResolvedConfig();
+      await performInit(config, null, "1.0.0");
+
+      // Regardless of which catch ran, recordInitFailure must be called exactly
+      // once — never twice — even when the inner catch body itself throws.
+      expect(failSpy).toHaveBeenCalledTimes(1);
+
+      vi.unstubAllGlobals();
+    });
+
     it("passes health report to sendInitRequest payload", async () => {
       let capturedBody: Record<string, unknown> | undefined;
 

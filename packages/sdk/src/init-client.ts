@@ -404,6 +404,13 @@ export async function performInit(
     return null;
   }
 
+  // Guard flag: prevents recordInitFailure() from being called twice if the
+  // inner catch body itself throws (e.g., an unexpected error in console.warn
+  // or the instanceof checks). Without this flag, the outer safety-net catch
+  // would call recordInitFailure() a second time, inflating initFailures in
+  // the health report. Fix for DISC-1121.
+  let failureRecorded = false;
+
   try {
     const effectiveKey = config.apiKey || anonKey;
     if (!effectiveKey) {
@@ -452,6 +459,7 @@ export async function performInit(
       return null;
     } catch (err) {
       recordInitFailure();
+      failureRecorded = true;
 
       // HttpsTransportError covers DNS/TCP/TLS/timeout from the
       // node:https transport itself — `httpsPostJson` raises timeouts
@@ -506,11 +514,20 @@ export async function performInit(
       return null;
     }
   } catch (err) {
-    // Outermost catch — safety net. The inner catch already called
-    // recordInitFailure(), so skip here to avoid double-counting (DISC-1121).
-    console.warn(
-      `[glasstrace] Unexpected init error: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    // Outermost catch — safety net for unexpected throws from the inner catch
+    // body itself (e.g., an error in console.warn or instanceof checks).
+    // Only record the failure if the inner catch did not already do so (DISC-1121).
+    if (!failureRecorded) {
+      recordInitFailure();
+    }
+    // Guard console.warn itself: performInit MUST NOT throw. If console.warn
+    // throws here (the same failure mode this catch was added to handle), swallow
+    // silently rather than violating the "never throws" contract.
+    try {
+      console.warn(
+        `[glasstrace] Unexpected init error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } catch { /* best-effort logging; never propagate */ }
   }
 
   return null;
