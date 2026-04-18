@@ -711,19 +711,23 @@ export async function verifyAnonKeyRegistration(
   // but fall through to anon-only verification otherwise. Reading is
   // best-effort: any error leaves devKey undefined and we verify the
   // anon key in isolation.
+  //
+  // Use `readEnvLocalApiKey` (shared with the rest of the init flow) so
+  // we match dotenv-style last-wins semantics. A hand-rolled regex here
+  // would pick the FIRST `GLASSTRACE_API_KEY=` assignment, which in a
+  // rotated env file would authenticate with a stale key and surface a
+  // false `server rejected` failure even when the effective key is
+  // valid.
   let devKey: string | undefined;
   try {
     const envPath = path.join(projectRoot, ".env.local");
     if (fs.existsSync(envPath)) {
       const envContent = fs.readFileSync(envPath, "utf-8");
-      const match = /^GLASSTRACE_API_KEY=(.*)$/m.exec(envContent);
-      if (match !== null) {
-        const value = match[1].trim();
-        // Only send a real dev key in the dev slot — don't double-
-        // count the anon key as both keys.
-        if (value.startsWith("gt_dev_")) {
-          devKey = value;
-        }
+      const effective = readEnvLocalApiKey(envContent);
+      // Only send a real dev key in the dev slot — don't double-count
+      // the anon key as both keys.
+      if (effective !== null && isDevApiKey(effective)) {
+        devKey = effective;
       }
     }
   } catch {
