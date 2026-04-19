@@ -155,6 +155,85 @@ GLASSTRACE_SUPPRESS_ACTION_NUDGE=1
 The nudge never fires in production (detected via `NODE_ENV` or
 `VERCEL_ENV`) unless `GLASSTRACE_FORCE_ENABLE=true` is also set.
 
+## Browser-extension discovery
+
+`glasstrace init` writes a small static file at
+`public/.well-known/glasstrace.json` (or `static/.well-known/glasstrace.json`
+on SvelteKit) so the Glasstrace browser extension can discover your
+project's anonymous key without a runtime HTTP handler. The file
+contains only a schema version and the project's anonymous key — it
+is public metadata, not a secret, and should be committed to source
+control alongside the rest of your project.
+
+The SDK no longer requires `createDiscoveryHandler` to be wired into
+your server. If you previously registered the handler (for example,
+inside `middleware.ts` or `proxy.ts` on Next.js), you can remove the
+handler code and the extension will read the static file instead.
+
+### Migration: removing the runtime discovery handler
+
+**Next.js 15 and earlier (`middleware.ts`):**
+
+```ts
+// Before: middleware.ts
+import { createDiscoveryHandler } from "@glasstrace/sdk";
+import { NextResponse } from "next/server";
+
+const discoveryHandler = createDiscoveryHandler(/* getAnonKey */, /* getSessionId */);
+
+export async function middleware(req: Request) {
+  const response = await discoveryHandler(req);
+  if (response !== null) return response;
+  return NextResponse.next();
+}
+```
+
+```ts
+// After: middleware.ts (only the non-Glasstrace logic remains)
+import { NextResponse } from "next/server";
+
+export function middleware(_req: Request) {
+  return NextResponse.next();
+}
+```
+
+**Next.js 16 and later (`proxy.ts`):**
+
+Next.js 16 replaces `middleware.ts` with `proxy.ts`. If your project
+invoked the discovery handler from `middleware.ts`, migrate it to the
+new file convention and drop the handler in the same edit:
+
+```ts
+// Before: proxy.ts (Next 16+)
+import { createDiscoveryHandler } from "@glasstrace/sdk";
+import { NextResponse } from "next/server";
+
+const discoveryHandler = createDiscoveryHandler(/* getAnonKey */, /* getSessionId */);
+
+export async function proxy(req: Request) {
+  const response = await discoveryHandler(req);
+  if (response !== null) return response;
+  return NextResponse.next();
+}
+```
+
+```ts
+// After: proxy.ts (Next 16+)
+import { NextResponse } from "next/server";
+
+export function proxy(_req: Request) {
+  return NextResponse.next();
+}
+```
+
+If `proxy.ts` no longer does anything else, you can delete it entirely.
+
+`createDiscoveryHandler` remains available for one more major version
+to avoid breaking integrations that depend on it, but it now prints a
+one-time deprecation warning on first use and will be removed in
+`v1.0.0`. Run `npx glasstrace init` after upgrading to generate the
+static file.
+
 ## Security
 
 The SDK transmits your API key exclusively via the `Authorization: Bearer`

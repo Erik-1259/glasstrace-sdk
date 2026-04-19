@@ -3,6 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { NEXT_CONFIG_NAMES } from "./constants.js";
 import { readEnvLocalApiKey, isDevApiKey } from "./scaffolder.js";
+import {
+  removeDiscoveryFile,
+  relativeDiscoveryPath,
+} from "./discovery-file.js";
 
 /**
  * Options for the uninit command.
@@ -696,6 +700,8 @@ async function defaultPrompt(question: string, defaultValue: boolean): Promise<b
  * 2. Unwrap `withGlasstraceConfig` from next.config
  * 3. Remove `registerGlasstrace` from instrumentation.ts (or delete if init-created)
  * 4. Remove `.glasstrace/` directory
+ * 4a. Remove `<staticRoot>/.well-known/glasstrace.json` (and prune the
+ *     enclosing `.well-known/` directory when empty)
  * 5. Remove `GLASSTRACE_*` entries from `.env.local` (with dev-key confirmation)
  * 6. Remove `.glasstrace/` from `.gitignore`
  * 7. Remove MCP config entries
@@ -823,6 +829,49 @@ export async function runUninit(options: UninitOptions): Promise<UninitResult> {
   } catch (err) {
     errors.push(
       `Failed to remove .glasstrace/: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Step 3a: Remove the static discovery file at
+  // `<staticRoot>/.well-known/glasstrace.json` and, when empty, the
+  // enclosing `.well-known/` directory. Sibling files (e.g. a user's
+  // own `security.txt`) are never touched.
+  try {
+    if (dryRun) {
+      // Dry-run preview: simulate the removal by checking existence only.
+      // `removeDiscoveryFile` is a destructive helper, so the preview path
+      // replicates the existence check inline rather than invoking it.
+      // This keeps dry-run accurate even if the helper is changed later.
+      // Mirrors the real sweep by checking BOTH candidate layouts so an
+      // orphaned file in the non-inferred directory still shows up in
+      // the preview (heuristic-drift scenario from the Codex re-review).
+      for (const previewLayout of ["public", "static"] as const) {
+        const relPath = relativeDiscoveryPath(previewLayout);
+        const absPath = path.join(projectRoot, relPath);
+        if (fs.existsSync(absPath)) {
+          summary.push(`${prefix}Would remove ${relPath}`);
+        }
+      }
+    } else {
+      const result = removeDiscoveryFile(projectRoot);
+      if (result.action === "removed") {
+        const relPath = relativeDiscoveryPath(result.layout);
+        summary.push(`Removed ${relPath}`);
+        if (result.directoryRemoved) {
+          const dirRel = relPath.replace(/\/glasstrace\.json$/, "/");
+          summary.push(`Removed empty ${dirRel}`);
+        }
+      } else if (result.action === "failed") {
+        warnings.push(
+          `Failed to remove ${relativeDiscoveryPath(result.layout)}${
+            result.error !== undefined ? `: ${result.error}` : ""
+          }`,
+        );
+      }
+    }
+  } catch (err) {
+    warnings.push(
+      `Failed to remove discovery file: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 

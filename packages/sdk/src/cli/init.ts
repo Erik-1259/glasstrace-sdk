@@ -31,6 +31,12 @@ import {
 } from "./uninit.js";
 import { verifyInitReachable, type VerifyInitResult } from "../init-client.js";
 import { resolveConfig } from "../env-detection.js";
+import {
+  writeDiscoveryFile,
+  removeDiscoveryFile,
+  relativeDiscoveryPath,
+  resolveStaticRoot,
+} from "./discovery-file.js";
 
 // Declare the tsup-injected SDK version literal. Replaced at build time
 // via `define` in tsup.config.ts. Falls back to "0.0.0-dev" when
@@ -159,7 +165,12 @@ async function promptYesNo(question: string, defaultValue: boolean): Promise<boo
  * Identifies a scaffolding step that can be reversed during rollback.
  * Steps are tracked in execution order and rolled back in reverse.
  */
-type CompletedStep = "instrumentation" | "next-config" | "env-local" | "gitignore";
+type CompletedStep =
+  | "instrumentation"
+  | "next-config"
+  | "env-local"
+  | "gitignore"
+  | "discovery-file";
 
 /**
  * Tracks state needed for accurate rollback of init steps.
@@ -188,6 +199,140 @@ interface RollbackState {
  */
 function cleanLeadingBlankLines(content: string): string {
   return content.replace(/^\n{2,}/, "\n");
+}
+
+/**
+ * Returns true when the given `.gitignore` content would exclude the
+ * static discovery file at `<root>/public/.well-known/glasstrace.json`
+ * or `<root>/static/.well-known/glasstrace.json` (depending on `layout`)
+ * from being committed.
+ *
+ * Model: the file has three ancestors in its committed path — the
+ * static root directory (`public/` or `static/`), the `.well-known/`
+ * sub-directory, and the file itself. Each pattern in `.gitignore` is
+ * classified by which ancestor paths it matches, and each ancestor
+ * carries its own current ignore state that later patterns can flip.
+ * Patterns that don't match any of the three ancestors are ignored.
+ *
+ * Per `gitignore(5)`:
+ *
+ * > It is not possible to re-include a file if a parent directory of
+ * > that file is excluded.
+ *
+ * Consequently, the file is reported as ignored when the final state
+ * of ANY ancestor (static root, `.well-known/`, or the file itself)
+ * is ignored — a `!<file>` negation alone cannot "escape" an ignored
+ * ancestor.
+ *
+ * Per-ancestor tracking is what distinguishes overlapping patterns:
+ *
+ *   - `public/` then `!public/`                       — root re-included, file OK.
+ *   - `public/` then `!public/.well-known/`           — root still ignored (scope-2
+ *     negation doesn't match the scope-1 ancestor path), file ignored.
+ *   - `.well-known/` then `!public/.well-known/`      — `.well-known/` re-included
+ *     (both patterns match the scope-2 ancestor), file OK.
+ *   - `.well-known/` then `!public/`                  — `!public/` matches the
+ *     scope-1 ancestor only; the scope-2 ancestor (`.well-known/`) is still
+ *     ignored, so the file is ignored.
+ *   - `<file>` then `!<file>`                         — file-level ignore flipped.
+ *   - `<file>` then `!public/.well-known/`            — directory negation does
+ *     not match the file path; file still ignored.
+ *
+ * Not-modeled rules — glob wildcards (star, question mark, character
+ * classes), overlapping any-depth matches across multiple parents, and
+ * nested `.gitignore` files — skew the heuristic toward false positives
+ * (extra warning output) rather than false negatives. The warning is
+ * advisory.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function gitignoreExcludesDiscoveryFile(
+  gitignoreContent: string,
+  layout: "public" | "static",
+): boolean {
+  const staticRoot = layout === "static" ? "static" : "public";
+
+  // Per-ancestor target sets. `matchesDiscoveryPath` handles trailing
+  // slash and leading `**/` shapes on top of these exact paths.
+  const rootTargets = [staticRoot, `${staticRoot}/`];
+  const wellKnownTargets = [
+    `${staticRoot}/.well-known`,
+    `${staticRoot}/.well-known/`,
+    ".well-known",
+    ".well-known/",
+  ];
+  const fileTargets = [
+    `${staticRoot}/.well-known/glasstrace.json`,
+    ".well-known/glasstrace.json",
+  ];
+
+  // Current ignore state of each ancestor path. Later patterns flip
+  // these independently because a pattern only affects ancestors it
+  // actually matches.
+  let rootIgnored = false;
+  let wellKnownIgnored = false;
+  let fileIgnored = false;
+
+  for (const rawLine of gitignoreContent.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) continue;
+
+    const negation = line.startsWith("!");
+    const pattern = negation ? line.slice(1).trim() : line;
+    if (pattern === "") continue;
+
+    // Normalize: strip a leading slash (anchors to root in git's grammar;
+    // for our purposes the patterns we check are all root-relative).
+    const normalized = pattern.startsWith("/") ? pattern.slice(1) : pattern;
+
+    const matchesRoot = matchesDiscoveryPath(normalized, rootTargets);
+    const matchesWellKnown = matchesDiscoveryPath(normalized, wellKnownTargets);
+    const matchesFile = matchesDiscoveryPath(normalized, fileTargets);
+
+    if (!matchesRoot && !matchesWellKnown && !matchesFile) continue;
+
+    const newState = !negation;
+    if (matchesRoot) rootIgnored = newState;
+    if (matchesWellKnown) wellKnownIgnored = newState;
+    if (matchesFile) fileIgnored = newState;
+  }
+
+  // A file is ignored whenever any ancestor's final state is ignored;
+  // gitignore(5) does not permit re-including a file below an ignored
+  // parent with a file-level `!<path>` pattern alone.
+  return rootIgnored || wellKnownIgnored || fileIgnored;
+}
+
+/**
+ * Returns true when the (normalized) gitignore pattern matches any of the
+ * discovery-file-relevant paths. Supports three common pattern shapes:
+ *
+ * - Exact path: e.g. `public/.well-known/glasstrace.json`
+ * - Directory: e.g. `.well-known/` or `public/.well-known`
+ * - Leading `**\/`: e.g. `**\/.well-known/` (any-depth wildcard)
+ *
+ * Complex glob patterns (`*`, `?`, character classes) are not modeled;
+ * the warning is advisory and false negatives are acceptable.
+ */
+function matchesDiscoveryPath(
+  pattern: string,
+  targets: string[],
+): boolean {
+  // Strip trailing slash — both `.well-known` and `.well-known/` should
+  // match a directory-style target.
+  const bare = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
+
+  for (const target of targets) {
+    const tBare = target.endsWith("/") ? target.slice(0, -1) : target;
+    if (bare === tBare) return true;
+    // `**/X` matches any-depth occurrence of X
+    if (pattern.startsWith("**/")) {
+      const suffix = pattern.slice(3);
+      const sBare = suffix.endsWith("/") ? suffix.slice(0, -1) : suffix;
+      if (tBare === sBare || tBare.endsWith(`/${sBare}`)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -292,6 +437,13 @@ export async function rollbackSteps(
               }
             }
           }
+          break;
+        }
+        case "discovery-file": {
+          // Remove the static discovery file scaffolded in Step 7. The
+          // removeDiscoveryFile helper also best-effort removes an empty
+          // `.well-known/` directory but never touches sibling content.
+          removeDiscoveryFile(projectRoot);
           break;
         }
       }
@@ -523,6 +675,85 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     if (preExistingAnonKey !== null) {
       summary.push("Preserved existing .glasstrace/anon_key");
     }
+
+    // Step 7a: Write the static discovery file at
+    // `<staticRoot>/.well-known/glasstrace.json` so the Glasstrace browser
+    // extension can discover the project's anon key without a runtime HTTP
+    // handler (design doc "SDK Discovery Endpoint / Static File" §6.1).
+    //
+    // Re-init (DISC-1247 Scenario 2) preserves any user-added fields and
+    // only rewrites when the on-disk key no longer matches. A failed
+    // write is surfaced as a warning rather than an init-blocking error:
+    // scaffolding has already succeeded at this point and the user can
+    // unblock themselves by inspecting the path and re-running.
+    try {
+      const discoveryResult = writeDiscoveryFile(projectRoot, anonKey);
+      const relPath = relativeDiscoveryPath(discoveryResult.layout);
+      switch (discoveryResult.action) {
+        case "created":
+          summary.push(`Created ${relPath}`);
+          rollbackState.steps.push("discovery-file");
+          break;
+        case "updated-stale":
+          summary.push(`Updated ${relPath} (anon key had changed)`);
+          // Not pushed to rollback: the pre-existing file was user-owned
+          // content (just with a stale key). A rollback should restore
+          // the original key rather than delete the file outright, and
+          // we do not snapshot the prior content. Leaving it alone is
+          // the safer behavior.
+          break;
+        case "skipped-matches":
+          summary.push(`Skipped ${relPath} (already matches anon key)`);
+          break;
+        case "skipped-foreign":
+          summary.push(
+            `Rewrote ${relPath} (existing file was malformed or not SDK-managed)`,
+          );
+          // Same reasoning as "updated-stale": we did not snapshot the
+          // original content, so rollback can only delete. Leaving off
+          // the rollback list prevents data loss on a later-step failure.
+          break;
+        case "failed":
+          warnings.push(
+            `Failed to write ${relPath}${
+              discoveryResult.error !== undefined
+                ? `: ${discoveryResult.error}`
+                : ""
+            }. The Glasstrace browser extension will fall back to the runtime handler until the file is written.`,
+          );
+          break;
+      }
+
+      // Emit a warning if the user's `.gitignore` excludes `.well-known/`
+      // or the discovery file path — otherwise the file will not be
+      // deployed and the extension will silently fail to discover the
+      // project. We never modify `.gitignore` (the file is public
+      // metadata, not a secret).
+      const gitignorePath = path.join(projectRoot, ".gitignore");
+      if (fs.existsSync(gitignorePath)) {
+        try {
+          const gitignoreContent = fs.readFileSync(gitignorePath, "utf-8");
+          if (gitignoreExcludesDiscoveryFile(gitignoreContent, discoveryResult.layout)) {
+            warnings.push(
+              `Your .gitignore excludes ${relPath} (directly or via a parent rule). ` +
+                "The discovery file must be committed for the Glasstrace browser extension to find it in deployed builds. " +
+                "Remove the matching line from .gitignore or add an explicit negation (e.g. `!" +
+                relPath +
+                "`).",
+            );
+          }
+        } catch {
+          // Unreadable .gitignore is not actionable here — skip the check.
+        }
+      }
+    } catch (err) {
+      warnings.push(
+        `Failed to write ${relativeDiscoveryPath(
+          resolveStaticRoot(projectRoot).layout,
+        )}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     let anyConfigWritten = false;
 
     if (isCI) {
