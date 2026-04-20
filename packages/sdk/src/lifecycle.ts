@@ -58,6 +58,11 @@ export type OtelState = (typeof OtelState)[keyof typeof OtelState];
 // Valid Transitions
 // ---------------------------------------------------------------------------
 
+/**
+ * Valid transitions for the core SDK lifecycle state machine.
+ *
+ * @drift-check ../glasstrace-product/docs/component-designs/sdk-lifecycle.md §4.2 Transition Rules
+ */
 const VALID_CORE_TRANSITIONS: Record<CoreState, readonly CoreState[]> = {
   [CoreState.IDLE]: [CoreState.REGISTERING, CoreState.REGISTRATION_FAILED, CoreState.SHUTTING_DOWN],
   [CoreState.REGISTERING]: [
@@ -90,6 +95,11 @@ const VALID_CORE_TRANSITIONS: Record<CoreState, readonly CoreState[]> = {
   [CoreState.REGISTRATION_FAILED]: [],
 };
 
+/**
+ * Valid transitions for the auth state machine.
+ *
+ * @drift-check ../glasstrace-product/docs/component-designs/sdk-lifecycle.md §5.2 Transitions
+ */
 const VALID_AUTH_TRANSITIONS: Record<AuthState, readonly AuthState[]> = {
   [AuthState.ANONYMOUS]: [AuthState.CLAIMING],
   [AuthState.AUTHENTICATED]: [AuthState.CLAIMING],
@@ -97,6 +107,11 @@ const VALID_AUTH_TRANSITIONS: Record<AuthState, readonly AuthState[]> = {
   [AuthState.CLAIMED]: [AuthState.CLAIMING],
 };
 
+/**
+ * Valid transitions for the OTel coexistence state machine.
+ *
+ * @drift-check ../glasstrace-product/docs/component-designs/sdk-lifecycle.md §6 Layer 3: OTel Coexistence Lifecycle
+ */
 const VALID_OTEL_TRANSITIONS: Record<OtelState, readonly OtelState[]> = {
   [OtelState.UNCONFIGURED]: [OtelState.CONFIGURING],
   [OtelState.CONFIGURING]: [

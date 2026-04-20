@@ -17,6 +17,8 @@ const BACKOFF_JITTER = 0.2;                       // ±20%
  *   0  — OTel flush (must run first so spans are exported)
  *   10 — Heartbeat final report (includes final span counts)
  *   20 — Runtime state write (terminal state persisted last)
+ *
+ * @drift-check ../glasstrace-product/docs/component-designs/sdk-lifecycle.md §8.3 Shutdown Sequence
  */
 const HEARTBEAT_SHUTDOWN_PRIORITY = 10;
 

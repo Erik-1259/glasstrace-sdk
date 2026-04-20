@@ -19,6 +19,8 @@ export const API_KEY_PENDING = "pending" as const;
 /**
  * Maximum number of spans to buffer while waiting for key resolution.
  * Prevents unbounded memory growth if the key never resolves.
+ *
+ * @drift-check ../glasstrace-product/docs/component-designs/sdk-2.0.md §5.4 Buffering during KEY_PENDING
  */
 const MAX_PENDING_SPANS = 1024;
 
