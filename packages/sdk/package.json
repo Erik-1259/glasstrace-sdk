@@ -35,6 +35,8 @@
   },
   "scripts": {
     "build": "tsup",
+    "postbuild": "npm run check:edge-bundle",
+    "check:edge-bundle": "node scripts/check-edge-bundle.mjs",
     "preuninstall": "node -e \"process.stderr.write('\\n[@glasstrace/sdk] Package removal warning:\\n  Before \\'npm uninstall @glasstrace/sdk\\' runs, Glasstrace recommends running \\'npx @glasstrace/sdk uninit\\' first to cleanly remove instrumentation files, MCP configuration, and the .glasstrace/ state directory. Without uninit, your next build may fail because instrumentation.ts and next.config still reference the removed package.\\n  See: https://glasstrace.dev/docs/cli#uninit\\n\\n')\""
   },
   "peerDependencies": {
@@ -65,6 +67,7 @@
     "@opentelemetry/sdk-trace-base": "^2.6.1",
     "@vercel/blob": "^2.3.3",
     "@vercel/otel": "^2.1.2",
+    "esbuild": "^0.27.7",
     "tsup": "^8.5.0"
   },
   "publishConfig": {
