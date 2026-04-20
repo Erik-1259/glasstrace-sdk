@@ -43,9 +43,6 @@ export type { FetchTarget } from "./fetch-classifier.js";
 
 export { GlasstraceSpanProcessor } from "./span-processor.js";
 
-export { createDiscoveryHandler } from "./discovery-endpoint.js";
-export type { ClaimState } from "./discovery-endpoint.js";
-
 export { captureCorrelationId } from "./correlation-id.js";
 export type { CorrelationIdRequest } from "./correlation-id.js";
 

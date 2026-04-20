@@ -441,9 +441,10 @@ In non-Node environments, the SDK degrades gracefully:
 - **`registerGlasstrace`** detects the non-Node environment and
   returns a no-op
 
-Server-only utilities (`collectSourceMaps`, `buildImportGraph`) still
-require Node.js and should be excluded from browser bundles via your
-bundler's externalization config.
+Server-only utilities (`collectSourceMaps`, `buildImportGraph`) live
+under the `@glasstrace/sdk/node` subpath, require Node.js, and should
+be excluded from browser bundles via your bundler's externalization
+config.
 
 ## Bundle Size
 

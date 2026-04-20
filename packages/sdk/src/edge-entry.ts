@@ -51,16 +51,13 @@
 
 import { SdkError } from "./errors.js";
 import { GlasstraceSpanProcessor } from "./span-processor.js";
-import { createDiscoveryHandler } from "./discovery-endpoint.js";
-import type { ClaimState } from "./discovery-endpoint.js";
 import { captureCorrelationId } from "./correlation-id.js";
 import type { CorrelationIdRequest } from "./correlation-id.js";
 
 export {
   SdkError,
   GlasstraceSpanProcessor,
-  createDiscoveryHandler,
   captureCorrelationId,
 };
 
-export type { ClaimState, CorrelationIdRequest };
+export type { CorrelationIdRequest };

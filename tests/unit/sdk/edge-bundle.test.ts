@@ -95,7 +95,6 @@ describeIfBuilt("edge-entry bundle (SDK-028)", () => {
     const expected = [
       "SdkError",
       "captureCorrelationId",
-      "createDiscoveryHandler",
       "GlasstraceSpanProcessor",
     ].sort();
 

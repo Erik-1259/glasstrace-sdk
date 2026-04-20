@@ -228,11 +228,43 @@ export function proxy(_req: Request) {
 
 If `proxy.ts` no longer does anything else, you can delete it entirely.
 
-`createDiscoveryHandler` remains available for one more major version
-to avoid breaking integrations that depend on it, but it now prints a
-one-time deprecation warning on first use and will be removed in
-`v1.0.0`. Run `npx glasstrace init` after upgrading to generate the
-static file.
+`createDiscoveryHandler` was removed from the public API in `v1.0.0`.
+The runtime handler is installed automatically in anonymous + development
+mode — there is nothing to wire up yourself. Run `npx glasstrace init`
+after upgrading to generate the static file; the extension reads the
+file directly and no longer needs the runtime handler.
+
+## Subpath exports
+
+`@glasstrace/sdk` ships three public entries:
+
+- **`@glasstrace/sdk`** — primary import site. Use from
+  `instrumentation.ts` (runtime instrumentation) and `next.config.ts`
+  (via `withGlasstraceConfig`). The Node-only build-time helpers that
+  previously lived here (source-map upload, import-graph construction)
+  were moved to `@glasstrace/sdk/node` in this release so the root
+  specifier no longer drags `fs` / `path` / `@vercel/blob` into the
+  closure. The remaining root surface is intended for Node / serverful
+  runtimes; workloads running strictly on workerd or Vercel Edge
+  should import from the internal edge-entry bundle — not currently
+  exposed as a public entry — or ask for a public `/edge` subpath.
+- **`@glasstrace/sdk/node`** — Node-only build-time tooling
+  (source-map uploading, import-graph construction). Use from
+  `next.config.ts` / build scripts. Resolves only under the Node
+  condition; non-Node runtimes (workerd, edge-light) fail cleanly at
+  module resolution rather than at evaluation.
+- **`@glasstrace/sdk/drizzle`** — Drizzle ORM adapter.
+
+The source-map and import-graph helpers previously reachable from the
+`@glasstrace/sdk` root specifier have moved to `@glasstrace/sdk/node`
+to narrow the root surface. Update imports:
+
+```ts
+// Before
+import { uploadSourceMapsAuto } from "@glasstrace/sdk";
+// After
+import { uploadSourceMapsAuto } from "@glasstrace/sdk/node";
+```
 
 ## Security
 
