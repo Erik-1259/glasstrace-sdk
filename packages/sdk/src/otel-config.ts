@@ -16,16 +16,16 @@ import {
 import { setCoexistenceState, _resetCoexistenceStateForTesting } from "./signal-handler.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
-let _resolvedApiKey: string = API_KEY_PENDING;
+let resolvedApiKey: string = API_KEY_PENDING;
 
 /** Module-level reference to the active exporter for key-resolution notification. */
-let _activeExporter: GlasstraceExporter | null = null;
+let activeExporter: GlasstraceExporter | null = null;
 
 /** Additional exporters that need key-resolution notification (from createGlasstraceSpanProcessor). */
-const _additionalExporters: GlasstraceExporter[] = [];
+const additionalExporters: GlasstraceExporter[] = [];
 
 /** Injected processor in coexistence mode, tracked for flush on exit. */
-let _injectedProcessor: SpanProcessor | null = null;
+let injectedProcessor: SpanProcessor | null = null;
 
 /**
  * Sets the resolved API key for OTel export authentication.
@@ -33,7 +33,7 @@ let _injectedProcessor: SpanProcessor | null = null;
  * @param key - The resolved API key (anonymous or developer).
  */
 export function setResolvedApiKey(key: string): void {
-  _resolvedApiKey = key;
+  resolvedApiKey = key;
 }
 
 /**
@@ -41,7 +41,7 @@ export function setResolvedApiKey(key: string): void {
  * Returns the {@link API_KEY_PENDING} sentinel if the key has not yet resolved.
  */
 export function getResolvedApiKey(): string {
-  return _resolvedApiKey;
+  return resolvedApiKey;
 }
 
 /**
@@ -49,8 +49,8 @@ export function getResolvedApiKey(): string {
  * "pending" to a resolved value. This triggers flushing of any buffered spans.
  */
 export function notifyApiKeyResolved(): void {
-  _activeExporter?.notifyKeyResolved();
-  for (const exporter of _additionalExporters) {
+  activeExporter?.notifyKeyResolved();
+  for (const exporter of additionalExporters) {
     exporter.notifyKeyResolved();
   }
 }
@@ -62,17 +62,17 @@ export function notifyApiKeyResolved(): void {
  * than waiting for the next BSP timer tick).
  */
 export function registerExporterForKeyNotification(exporter: GlasstraceExporter): void {
-  _additionalExporters.push(exporter);
+  additionalExporters.push(exporter);
 }
 
 /**
  * Resets OTel configuration state to initial values. For testing only.
  */
 export function resetOtelConfigForTesting(): void {
-  _resolvedApiKey = API_KEY_PENDING;
-  _activeExporter = null;
-  _injectedProcessor = null;
-  _additionalExporters.length = 0;
+  resolvedApiKey = API_KEY_PENDING;
+  activeExporter = null;
+  injectedProcessor = null;
+  additionalExporters.length = 0;
   // Signal and beforeExit handler cleanup is handled by resetLifecycleForTesting()
   // via the shutdown coordinator.
   // Reset coexistence state here as well so that test suites that call
@@ -209,7 +209,7 @@ async function runCoexistencePath(
     // Success: processor was attached. Retain a reference for the
     // coexistence flush hook (Section 7.2) so beforeExit drains buffered
     // spans even if the existing provider's shutdown does not propagate.
-    _injectedProcessor = result.processor;
+    injectedProcessor = result.processor;
 
     if (config.verbose) {
       sdkLog(
@@ -229,8 +229,8 @@ async function runCoexistencePath(
       name: "coexistence-flush",
       priority: 5,
       fn: async () => {
-        if (_injectedProcessor) {
-          await _injectedProcessor.forceFlush();
+        if (injectedProcessor) {
+          await injectedProcessor.forceFlush();
         }
       },
     });
@@ -288,7 +288,7 @@ async function runRegistrationPath(
     createDelegate: createOtlpExporter,
     verbose: config.verbose,
   });
-  _activeExporter = glasstraceExporter;
+  activeExporter = glasstraceExporter;
 
   // Try @vercel/otel first (Scenario E)
   const vercelOtel = await tryImport("@vercel/otel");
