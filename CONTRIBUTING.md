@@ -66,6 +66,10 @@ Follow the prompts to describe the change and its semver impact.
 - LF line endings
 - ESM imports with `.js` extensions in relative paths
 
+Tier-1 surfaces — wire schemas, session-ID derivation, state-machine
+tables, capped constants — carry a `@drift-check` JSDoc tag pointing at
+their authoritative source. See `DRIFT.md`.
+
 ## Tests
 
 Tests use [Vitest](https://vitest.dev/) and live in the top-level

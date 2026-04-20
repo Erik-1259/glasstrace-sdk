@@ -4,6 +4,20 @@ import { AnonApiKeySchema } from "@glasstrace/protocol";
 import type { AnonApiKey } from "@glasstrace/protocol";
 
 /**
+ * Standardized static discovery-file path, served at
+ * `<static-root>/.well-known/glasstrace.json` (per RFC 8615) with
+ * MIME type `application/json`.
+ *
+ * The SDK writes the file to this relative path under the
+ * framework-specific static root (`public/` for Next.js, Remix, Astro;
+ * `static/` for SvelteKit) and the browser extension fetches it from
+ * the same path under the deployed origin.
+ *
+ * @drift-check RFC 8615 (https://www.rfc-editor.org/rfc/rfc8615) + ../glasstrace-product/docs/component-designs/sdk-2.0.md §7.1 Static discovery file
+ */
+export const WELL_KNOWN_GLASSTRACE_PATH = ".well-known/glasstrace.json" as const;
+
+/**
  * Current schema version for `.well-known/glasstrace.json`. Consumers
  * (primarily the Glasstrace browser extension) MUST tolerate unknown
  * integers >= 1 per the forward-compatibility rule in the design doc
@@ -137,9 +151,8 @@ function isSvelteKitProject(projectRoot: string): boolean {
  * layout, suitable for surfacing in summary lines and `.gitignore` entries.
  */
 export function relativeDiscoveryPath(layout: StaticRootLayout): string {
-  return layout === "static"
-    ? "static/.well-known/glasstrace.json"
-    : "public/.well-known/glasstrace.json";
+  const rootDir = layout === "static" ? "static" : "public";
+  return `${rootDir}/${WELL_KNOWN_GLASSTRACE_PATH}`;
 }
 
 /**
