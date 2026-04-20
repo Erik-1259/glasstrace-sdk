@@ -123,6 +123,13 @@ function loadCustomTestPatterns(projectRoot: string): RegExp[] {
  *
  * @param projectRoot - Absolute path to the project root directory.
  * @returns Relative POSIX paths from projectRoot, capped at {@link MAX_TEST_FILES}.
+ *
+ * @remarks
+ * Node-only. Walks the filesystem with `node:fs/promises`
+ * (`readdir`), reads vitest/jest config files with `node:fs`
+ * (`readFileSync`), and resolves paths with `node:path`. No edge-safe
+ * alternative — call from a Node context (build script, CI job,
+ * Next.js `next.config.ts`).
  */
 export async function discoverTestFiles(
   projectRoot: string,
@@ -193,6 +200,14 @@ async function walkForTests(
  *
  * @param fileContent - The full text content of a TypeScript/JavaScript file.
  * @returns An array of import path strings as written in the source (e.g. "./foo", "react").
+ *
+ * @remarks
+ * Node-only. The function body itself is pure string processing and
+ * would run anywhere, but it is exported through `@glasstrace/sdk/node`
+ * alongside {@link discoverTestFiles} and {@link buildImportGraph} —
+ * the practical consumers all pair it with those Node-only helpers.
+ * Kept under the `/node` subpath for API cohesion; call from a Node
+ * context (build script, CI job, Next.js `next.config.ts`).
  */
 export function extractImports(fileContent: string): string[] {
   const seen = new Set<string>();
@@ -261,6 +276,13 @@ export function extractImports(fileContent: string): string[] {
  *
  * @param projectRoot - Absolute path to the project root directory.
  * @returns An {@link ImportGraphPayload} containing the graph and a deterministic buildHash.
+ *
+ * @remarks
+ * Node-only. Walks the project with `node:fs/promises`, reads each
+ * test file from disk, resolves paths with `node:path`, and hashes
+ * the serialized graph with `node:crypto` (`createHash("sha256")`).
+ * No edge-safe alternative — call from a Node context (build script,
+ * CI job, Next.js `next.config.ts`).
  */
 export async function buildImportGraph(
   projectRoot: string,

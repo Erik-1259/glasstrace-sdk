@@ -266,6 +266,45 @@ import { uploadSourceMapsAuto } from "@glasstrace/sdk";
 import { uploadSourceMapsAuto } from "@glasstrace/sdk/node";
 ```
 
+### `/node` surface by symbol
+
+The `@glasstrace/sdk/node` subpath is Node-only by design: the
+package's conditional exports resolve `./node` under the Node
+condition only, so any non-Node runtime (workerd, Vercel Edge, the
+browser) fails at module resolution rather than at evaluation. Most
+symbols additionally depend on a Node built-in module (`node:fs`,
+`node:path`, `node:crypto`, `node:child_process`) or on the
+`@vercel/blob` optional peer dependency. A handful — the pure
+constant `PRESIGNED_THRESHOLD_BYTES`, the type-only exports, and the
+pure string helper `extractImports` — have no direct Node dependency
+of their own; they live under `/node` for API cohesion with the
+upload and import-graph flows they belong to. The source-file JSDoc
+on each symbol names its specific dependency (or notes "pure" /
+"erases at runtime"); the table below summarizes the `/node` surface
+and the recommended call site.
+
+| Symbol | Kind | Node dependency | Edge-safe alternative |
+|---|---|---|---|
+| `discoverSourceMapFiles` | function | `node:fs`, `node:path` | — (call from a build script / `next.config.ts`) |
+| `collectSourceMaps` | function | `node:fs`, `node:path` | — (call from a build script / `next.config.ts`) |
+| `computeBuildHash` | function | `node:child_process` (git), `node:crypto`, `node:fs` | Pass a pre-computed build hash directly to `uploadSourceMaps` |
+| `uploadSourceMaps` | function | `node:fs` (when given `SourceMapFileInfo[]`) | — (upstream discovery is Node-only) |
+| `PRESIGNED_THRESHOLD_BYTES` | constant | — (pure value) | — (consume alongside the Node-only upload helpers) |
+| `uploadSourceMapsPresigned` | function | `node:fs`, `@vercel/blob` | — (call from a build script / `next.config.ts`) |
+| `uploadSourceMapsAuto` | function | `node:fs`, `@vercel/blob` (optional) | — (call from a build script / `next.config.ts`) |
+| `SourceMapFileInfo` | type | — (erases at runtime) | — (produced/consumed by Node-only functions) |
+| `SourceMapEntry` | type | — (erases at runtime) | — (produced/consumed by Node-only functions) |
+| `BlobUploader` | type | — (erases at runtime) | — (produced/consumed by Node-only functions) |
+| `AutoUploadOptions` | type | — (erases at runtime) | — (produced/consumed by Node-only functions) |
+| `discoverTestFiles` | function | `node:fs`, `node:path` | — (call from a build script / CI job) |
+| `extractImports` | function | — (pure string processing) | — (kept under `/node` for API cohesion with `buildImportGraph`) |
+| `buildImportGraph` | function | `node:fs`, `node:path`, `node:crypto` | — (call from a build script / CI job) |
+
+Type exports erase at runtime and are technically safe to import from
+edge code, but every runtime function that produces or consumes them is
+Node-only, so the practical signal is the same: reach for these from
+your build pipeline, not from a request handler.
+
 ## Security
 
 The SDK transmits your API key exclusively via the `Authorization: Bearer`
