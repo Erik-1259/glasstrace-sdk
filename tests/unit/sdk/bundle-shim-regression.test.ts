@@ -27,10 +27,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
  * - No emitted JS (ESM or CJS) contains the tsup shim header comment.
  * - Every Node-builtin specifier emitted by the SDK's own source retains
  *   its `node:` prefix.
- * - The ESM and CJS outputs each load successfully and expose the same
- *   observable behavior from `source-map-uploader`'s path helper
- *   (`discoverSourceMapFiles`) — which is the one module the SDK
- *   ships that does meaningful path derivation.
+ * - The ESM and CJS outputs of the `node-subpath` bundle each load
+ *   successfully and expose matching observable behavior from
+ *   `source-map-uploader`'s path helper (`discoverSourceMapFiles`) —
+ *   the one module the SDK ships that does meaningful path derivation.
+ *   The helper moved off the root barrel in SDK-029 and is reachable
+ *   to external consumers via `@glasstrace/sdk/node` (SDK-030).
  *
  * See DISC-1257 and `packages/sdk/tsup.config.ts`.
  *
@@ -44,7 +46,16 @@ const thisFileDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(thisFileDir, "../../../packages/sdk/dist");
 const esmEntry = path.join(distDir, "index.js");
 const cjsEntry = path.join(distDir, "index.cjs");
-const distExists = fsSync.existsSync(esmEntry) && fsSync.existsSync(cjsEntry);
+// discoverSourceMapFiles moved off the root barrel in SDK-029; the
+// path-helper regression probe now loads the node subpath's emitted
+// bundles directly.
+const esmNodeSubpath = path.join(distDir, "node-subpath.js");
+const cjsNodeSubpath = path.join(distDir, "node-subpath.cjs");
+const distExists =
+  fsSync.existsSync(esmEntry) &&
+  fsSync.existsSync(cjsEntry) &&
+  fsSync.existsSync(esmNodeSubpath) &&
+  fsSync.existsSync(cjsNodeSubpath);
 
 const describeIfBuilt = distExists ? describe : describe.skip;
 
@@ -176,7 +187,7 @@ ${offenders.join("\n")}`,
     // CJS entry uses `createRequire` so we can call `require()` from the
     // test's own ESM context.
     const { createRequire } = await import("node:module");
-    const esmUrl = pathToFileURL(esmEntry).href;
+    const esmUrl = pathToFileURL(esmNodeSubpath).href;
 
     const esmModule = (await import(esmUrl)) as {
       discoverSourceMapFiles: (buildDir: string) => Promise<
@@ -185,7 +196,7 @@ ${offenders.join("\n")}`,
     };
 
     const requireFromTest = createRequire(import.meta.url);
-    const cjsModule = requireFromTest(cjsEntry) as {
+    const cjsModule = requireFromTest(cjsNodeSubpath) as {
       discoverSourceMapFiles: (buildDir: string) => Promise<
         Array<{ filePath: string; absolutePath: string; sizeBytes: number }>
       >;

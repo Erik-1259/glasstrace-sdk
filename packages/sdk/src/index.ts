@@ -123,23 +123,6 @@ export { GlasstraceExporter } from "./enriching-exporter.js";
 export type { GlasstraceExporterOptions } from "./enriching-exporter.js";
 
 /**
- * Creates a request handler for the `/__glasstrace/config` discovery endpoint.
- * Returns `null` for non-matching paths. On a successful `GET`, responds with the
- * anonymous key and current session ID; other methods or error states return
- * appropriate HTTP error responses. CORS is restricted to known browser extension origins.
- *
- * When provided, the `getClaimState` callback includes `claimed` and optional
- * `accountHint` fields in the response for the browser extension.
- */
-export { createDiscoveryHandler } from "./discovery-endpoint.js";
-
-/**
- * Claim state shape returned by the `getClaimState` callback passed to
- * {@link createDiscoveryHandler}.
- */
-export type { ClaimState } from "./discovery-endpoint.js";
-
-/**
  * {@link registerGlasstrace} is the primary SDK entry point. Call it in
  * `instrumentation.ts` to start tracing. It is synchronous and never throws.
  *
@@ -185,55 +168,6 @@ export { isReady, waitForReady, getStatus } from "./lifecycle.js";
 export { createGlasstraceSpanProcessor } from "./coexistence.js";
 
 /**
- * {@link discoverSourceMapFiles} walks a build directory and returns metadata
- * for all `.map` files without reading their content into memory.
- *
- * {@link collectSourceMaps} recursively finds all `.map` files in a build directory.
- * @deprecated Prefer {@link discoverSourceMapFiles} to avoid loading all source maps
- * into memory simultaneously.
- *
- * {@link computeBuildHash} returns a build identifier (git SHA or content hash fallback).
- *
- * {@link uploadSourceMaps} uploads source maps via `POST /v1/source-maps`.
- *
- * {@link PRESIGNED_THRESHOLD_BYTES} is the byte threshold (4.5 MB) above which
- * uploads route to the presigned 3-phase flow.
- *
- * {@link uploadSourceMapsPresigned} orchestrates the 3-phase presigned upload
- * (request tokens, upload to blob storage, submit manifest).
- *
- * {@link uploadSourceMapsAuto} automatically routes uploads based on total build
- * size, falling back to legacy upload when `@vercel/blob` is unavailable.
- */
-export {
-  discoverSourceMapFiles,
-  collectSourceMaps,
-  computeBuildHash,
-  uploadSourceMaps,
-  PRESIGNED_THRESHOLD_BYTES,
-  uploadSourceMapsPresigned,
-  uploadSourceMapsAuto,
-} from "./source-map-uploader.js";
-
-/**
- * {@link SourceMapFileInfo} represents metadata for a discovered source map file
- * without its content loaded, used by the streaming upload flow.
- *
- * {@link SourceMapEntry} represents a single source map file with its path and content.
- *
- * {@link BlobUploader} is the signature for the blob upload function, injectable for testing.
- *
- * {@link AutoUploadOptions} configures {@link uploadSourceMapsAuto} with optional
- * test overrides for blob availability and upload behavior.
- */
-export type {
-  SourceMapFileInfo,
-  SourceMapEntry,
-  BlobUploader,
-  AutoUploadOptions,
-} from "./source-map-uploader.js";
-
-/**
  * Records an error as a span event on the currently active OTel span.
  * Works regardless of the `consoleErrors` config -- this is an explicit,
  * opt-in API for manual error reporting. Silently ignored when no span is active.
@@ -255,18 +189,3 @@ export { captureCorrelationId } from "./correlation-id.js";
  */
 export type { CorrelationIdRequest } from "./correlation-id.js";
 
-/**
- * {@link discoverTestFiles} scans a project directory for test files matching
- * conventional patterns (`.test.ts`, `.spec.ts`) and custom vitest/jest config.
- *
- * {@link extractImports} parses ES module imports, CommonJS requires, and dynamic
- * imports from file content using regex.
- *
- * {@link buildImportGraph} combines discovery and extraction to produce an
- * `ImportGraphPayload` mapping test files to their imports.
- */
-export {
-  discoverTestFiles,
-  extractImports,
-  buildImportGraph,
-} from "./import-graph.js";
