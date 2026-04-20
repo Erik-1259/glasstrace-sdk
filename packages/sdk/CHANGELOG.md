@@ -1,5 +1,107 @@
 # @glasstrace/sdk
 
+## 1.0.0
+
+### Major Changes
+
+- e40bfec: **Breaking.** Narrow the `@glasstrace/sdk` root barrel. Two independent
+  removals land in this release:
+
+  ### Node-only symbols moved to `@glasstrace/sdk/node`
+
+  14 symbols whose transitive closure touches `fs`, `path`, or
+  `@vercel/blob` now live only on the new `@glasstrace/sdk/node` subpath
+  (wired by the companion SDK-030 changeset in this release). This keeps
+  the root specifier edge-safe: importing from `@glasstrace/sdk` in a
+  workerd / Vercel Edge bundle can no longer drag Node built-ins into the
+  closure.
+
+  Values (build-time source-map + import-graph helpers):
+
+  - `discoverSourceMapFiles`
+  - `collectSourceMaps`
+  - `computeBuildHash`
+  - `uploadSourceMaps`
+  - `PRESIGNED_THRESHOLD_BYTES`
+  - `uploadSourceMapsPresigned`
+  - `uploadSourceMapsAuto`
+  - `discoverTestFiles`
+  - `extractImports`
+  - `buildImportGraph`
+
+  Types:
+
+  - `SourceMapFileInfo`
+  - `SourceMapEntry`
+  - `BlobUploader`
+  - `AutoUploadOptions`
+
+  **Migration.** Move each import from `@glasstrace/sdk` to
+  `@glasstrace/sdk/node`:
+
+  ```ts
+  // Before
+  import { uploadSourceMapsAuto } from "@glasstrace/sdk";
+  // After
+  import { uploadSourceMapsAuto } from "@glasstrace/sdk/node";
+  ```
+
+  `withGlasstraceConfig` stays on the root specifier — it's the standard
+  import site for `next.config.ts` and intentionally continues to work
+  unchanged.
+
+  ### `createDiscoveryHandler` removed (v1.0.0 deprecation followthrough)
+
+  The runtime discovery handler and its supporting type were deprecated in
+  `0.20.0` with a promise to remove them in `v1.0.0` (see
+  `packages/sdk/README.md`). That promise is now kept:
+
+  - `createDiscoveryHandler` (value)
+  - `ClaimState` (type)
+
+  Both are removed from the public API. The SDK continues to install the
+  handler automatically in anonymous + development mode — there is no
+  runtime capability loss. External consumers who still invoke
+  `createDiscoveryHandler` directly should run `npx glasstrace init` to
+  generate `public/.well-known/glasstrace.json` (or
+  `static/.well-known/glasstrace.json` on SvelteKit); the browser
+  extension reads that file directly and no longer needs the runtime
+  handler. See the **Migration: removing the runtime discovery handler**
+  section of `packages/sdk/README.md` for the full before/after.
+
+  A snapshot test at `tests/unit/sdk/public-barrel.test.ts` guards the
+  narrowed root surface against accidental re-addition.
+
+### Minor Changes
+
+- e40bfec: Add `@glasstrace/sdk/node` subpath export for Node-only build-time
+  tooling. Pairs with the root-barrel narrowing in this release: the 10
+  value + 4 type symbols removed from `@glasstrace/sdk` are now reachable
+  under the new subpath.
+
+  ```ts
+  import { uploadSourceMapsAuto } from "@glasstrace/sdk/node";
+  ```
+
+  **Resolution shape** — the `./node` entry is a node-conditional export
+  with a `default: null` edge-guard. Resolution outcomes:
+
+  | Conditions                          | Resolves to                       |
+  | ----------------------------------- | --------------------------------- |
+  | `types`                             | `dist/node-subpath.d.ts`          |
+  | `node + import`                     | `dist/node-subpath.js`            |
+  | `node + require`                    | `dist/node-subpath.cjs`           |
+  | non-Node (workerd, edge-light, ...) | `null` (clean resolution failure) |
+
+  Types are hoisted to the top level of the `./node` entry so consumers
+  on `moduleResolution: "bundler"` can see declarations; runtime
+  resolution stays strictly Node-gated.
+
+  A `postbuild` hook runs `scripts/verify-subpath-resolution.sh` to
+  smoke-test both ESM (`import("@glasstrace/sdk/node")`) and CJS
+  (`require("@glasstrace/sdk/node")`) against the emitted bundles. If the
+  subpath stops resolving, CI fails before publish.
+
 ## 0.20.1
 
 ### Patch Changes
