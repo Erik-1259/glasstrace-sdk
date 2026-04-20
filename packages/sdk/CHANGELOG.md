@@ -1,5 +1,16 @@
 # @glasstrace/sdk
 
+## 1.1.0
+
+### Minor Changes
+
+- 2bc645b: Widen `@prisma/instrumentation` peer range to include `^7.0.0`. The SDK runtime already tolerates any major version of `@prisma/instrumentation` because the only references are dynamic `tryImport("@prisma/instrumentation")` call sites in `packages/sdk/src/otel-config.ts`, each of which guards on the `PrismaInstrumentation` constructor being present before use. This change advertises existing compatibility so consumers on Prisma 7 can install `@glasstrace/sdk` without a peer-dep conflict. Closes DISC-1309.
+
+### Patch Changes
+
+- 72fb1be: chore: SDK hygiene pass — drop underscore-prefix on otel-config module state, pair proxy.ts with middleware.ts for Next 16+ captureCorrelationId recommendation
+- d581b6f: Port the `verify:subpath` postbuild gate from a bash script to a cross-platform Node script. `npm run build` now succeeds on Windows without Git Bash or WSL. No runtime behavior change: the gate still runs two probes (`import("@glasstrace/sdk/node")` under ESM and `createRequire(...)("@glasstrace/sdk/node")` under CJS), still asserts a non-empty resolved module, and still emits the same `[verify-subpath] @glasstrace/sdk/node resolves under ESM and CJS` success banner. Failure messages gain a pointer at the `exports` map in `packages/sdk/package.json`. Internal tooling only — no public API surface change.
+
 ## 1.0.1
 
 ### Patch Changes
