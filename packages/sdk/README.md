@@ -112,8 +112,9 @@ Glasstrace browser extension captures.
 ### Correlating a trace with browser extension data
 
 To correlate a server-captured trace with extension-side action data,
-call `captureCorrelationId` from a Next.js `middleware.ts` (or any
-custom server request hook that runs inside the request's OTel context):
+call `captureCorrelationId` from a Next.js `middleware.ts` (or
+`proxy.ts` on Next 16+, or any custom server request hook that runs
+inside the request's OTel context):
 
 ```ts
 // middleware.ts
