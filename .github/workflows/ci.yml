@@ -56,6 +56,16 @@ jobs:
       # need for npm ci to also audit during install.
       - run: npm ci --no-audit
 
+      # Guard against `package-lock.json` drift (DISC-1317). `npm ci`
+      # does not mutate the lockfile, so this diff must always be
+      # empty. A non-empty diff means either (a) a prior commit landed
+      # a lockfile mutated by `npm install` from an unexpected working
+      # directory, or (b) a future npm release changed how it hydrates
+      # node_modules from an existing lockfile. Either way, fail fast
+      # here rather than let drift accumulate silently.
+      - name: Assert lockfile unchanged after install
+        run: git diff --exit-code -- package-lock.json
+
       - name: Audit dependencies
         run: npm audit --audit-level=high
 

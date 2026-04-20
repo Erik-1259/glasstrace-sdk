@@ -1,4 +1,5 @@
 {
+  "name": "glasstrace-sdk",
   "private": true,
   "description": "Glasstrace SDK monorepo — server-side debugging for AI coding agents",
   "author": "Glasstrace <hello@glasstrace.dev>",

@@ -13,8 +13,16 @@ the development setup and workflow for the glasstrace-sdk monorepo.
 ```bash
 git clone https://github.com/Erik-1259/glasstrace-sdk.git
 cd glasstrace-sdk
-npm install
+npm ci
 ```
+
+`npm ci` performs a clean, reproducible install directly from
+`package-lock.json` and never mutates it. Use it for every
+non-dependency-changing install — fresh clones, git worktrees,
+scratch sandboxes — so the lockfile stays stable across contributors.
+
+See [Modifying Dependencies](#modifying-dependencies) below if you need
+to add, remove, or upgrade a package.
 
 ## Development Workflow
 
@@ -58,6 +66,50 @@ npx changeset
 ```
 
 Follow the prompts to describe the change and its semver impact.
+
+## Modifying Dependencies
+
+When you intentionally add, remove, or upgrade a package, use
+`npm install` — not `npm ci` — so the lockfile is updated. Almost
+always, the dependency belongs to a specific workspace
+(`packages/sdk` or `packages/protocol`), not to the root. Scope
+every command with `-w <workspace>`:
+
+```bash
+# Add, pin, or upgrade in a workspace
+npm install <pkg> -w packages/sdk
+npm install <pkg>@<version> -w packages/sdk
+
+# Remove from a workspace
+npm uninstall <pkg> -w packages/sdk
+```
+
+Use the unscoped root form (`npm install <pkg>`) only when the
+dependency truly belongs to the root `devDependencies` (build
+tooling shared across the monorepo — `turbo`, `typescript`,
+`vitest`, `eslint`). When in doubt, scope to a workspace.
+
+Two rules to avoid lockfile drift (see DISC-1317):
+
+1. **Run from the canonical checkout directory**, not from a git
+   worktree. `npm install` falls back to the directory basename
+   for the lockfile's root `name` if `package.json` omits one;
+   running it from a worktree used to rewrite the root entry to
+   the worktree directory name. This repo now declares
+   `"name": "glasstrace-sdk"` in root `package.json` to harden
+   against that, but running from the canonical directory remains
+   the safer default.
+
+2. **Use the npm version declared in `packageManager`.** Different
+   npm versions can rewrite optional transitive dependency entries
+   in incompatible ways. Enable [corepack](https://nodejs.org/api/corepack.html)
+   once (`corepack enable`) and npm will match the declared version
+   automatically.
+
+Commit the resulting `package-lock.json` change in the same PR as
+the `package.json` change. CI runs a lockfile-drift guard
+(`git diff --exit-code package-lock.json` after `npm ci`) that
+catches any commit whose lockfile disagrees with a clean install.
 
 ## Code Style
 
