@@ -4,6 +4,9 @@ import pkg from "./package.json" with { type: "json" };
 export default defineConfig({
   entry: {
     index: "src/index.ts",
+    "node-entry": "src/node-entry.ts",
+    "edge-entry": "src/edge-entry.ts",
+    "node-subpath": "src/node-subpath.ts",
     "cli/init": "src/cli/init.ts",
     "cli/uninit": "src/cli/uninit.ts",
     "cli/mcp-add": "src/cli/mcp-add.ts",
