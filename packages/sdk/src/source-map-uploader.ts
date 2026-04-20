@@ -12,6 +12,16 @@ import {
   type SourceMapManifestResponse,
 } from "@glasstrace/protocol";
 
+/**
+ * In-memory source map entry: a file path paired with its full text content.
+ *
+ * @remarks
+ * Node-only. Describes the legacy in-memory shape consumed by
+ * {@link uploadSourceMaps} and {@link uploadSourceMapsAuto}. The type
+ * itself erases at runtime and is safe to import from edge code, but
+ * every function that produces or consumes it depends on `node:fs`
+ * and cannot run at the edge.
+ */
 export interface SourceMapEntry {
   filePath: string;
   content: string;
@@ -20,6 +30,14 @@ export interface SourceMapEntry {
 /**
  * Metadata for a discovered source map file, without its content loaded.
  * Used by the streaming upload flow to defer file reads until upload time.
+ *
+ * @remarks
+ * Node-only. Describes the shape of data produced by the Node-only
+ * source-map upload flow ({@link discoverSourceMapFiles},
+ * {@link uploadSourceMapsAuto}). The type itself erases at runtime and
+ * is safe to import from edge code, but every function that produces
+ * or consumes it depends on `node:fs`/`node:path` and cannot run at
+ * the edge.
  */
 export interface SourceMapFileInfo {
   /** Relative path to the compiled JS file (`.map` extension stripped). */
@@ -36,6 +54,12 @@ const LARGE_FILE_WARNING_BYTES = 50 * 1024 * 1024;
 /**
  * Recursively discovers all `.map` files in the given build directory.
  * Returns metadata only — file content is NOT read into memory.
+ *
+ * @remarks
+ * Node-only. Walks the filesystem with `node:fs/promises` (`readdir`,
+ * `stat`) and resolves paths with `node:path`. No edge-safe
+ * alternative — call from a Node context (build script, Next.js
+ * `next.config.ts`, CI job).
  */
 export async function discoverSourceMapFiles(
   buildDir: string,
@@ -116,6 +140,11 @@ async function readSourceMapContent(absolutePath: string): Promise<string> {
  *
  * @deprecated Prefer {@link discoverSourceMapFiles} to avoid loading all
  * source maps into memory simultaneously.
+ *
+ * @remarks
+ * Node-only. Reads every discovered `.map` file into memory via
+ * `node:fs/promises` (`readFile`). No edge-safe alternative — call
+ * from a Node context (build script, Next.js `next.config.ts`, CI job).
  */
 export async function collectSourceMaps(
   buildDir: string,
@@ -145,6 +174,16 @@ export async function collectSourceMaps(
  *
  * Accepts either `SourceMapEntry[]` (legacy, in-memory) or
  * `SourceMapFileInfo[]` (streaming, reads on demand).
+ *
+ * @remarks
+ * Node-only. Spawns `git rev-parse HEAD` via `node:child_process`
+ * (`execFileSync`), hashes with `node:crypto` (`createHash("sha256")`),
+ * and reads map contents from disk with `node:fs/promises`. No
+ * edge-safe alternative — call from a Node context (build script,
+ * Next.js `next.config.ts`, CI job). If a pre-computed build hash is
+ * already known (e.g., provided as a CI environment variable), pass
+ * it directly to {@link uploadSourceMaps} instead of calling this
+ * helper.
  */
 export async function computeBuildHash(
   maps?: SourceMapEntry[] | SourceMapFileInfo[],
@@ -195,6 +234,14 @@ export async function computeBuildHash(
  * file content is read at upload time rather than at discovery time.
  * Note: the legacy endpoint sends all files in a single JSON body, so
  * peak memory is similar — the benefit is deferring reads past discovery.
+ *
+ * @remarks
+ * Node-only. Reads map contents from disk via `node:fs/promises` when
+ * invoked with `SourceMapFileInfo[]`. The network call uses the
+ * platform-standard `fetch` (edge-safe on its own), but the upstream
+ * discovery and read path is Node-only, so the function is only
+ * reachable from a Node context (build script, Next.js
+ * `next.config.ts`, CI job). No edge-safe alternative.
  */
 export async function uploadSourceMaps(
   apiKey: string,
@@ -252,10 +299,28 @@ export async function uploadSourceMaps(
 // Presigned source map upload (3-phase flow for large builds)
 // ---------------------------------------------------------------------------
 
-/** Builds at or above this byte size route to the presigned upload flow. */
+/**
+ * Builds at or above this byte size route to the presigned upload flow.
+ *
+ * @remarks
+ * Node-only. The numeric value itself is pure (a constant is evaluable
+ * anywhere), but it is meaningful only alongside
+ * {@link uploadSourceMapsPresigned} and {@link uploadSourceMapsAuto},
+ * both of which depend on `node:fs` and `@vercel/blob`. No edge-safe
+ * alternative — consume from a Node context.
+ */
 export const PRESIGNED_THRESHOLD_BYTES = 4_500_000;
 
-/** Signature for the blob upload function, injectable for testing. */
+/**
+ * Signature for the blob upload function, injectable for testing.
+ *
+ * @remarks
+ * Node-only. Describes the shape of the uploader consumed by
+ * {@link uploadSourceMapsPresigned} and {@link uploadSourceMapsAuto},
+ * both of which depend on `@vercel/blob` and `node:fs`. The type itself
+ * erases at runtime and is safe to import from edge code, but every
+ * producer and consumer is Node-only.
+ */
 export type BlobUploader = (
   clientToken: string,
   pathname: string,
@@ -452,6 +517,12 @@ export async function submitManifest(
  *
  * Accepts an optional `blobUploader` for test injection; defaults to
  * {@link uploadToBlob}.
+ *
+ * @remarks
+ * Node-only. Streams map contents from disk via `node:fs/promises`
+ * and uploads through `@vercel/blob/client` (loaded lazily as an
+ * optional peer dependency). No edge-safe alternative — call from a
+ * Node context (build script, Next.js `next.config.ts`, CI job).
  */
 export async function uploadSourceMapsPresigned(
   apiKey: string,
@@ -536,6 +607,12 @@ export async function uploadSourceMapsPresigned(
 
 /**
  * Options for {@link uploadSourceMapsAuto}, primarily used for test injection.
+ *
+ * @remarks
+ * Node-only. Describes the shape of overrides consumed by
+ * {@link uploadSourceMapsAuto}, which depends on `node:fs` and
+ * `@vercel/blob`. The type itself erases at runtime and is safe to
+ * import from edge code, but the surrounding function is Node-only.
  */
 export interface AutoUploadOptions {
   /** Override blob availability check (for testing). */
@@ -555,6 +632,14 @@ export interface AutoUploadOptions {
  *
  * Accepts either `SourceMapEntry[]` (legacy, in-memory) or
  * `SourceMapFileInfo[]` (streaming, reads on demand).
+ *
+ * @remarks
+ * Node-only. Reads source map sizes/contents via `node:fs/promises`
+ * and, above the threshold, dynamically loads `@vercel/blob/client`
+ * (optional peer dependency) for direct blob storage uploads. No
+ * edge-safe alternative — call from a Node context (build script,
+ * Next.js `next.config.ts`, CI job). This is the recommended entry
+ * point for source-map upload in most projects.
  */
 export async function uploadSourceMapsAuto(
   apiKey: string,
