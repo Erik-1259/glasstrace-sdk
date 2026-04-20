@@ -13,7 +13,7 @@ import * as nodeSubpath from "../../../packages/sdk/src/node-subpath.js";
  * The published-specifier resolution (`import "@glasstrace/sdk/node"`
  * through the `exports` map) is separately smoke-tested at the
  * package's `postbuild` hook via
- * `packages/sdk/scripts/verify-subpath-resolution.sh`, which runs real
+ * `packages/sdk/scripts/verify-subpath-resolution.mjs`, which runs real
  * Node under both ESM and CJS against the emitted `dist/`. Together
  * the two gates verify both "what the subpath surfaces" and "the
  * subpath actually resolves under the names consumers will use".
