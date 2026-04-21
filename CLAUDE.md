@@ -12,6 +12,14 @@ npm packages published under the `@glasstrace` scope:
 Everything in this repo is public. Every commit, PR, code pattern, and
 design decision reflects the Glasstrace brand. Quality is not negotiable.
 
+## Shared Repo Policy
+
+Read `AGENTS.md` first for the stable cross-tool repo policy, sibling
+workspace rules, and the SDK/product/validation routing model. This file
+is the Claude-specific public-process layer. Treat `AGENTS.md` as the
+stable repo contract and keep generic repo policy there rather than
+duplicating it here.
+
 ## Quality Standard: Every Commit Is a Brand Statement
 
 This repo has a **higher commit quality bar** than the private
