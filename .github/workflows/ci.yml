@@ -221,6 +221,15 @@ jobs:
           mkdir browser-import-test && cd browser-import-test
           npm init -y
           npm install ${{ github.workspace }}/packages/sdk
+          # esbuild must be a direct dependency of this test project rather
+          # than relied on through `npx esbuild`. Older esbuild versions
+          # sometimes remained resolvable via transitive/cache paths even
+          # when not declared here, but that was incidental — esbuild 0.28+
+          # restructured its platform-specific optional subpackages such
+          # that `npx esbuild` in a fresh directory no longer auto-resolves
+          # a working bin on Linux runners. Installing it explicitly keeps
+          # the check hermetic across esbuild versions and bundler choices.
+          npm install --no-save esbuild
           # Write a test entry file that imports the SDK's main entry points
           cat > entry.mjs <<'ENTRY'
           import { registerGlasstrace, withGlasstraceConfig, captureError } from "@glasstrace/sdk";
