@@ -17,6 +17,17 @@ document reflects the Glasstrace brand.
 - Public API changes require README review and a changeset in the same
   change.
 
+## Wave Planning Stack
+
+- Use `docs/agent-reference/wave-planning-core.md` as the base template
+  for wave-based execution.
+- Apply `docs/agent-reference/high-integrity-briefing.md` for SDK briefs
+  that assert architectural, packaging, or runtime facts; in practice this
+  should be the default.
+- Apply `docs/agent-reference/sdk-public-overlay.md` for every SDK wave.
+  That turns the common `100`-review baseline into `500` total review
+  passes and adds README/changeset/public-package checks.
+
 ## Engineering Rules
 
 - Do not apply bandaids or duct-tape workarounds. Step back and find the

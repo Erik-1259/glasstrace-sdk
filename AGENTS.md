@@ -19,7 +19,13 @@ This file is the shared cross-tool policy layer for the
 1. `CLAUDE.md` for the public-repo process and PR workflow
 2. `docs/agent-reference/sdk-workstream.md` for SDK-specific review
    expectations
-3. `../glasstrace-product/docs/discoveries/INDEX.md` and
+3. `docs/agent-reference/wave-planning-core.md` for multi-agent or
+   wave-based execution
+4. `docs/agent-reference/high-integrity-briefing.md` for claim-heavy or
+   `brand-sensitive` briefs
+5. `docs/agent-reference/sdk-public-overlay.md` for SDK-only public-repo
+   wave rules
+6. `../glasstrace-product/docs/discoveries/INDEX.md` and
    `../glasstrace-product/docs/project-state.md` when SDK work depends on
    product-side status or findings
 
@@ -84,3 +90,13 @@ merged change becomes part of the public package history.
   reproductions, and proof against real external projects.
 - Findings discovered there remain provisional until written back to the
   SDK repo, the product repo, or tracked discovery/docs artifacts.
+
+## Wave Planning Stack
+
+- Start with `docs/agent-reference/wave-planning-core.md` for any
+  multi-agent or wave session.
+- Add `docs/agent-reference/high-integrity-briefing.md` for claim-heavy
+  briefs; in practice most SDK briefs should use it.
+- Add `docs/agent-reference/sdk-public-overlay.md` for all SDK wave work.
+  That means the common `100`-review baseline becomes `500` total review
+  passes in this repo.
