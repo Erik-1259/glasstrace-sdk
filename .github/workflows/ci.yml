@@ -368,9 +368,55 @@ jobs:
           # omits `"type"`, which defaults to CommonJS and breaks the
           # Turbopack build pipeline.
           node -e 'const fs=require("fs"); const p="package.json"; const j=JSON.parse(fs.readFileSync(p,"utf8")); j.type="module"; fs.writeFileSync(p, JSON.stringify(j, null, 2));'
-          # Pin next@canary for the Next 16 canary path (DISC-1255/DISC-1256
+          # Track next@canary for the Next 16 canary path (DISC-1255/DISC-1256
           # both reproduced on 16.2.x-canary). React 19 is required by Next 16.
-          npm install next@canary react@19 react-dom@19 typescript@5 @types/react@19 @types/node@22
+          #
+          # Resolve the canary version explicitly rather than passing
+          # `next@canary` straight to npm. Vercel sometimes publishes a
+          # `next` canary without the matching `@next/env` (observed
+          # 2026-04-28: next@16.3.0-canary.3 referenced an unpublished
+          # @next/env@16.3.0-canary.3, breaking PR #193's CI). Plain
+          # `npm install next@canary` ETARGETs in that window. Walking
+          # back from the canary dist-tag to the highest version present
+          # in both packages keeps coverage on canary without depending
+          # on Vercel's two-package publish being atomic.
+          NEXT_VERSION=$(node <<'RESOLVE'
+          const { execSync } = require('node:child_process');
+          const sh = (cmd) => JSON.parse(execSync(cmd).toString());
+          // Anchor the walk to whatever `next@canary` currently points at.
+          // If the dist-tag itself were rolled back to an older canary, we
+          // must not silently install a *newer* canary just because it
+          // happens to exist in the registry.
+          const canaryHead = execSync('npm view next@canary version').toString().trim();
+          const major = canaryHead.split('.')[0];
+          const nextVersions = sh('npm view next versions --json');
+          const envVersions = new Set(sh('npm view @next/env versions --json'));
+          const headIndex = nextVersions.indexOf(canaryHead);
+          if (headIndex === -1) {
+            console.error(`next@canary (${canaryHead}) not present in npm view next versions`);
+            process.exit(1);
+          }
+          // Versions array is in publish order; consider the dist-tag head
+          // and everything published before it, walking back from newest.
+          // Restrict to the same major as the dist-tag head — at a
+          // major-line transition (e.g. canary moves to 17.0.0-canary.0
+          // before @next/env@17.0.0-canary.0 lands) we must not silently
+          // downgrade to a 16.x canary and produce a false green for the
+          // wrong major. Fail loudly instead so the workflow surfaces the
+          // upstream gap and a human can decide what to do.
+          const candidates = nextVersions
+            .slice(0, headIndex + 1)
+            .filter((v) => v.startsWith(`${major}.`) && /-canary\.\d+$/.test(v));
+          const compatible = [...candidates].reverse().find((v) => envVersions.has(v));
+          if (!compatible) {
+            console.error(`No ${major}.x canary at or before ${canaryHead} has a matching @next/env`);
+            process.exit(1);
+          }
+          process.stdout.write(compatible);
+          RESOLVE
+          )
+          echo "Resolved next@canary -> next@${NEXT_VERSION}"
+          npm install "next@${NEXT_VERSION}" react@19 react-dom@19 typescript@5 @types/react@19 @types/node@22
           npm install /tmp/packs/glasstrace-protocol-*.tgz /tmp/packs/glasstrace-sdk-*.tgz
           # Minimum-required tsconfig (copied from the create-next-app defaults
           # that we actually use — paths, module resolution, jsx preserve).
