@@ -39,19 +39,19 @@ describe("generateMcpConfig", () => {
     it("throws when anonKey is empty", () => {
       expect(() =>
         generateMcpConfig(makeAgent("generic"), ENDPOINT, ""),
-      ).toThrow(/anonKey must not be empty/);
+      ).toThrow(/bearer must not be empty/);
     });
 
     it("throws when anonKey is whitespace-only", () => {
       expect(() =>
         generateMcpConfig(makeAgent("generic"), ENDPOINT, "   "),
-      ).toThrow(/anonKey must not be empty/);
+      ).toThrow(/bearer must not be empty/);
     });
 
     it("throws when endpoint is valid but anonKey is empty (partial invalidity)", () => {
       expect(() =>
         generateMcpConfig(makeAgent("claude"), ENDPOINT, ""),
-      ).toThrow(/anonKey must not be empty/);
+      ).toThrow(/bearer must not be empty/);
     });
   });
 

@@ -4,25 +4,29 @@ import type { DetectedAgent } from "./detect.js";
  * Generates the MCP server configuration content for a given agent.
  *
  * The output is the full file content suitable for writing to the agent's
- * MCP config file. Auth tokens are intentionally included here because
- * MCP config files are local-only and required for server authentication.
+ * MCP config file. The bearer token is intentionally embedded here for
+ * agents whose schemas inline the Authorization header — Codex is the
+ * exception and uses `bearer_token_env_var` so the actual token never
+ * appears in TOML.
  *
  * @param agent - The detected agent to generate config for.
  * @param endpoint - The Glasstrace MCP endpoint URL.
- * @param anonKey - The anonymous API key for authentication.
+ * @param bearer - The credential to embed in the Authorization header
+ *   (anon key or dev key, depending on the project's resolved
+ *   credential source). Empty values throw.
  * @returns The formatted configuration string.
- * @throws If endpoint or anonKey is empty.
+ * @throws If endpoint or bearer is empty.
  */
 export function generateMcpConfig(
   agent: DetectedAgent,
   endpoint: string,
-  anonKey: string,
+  bearer: string,
 ): string {
   if (!endpoint || endpoint.trim() === "") {
     throw new Error("endpoint must not be empty");
   }
-  if (!anonKey || anonKey.trim() === "") {
-    throw new Error("anonKey must not be empty");
+  if (!bearer || bearer.trim() === "") {
+    throw new Error("bearer must not be empty");
   }
 
   switch (agent.name) {
@@ -34,7 +38,7 @@ export function generateMcpConfig(
               type: "http",
               url: endpoint,
               headers: {
-                Authorization: `Bearer ${anonKey}`,
+                Authorization: `Bearer ${bearer}`,
               },
             },
           },
@@ -67,7 +71,7 @@ export function generateMcpConfig(
             glasstrace: {
               httpUrl: endpoint,
               headers: {
-                Authorization: `Bearer ${anonKey}`,
+                Authorization: `Bearer ${bearer}`,
               },
             },
           },
@@ -83,7 +87,7 @@ export function generateMcpConfig(
             glasstrace: {
               url: endpoint,
               headers: {
-                Authorization: `Bearer ${anonKey}`,
+                Authorization: `Bearer ${bearer}`,
               },
             },
           },
@@ -99,7 +103,7 @@ export function generateMcpConfig(
             glasstrace: {
               serverUrl: endpoint,
               headers: {
-                Authorization: `Bearer ${anonKey}`,
+                Authorization: `Bearer ${bearer}`,
               },
             },
           },
@@ -115,7 +119,7 @@ export function generateMcpConfig(
             glasstrace: {
               url: endpoint,
               headers: {
-                Authorization: `Bearer ${anonKey}`,
+                Authorization: `Bearer ${bearer}`,
               },
             },
           },

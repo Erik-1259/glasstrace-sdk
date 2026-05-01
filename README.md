@@ -418,6 +418,16 @@ When an anonymous key is linked to a Glasstrace account, the SDK
 automatically detects this during initialization and logs migration
 instructions to stderr with the new API key.
 
+The SDK also refreshes managed MCP config files (e.g.
+`.glasstrace/mcp.json`) so MCP queries see the same credential
+ingestion is now writing traces with. The refresh applies only when
+the file is byte-equivalent to the SDK-shaped output for the
+project's anon key — manually edited MCP configs are preserved
+untouched. Re-run `npx glasstrace mcp add` after a claim to refresh
+agent-specific configs that were set up via the CLI; the command
+detects credential drift via the `.glasstrace/mcp-connected` marker
+and re-registers automatically.
+
 ## Configuration
 
 | Environment Variable | Required | Description |

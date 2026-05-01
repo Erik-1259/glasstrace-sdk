@@ -1016,6 +1016,73 @@ describe("runInit — MCP auto-configuration", () => {
     expect(marker.credentialHash).toBe(expectedHash);
   });
 
+  it("does not stamp marker with new bearer when init only preserved user-edited configs (DISC-1512)", async () => {
+    // Simulate a re-init after a claim where the project's anon key
+    // is on disk and there's a dev key in .env.local. The user has
+    // hand-edited their existing managed configs, so init's diff-aware
+    // path will preserve them. The marker must NOT be stamped with
+    // the dev-key hash, because the on-disk configs still embed the
+    // old anon bearer; otherwise a later `glasstrace mcp add` would
+    // short-circuit on a marker that lies about what's actually
+    // configured.
+    provisionAnonKey(tmpDir);
+    const devKey = "gt_dev_" + "5".repeat(48);
+    fs.writeFileSync(
+      path.join(tmpDir, ".env.local"),
+      `GLASSTRACE_API_KEY=${devKey}\n`,
+    );
+
+    // Pre-create a hand-edited mcp.json so decideMcpConfigAction's
+    // diff path triggers and `--yes` is not enough to overwrite (the
+    // existing content does not match what init would write).
+    const dotGlass = path.join(tmpDir, ".glasstrace");
+    fs.mkdirSync(dotGlass, { recursive: true });
+    const handEdited = JSON.stringify({
+      mcpServers: { glasstrace: { url: "https://hand-edited.example", headers: {} } },
+    });
+    fs.writeFileSync(path.join(dotGlass, "mcp.json"), handEdited, "utf-8");
+
+    // Pre-create a marker that records the original anon credential.
+    const anonHash = `sha256:${crypto.createHash("sha256").update(TEST_ANON_KEY).digest("hex")}`;
+    fs.writeFileSync(
+      path.join(dotGlass, "mcp-connected"),
+      JSON.stringify({
+        version: 2,
+        credentialSource: "anon",
+        credentialHash: anonHash,
+        configuredAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+
+    enterNonCI();
+    try {
+      // --yes / --force would unconditionally overwrite. We want the
+      // diff-aware prompt path; in a non-TTY test environment the
+      // prompt falls back to its default-no answer, so the existing
+      // hand-edited file gets preserved.
+      await runInit({
+        projectRoot: tmpDir,
+        yes: false,
+        coverageMap: false,
+      });
+
+      // The hand-edited file is untouched.
+      const after = fs.readFileSync(path.join(dotGlass, "mcp.json"), "utf-8");
+      expect(after).toBe(handEdited);
+
+      // The marker must still record the original anon credential —
+      // not the dev key from .env.local — because nothing was actually
+      // rewritten with the new bearer.
+      const marker = JSON.parse(
+        fs.readFileSync(path.join(dotGlass, "mcp-connected"), "utf-8"),
+      ) as { credentialSource: string; credentialHash: string };
+      expect(marker.credentialSource).toBe("anon");
+      expect(marker.credentialHash).toBe(anonHash);
+    } finally {
+      restoreCI();
+    }
+  });
+
   it("is idempotent — running twice does not duplicate MCP config", async () => {
     provisionAnonKey(tmpDir);
     createClaudeMarker(tmpDir);
