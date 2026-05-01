@@ -533,7 +533,8 @@ describe("Init Client + Config Cache", () => {
       writeFileSync(envLocalPath, "GLASSTRACE_API_KEY=old_key\nOTHER=value\n", "utf-8");
 
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      await writeClaimedKey(testKey, tempDir);
+      const result = await writeClaimedKey(testKey, tempDir);
+      expect(result.persisted).toBe("env-local");
 
       const content = await readFile(envLocalPath, "utf-8");
       expect(content).toContain(`GLASSTRACE_API_KEY=${testKey}`);
@@ -582,7 +583,8 @@ describe("Init Client + Config Cache", () => {
       mkdirSync(join(tempDir, ".env.local"), { recursive: true });
 
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      await writeClaimedKey(testKey, tempDir);
+      const result = await writeClaimedKey(testKey, tempDir);
+      expect(result.persisted).toBe("claimed-key");
 
       const claimedKeyPath = join(tempDir, ".glasstrace", "claimed-key");
       const content = await readFile(claimedKeyPath, "utf-8");
@@ -604,7 +606,8 @@ describe("Init Client + Config Cache", () => {
       const impossibleRoot = join(badRoot, "subdir");
 
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      await writeClaimedKey(testKey, impossibleRoot);
+      const result = await writeClaimedKey(testKey, impossibleRoot);
+      expect(result.persisted).toBe("none");
 
       const stderrCalls = stderrSpy.mock.calls.map(c => String(c[0]));
       expect(stderrCalls.some(msg => msg.includes("dashboard settings"))).toBe(true);

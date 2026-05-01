@@ -8,8 +8,13 @@ import {
   readMcpMarker,
   writeMcpMarker,
   identityFingerprint,
+  refreshGenericMcpConfigAtRuntime,
+  __resetRefreshNudgeForTest,
+  MCP_ENDPOINT,
 } from "../../../packages/sdk/src/mcp-runtime.js";
 import { readClaimedKey } from "../../../packages/sdk/src/anon-key.js";
+import { generateMcpConfig } from "../../../packages/sdk/src/agent-detection/configs.js";
+import type { DetectedAgent } from "../../../packages/sdk/src/agent-detection/detect.js";
 
 const VALID_ANON_KEY = "gt_anon_" + "a".repeat(48);
 const VALID_DEV_KEY = "gt_dev_" + "b".repeat(48);
@@ -370,5 +375,227 @@ describe("writeMcpMarker", () => {
     const marker = readMarkerRaw() as Record<string, unknown>;
     expect(marker["credentialSource"]).toBe("env-local");
     expect(marker["credentialHash"]).toBe(devHash);
+  });
+});
+
+describe("refreshGenericMcpConfigAtRuntime", () => {
+  let tmpDir: string;
+  let stderrOutput: string;
+  let originalStderrWrite: typeof process.stderr.write;
+
+  function genericAgent(): DetectedAgent {
+    return {
+      name: "generic",
+      mcpConfigPath: path.join(tmpDir, ".glasstrace", "mcp.json"),
+      infoFilePath: null,
+      cliAvailable: false,
+      registrationCommand: null,
+    };
+  }
+
+  beforeEach(() => {
+    tmpDir = makeTmpProject();
+    __resetRefreshNudgeForTest();
+    stderrOutput = "";
+    originalStderrWrite = process.stderr.write.bind(process.stderr);
+    // Capture stderr to assert nudges and (more importantly) raw-key absence.
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrOutput += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
+      return true;
+    }) as typeof process.stderr.write;
+  });
+
+  afterEach(() => {
+    process.stderr.write = originalStderrWrite;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function writeManagedConfig(bearer: string): void {
+    const dir = path.join(tmpDir, ".glasstrace");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      path.join(dir, "mcp.json"),
+      generateMcpConfig(genericAgent(), MCP_ENDPOINT, bearer),
+      { mode: 0o600 },
+    );
+  }
+
+  it("returns skipped-anon-source when effective is null", async () => {
+    writeAnonKey(tmpDir);
+    const result = await refreshGenericMcpConfigAtRuntime(tmpDir, null, VALID_ANON_KEY as never);
+    expect(result.action).toBe("skipped-anon-source");
+  });
+
+  it("returns skipped-anon-source when effective.source === 'anon'", async () => {
+    writeAnonKey(tmpDir);
+    writeManagedConfig(VALID_ANON_KEY);
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "anon", key: VALID_ANON_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+    expect(result.action).toBe("skipped-anon-source");
+    // mcp.json must be untouched
+    const after = fs.readFileSync(path.join(tmpDir, ".glasstrace", "mcp.json"), "utf-8");
+    expect(after).toContain(VALID_ANON_KEY);
+  });
+
+  it("returns absent when there is no anon key on disk (dev-key-only project)", async () => {
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      null,
+    );
+    expect(result.action).toBe("absent");
+  });
+
+  it("returns absent when .glasstrace/mcp.json does not exist", async () => {
+    writeAnonKey(tmpDir);
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+    expect(result.action).toBe("absent");
+  });
+
+  it("rewrites mcp.json with the effective dev key when SDK-shaped, atomically", async () => {
+    writeAnonKey(tmpDir);
+    writeManagedConfig(VALID_ANON_KEY);
+
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    expect(result.action).toBe("rewrote");
+
+    const configPath = path.join(tmpDir, ".glasstrace", "mcp.json");
+    const after = fs.readFileSync(configPath, "utf-8");
+    expect(after).toContain(`Bearer ${VALID_DEV_KEY}`);
+    expect(after).not.toContain(VALID_ANON_KEY);
+
+    // Permissions: file is 0o600
+    const stat = fs.statSync(configPath);
+    expect(stat.mode & 0o777).toBe(0o600);
+
+    // Atomic write leaves no leftover .tmp sibling
+    expect(fs.existsSync(configPath + ".tmp")).toBe(false);
+
+    // Marker is updated to v2 with the effective source
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".glasstrace", "mcp-connected"), "utf-8"),
+    ) as { version: number; credentialSource: string; credentialHash: string };
+    expect(marker.version).toBe(2);
+    expect(marker.credentialSource).toBe("env-local");
+    expect(marker.credentialHash).toBe(identityFingerprint(VALID_DEV_KEY));
+  });
+
+  it("preserves mcp.json when content is hand-edited (does not match SDK-shaped anon)", async () => {
+    writeAnonKey(tmpDir);
+    const dir = path.join(tmpDir, ".glasstrace");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const customContent = JSON.stringify(
+      { mcpServers: { glasstrace: { url: "https://custom", headers: {} } } },
+      null,
+      2,
+    );
+    fs.writeFileSync(path.join(dir, "mcp.json"), customContent, { mode: 0o600 });
+
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    expect(result.action).toBe("preserved");
+    expect(fs.readFileSync(path.join(dir, "mcp.json"), "utf-8")).toBe(customContent);
+    expect(fs.existsSync(path.join(dir, "mcp-connected"))).toBe(false);
+  });
+
+  it("emits the success nudge once per process and never includes raw key material", async () => {
+    writeAnonKey(tmpDir);
+    writeManagedConfig(VALID_ANON_KEY);
+
+    await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    // Reset the project for a second invocation
+    fs.rmSync(path.join(tmpDir, ".glasstrace", "mcp.json"), { force: true });
+    writeManagedConfig(VALID_ANON_KEY);
+
+    await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    const nudgeCount = stderrOutput.match(/MCP config refreshed/g)?.length ?? 0;
+    expect(nudgeCount).toBe(1);
+
+    // Critical: no raw key material in stderr
+    expect(stderrOutput).not.toContain(VALID_DEV_KEY);
+    expect(stderrOutput).not.toContain(VALID_ANON_KEY);
+  });
+
+  it("emits a Codex restart hint when persisted source is claimed-key", async () => {
+    writeAnonKey(tmpDir);
+    writeManagedConfig(VALID_ANON_KEY);
+
+    await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "claimed-key", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    expect(stderrOutput).toContain("MCP config refreshed");
+    expect(stderrOutput).toContain("Copy .glasstrace/claimed-key");
+    expect(stderrOutput).not.toContain(VALID_DEV_KEY);
+  });
+
+  it("must not throw when the atomic write fails — returns 'preserved' and best-effort cleans up the tmp file", async () => {
+    writeAnonKey(tmpDir);
+    writeManagedConfig(VALID_ANON_KEY);
+
+    // Force a writeFile failure by pre-creating mcp.json.tmp as a
+    // directory; node:fs/promises.writeFile to a path that is a
+    // directory throws EISDIR.
+    const dir = path.join(tmpDir, ".glasstrace");
+    fs.mkdirSync(path.join(dir, "mcp.json.tmp"), { recursive: true });
+
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    expect(result.action).toBe("preserved");
+
+    // The original mcp.json must be untouched
+    const after = fs.readFileSync(path.join(dir, "mcp.json"), "utf-8");
+    expect(after).toContain(VALID_ANON_KEY);
+    expect(after).not.toContain(VALID_DEV_KEY);
+
+    // Marker must not have been written
+    expect(fs.existsSync(path.join(dir, "mcp-connected"))).toBe(false);
+  });
+
+  it("matches the agent-detection generic config shape (regression guard)", async () => {
+    // If `generateMcpConfig({ name: "generic", ... })` ever diverges from
+    // the inlined runtime helper, the staleness check stops detecting
+    // SDK-managed configs. This test locks in the expected shape.
+    writeAnonKey(tmpDir);
+    writeManagedConfig(VALID_ANON_KEY);
+
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+    expect(result.action).toBe("rewrote");
   });
 });

@@ -8,6 +8,14 @@ import {
 import { readAnonKey, readClaimedKey } from "./anon-key.js";
 
 /**
+ * Glasstrace MCP endpoint embedded in managed MCP configs and used by
+ * the runtime claim-refresh path. Lives here (not in `cli/constants.ts`)
+ * so the runtime helper can reach it without crossing the runtime/CLI
+ * boundary; `cli/constants.ts` re-exports it for one release.
+ */
+export const MCP_ENDPOINT = "https://api.glasstrace.dev/mcp";
+
+/**
  * Runtime-safe MCP credential and config utilities.
  *
  * This module is loaded into user processes at SDK boot. It must not
@@ -434,4 +442,199 @@ export async function writeMcpMarker(
   // writeFile mode only applies on creation on some platforms.
   await modules.fs.chmod(markerPath, 0o600);
   return true;
+}
+
+const MCP_CONFIG_FILE = "mcp.json";
+
+/**
+ * The set of outcomes the runtime claim-refresh helper can produce.
+ *
+ * - `rewrote`: `.glasstrace/mcp.json` matched the SDK-shaped output
+ *   for the on-disk anon key, was rewritten with the effective
+ *   credential, and the marker was updated.
+ * - `preserved`: `.glasstrace/mcp.json` exists but does not match the
+ *   SDK-shaped output for the on-disk anon key. The file is left
+ *   untouched (the user may have hand-edited it). The marker is not
+ *   touched.
+ * - `absent`: `.glasstrace/mcp.json` does not exist (`ENOENT`), or
+ *   no anon key is on disk so there is nothing to compare against. A
+ *   project without an anon key never had an SDK-shaped `mcp.json`
+ *   written by the runtime path, so this branch is a true no-op.
+ * - `skipped-anon-source`: the effective credential is `null` or its
+ *   source is `"anon"`. Either way, there is no claim transition to
+ *   refresh for. Caller should generally gate on
+ *   `effective.source !== "anon"` before invoking the helper; this
+ *   branch is the runtime-side belt-and-suspenders.
+ * - `skipped-not-persisted`: never reached in practice — the caller
+ *   in `init-client.ts` gates on `writeClaimedKey`'s `persisted` not
+ *   being `"none"`. The variant exists so an exhaustive switch in
+ *   the caller stays exhaustive if the gate is removed.
+ *
+ * @internal
+ */
+export type RuntimeRefreshAction =
+  | "rewrote"
+  | "preserved"
+  | "absent"
+  | "skipped-anon-source"
+  | "skipped-not-persisted";
+
+let refreshNudgeEmitted = false;
+
+/**
+ * @internal Exported for unit testing only — resets the per-process
+ *   "refresh nudge already emitted" flag.
+ */
+export function __resetRefreshNudgeForTest(): void {
+  refreshNudgeEmitted = false;
+}
+
+/**
+ * Emits a single redacted stderr line announcing the MCP config
+ * refresh. Deduplicated per process via a module-level flag — a
+ * second call within the same process is a no-op. Cross-process
+ * dedup (the same user running `mcp add` in another terminal moments
+ * later) is explicitly out of scope.
+ */
+function emitRefreshNudge(persistedSource: "env-local" | "claimed-key"): void {
+  if (refreshNudgeEmitted) return;
+  refreshNudgeEmitted = true;
+  try {
+    if (persistedSource === "claimed-key") {
+      process.stderr.write(
+        "[glasstrace] MCP config refreshed for the new credential. " +
+          "Copy .glasstrace/claimed-key into .env.local so Codex can pick it up on next restart.\n",
+      );
+    } else {
+      process.stderr.write(
+        "[glasstrace] MCP config refreshed for the new credential.\n",
+      );
+    }
+  } catch {
+    // stderr is best-effort; refresh outcome must not depend on it.
+  }
+}
+
+/**
+ * Returns the SDK-shaped JSON for `.glasstrace/mcp.json` (the generic
+ * MCP config used at runtime). Inlined here — and intentionally not
+ * imported from `agent-detection/configs.ts` — because the runtime
+ * path must not pull `agent-detection` into the runtime bundle. The
+ * shape matches what `generateMcpConfig({ name: "generic", ... },
+ * endpoint, bearer)` would produce. If the agent-detection version
+ * diverges, the staleness check stops detecting SDK-managed configs;
+ * a regression test against `generateMcpConfig`'s "generic" branch
+ * lives in `tests/unit/sdk/mcp-runtime.test.ts`.
+ */
+function genericMcpConfigContent(endpoint: string, bearer: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        glasstrace: {
+          url: endpoint,
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Refreshes `.glasstrace/mcp.json` after a successful account claim
+ * transition has persisted a dev/account credential to disk (via
+ * `writeClaimedKey`). The file is rewritten only when its content
+ * matches the SDK-shaped output for the project's on-disk anon key
+ * (canonical-JSON equivalence via `mcpConfigMatches` — whitespace and
+ * key order are normalised before comparison). User-edited or
+ * third-party `mcp.json` content is preserved.
+ *
+ * Atomic write protocol: write the replacement to a sibling temp
+ * path, set `0o600`, then `rename` into place. This matches the
+ * existing pattern at `init-client.ts` for `.glasstrace/config`,
+ * `anon-key.ts` for `.glasstrace/anon_key`, and `runtime-state.ts`.
+ * The temp must be on the same filesystem as the destination for the
+ * `rename` to be atomic.
+ *
+ * The helper is invoked only on the post-claim runtime branch (see
+ * `init-client.ts` `performInit`) and never on the steady-state init
+ * path. It must not throw — failures during write/chmod/rename or
+ * marker update surface as `"preserved"` so the caller's
+ * `claimResult` return is preserved. The temp file is best-effort
+ * cleaned up on failure to avoid leaving stale `.tmp` siblings on
+ * disk.
+ *
+ * @internal Exported for unit testing only; not re-exported from
+ *   `node-entry.ts` or `index.ts`.
+ */
+export async function refreshGenericMcpConfigAtRuntime(
+  projectRoot: string,
+  effective: EffectiveMcpCredential | null,
+  anonKeyOnDisk: AnonApiKey | null,
+): Promise<{ action: RuntimeRefreshAction }> {
+  if (effective === null || effective.source === "anon") {
+    return { action: "skipped-anon-source" };
+  }
+
+  // Dev-key-only project (no .glasstrace/anon_key on disk): the
+  // staleness check has nothing to compare against. The SDK never
+  // wrote mcp.json without an anon key, so there is nothing to
+  // refresh.
+  if (anonKeyOnDisk === null) {
+    return { action: "absent" };
+  }
+
+  const modules = await loadFsPath();
+  if (!modules) return { action: "absent" };
+
+  const dirPath = modules.path.join(projectRoot, GLASSTRACE_DIR);
+  const configPath = modules.path.join(dirPath, MCP_CONFIG_FILE);
+  const tmpPath = configPath + ".tmp";
+
+  let existing: string;
+  try {
+    existing = await modules.fs.readFile(configPath, "utf-8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return { action: "absent" };
+    }
+    return { action: "preserved" };
+  }
+
+  const expectedAnon = genericMcpConfigContent(MCP_ENDPOINT, anonKeyOnDisk);
+  if (!mcpConfigMatches(existing, expectedAnon)) {
+    return { action: "preserved" };
+  }
+
+  // SDK-managed and stale. Replace atomically. Any failure in the
+  // write/chmod/rename or marker update path must produce a non-throw
+  // outcome so the caller's claimResult return is preserved; the
+  // .tmp sibling is best-effort cleaned up.
+  const replacement = genericMcpConfigContent(MCP_ENDPOINT, effective.key);
+  try {
+    await modules.fs.writeFile(tmpPath, replacement, { mode: 0o600 });
+    await modules.fs.chmod(tmpPath, 0o600);
+    await modules.fs.rename(tmpPath, configPath);
+
+    await writeMcpMarker(projectRoot, {
+      credentialSource: effective.source,
+      credentialHash: identityFingerprint(effective.key),
+    });
+  } catch {
+    try {
+      await modules.fs.unlink(tmpPath);
+    } catch {
+      // Tmp may not exist (rename succeeded, marker write failed) or
+      // unlink itself may fail; either way nothing else to do.
+    }
+    return { action: "preserved" };
+  }
+
+  emitRefreshNudge(effective.source);
+
+  return { action: "rewrote" };
 }
