@@ -1,18 +1,21 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { NEXT_CONFIG_NAMES } from "./constants.js";
+import { identityFingerprint, writeMcpMarker } from "../mcp-runtime.js";
 
-/**
- * Computes a stable identity fingerprint for deduplication purposes.
- * This is NOT password hashing — the input is an opaque token used
- * as a marker identity, not a credential stored for authentication.
- *
- * @internal Exported for unit testing only.
- */
-export function identityFingerprint(token: string): string {
-  return `sha256:${createHash("sha256").update(token).digest("hex")}`;
-}
+// Re-exports of utilities that moved into `../mcp-runtime.ts` so the
+// runtime claim-refresh path can use them without crossing the
+// runtime/CLI boundary. Existing CLI-side and test imports continue
+// to work unchanged through these shims.
+//
+// TODO(remove-after-next-stable-release): remove these re-exports
+// once internal callers have migrated to `../mcp-runtime.js`.
+export {
+  identityFingerprint,
+  isDevApiKey,
+  mcpConfigMatches,
+  readEnvLocalApiKey,
+} from "../mcp-runtime.js";
 
 /**
  * Checks whether `content` contains a real (non-commented) `registerGlasstrace()` call.
@@ -715,47 +718,6 @@ export function wrapCJSExport(content: string): WrapResult {
 }
 
 /**
- * Extracts the value of `GLASSTRACE_API_KEY` from a `.env.local`-style
- * string. Returns the raw (unquoted) value, or `null` if the key is
- * absent, commented out, or empty.
- *
- * Only uncommented assignments are considered — a `# GLASSTRACE_API_KEY=...`
- * placeholder is treated as if the key is not set.
- *
- * When multiple uncommented assignments are present, the **last**
- * effective value wins — matching typical `.env` override semantics
- * (later lines override earlier ones when loaded by dotenv-style
- * loaders). Placeholder values (empty or `your_key_here`) are skipped
- * so a trailing placeholder does not mask a real earlier value.
- *
- * @internal Exported for unit testing only.
- */
-export function readEnvLocalApiKey(content: string): string | null {
-  let last: string | null = null;
-  const regex = /^\s*GLASSTRACE_API_KEY\s*=\s*(.*)$/gm;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    const raw = match[1].trim();
-    if (raw === "") continue;
-    const unquoted = raw.replace(/^(['"])(.*)\1$/, "$2");
-    if (unquoted === "" || unquoted === "your_key_here") continue;
-    last = unquoted;
-  }
-  return last;
-}
-
-/**
- * Returns true when the given API key value is a claimed developer key
- * (prefix `gt_dev_`). Defensive against leading/trailing whitespace.
- *
- * @internal Exported for unit testing only.
- */
-export function isDevApiKey(value: string | null | undefined): boolean {
-  if (value === null || value === undefined) return false;
-  return value.trim().startsWith("gt_dev_");
-}
-
-/**
  * Creates `.env.local` with `GLASSTRACE_API_KEY=` placeholder, or appends
  * to an existing file if it does not already contain `GLASSTRACE_API_KEY`.
  *
@@ -849,105 +811,32 @@ export async function scaffoldGitignore(projectRoot: string): Promise<boolean> {
 }
 
 /**
- * Compares an existing MCP config file against the content init would
- * write. Returns `true` when they are semantically equal (JSON configs
- * are parsed and compared deeply; TOML configs use trimmed string
- * comparison). Returns `false` on parse errors or mismatch.
+ * Creates or updates the `.glasstrace/mcp-connected` marker.
  *
- * Used by `init` to detect manually-edited MCP configs before
- * overwriting them (DISC-1247 Scenario 2c).
+ * The marker is a v2 record that captures the source and identity
+ * fingerprint of the credential currently embedded in the managed
+ * MCP config. The nudge system reads it to suppress "MCP not
+ * configured" prompts; `mcp add` reads it to detect when the
+ * effective credential has drifted from what `mcp.json` was last
+ * written with and a refresh is needed.
  *
- * @internal Exported for unit testing only.
- */
-export function mcpConfigMatches(
-  existingContent: string,
-  expectedContent: string,
-): boolean {
-  const trimmedExpected = expectedContent.trim();
-
-  // Attempt JSON comparison first — init writes JSON for most agents.
-  try {
-    const existingParsed: unknown = JSON.parse(existingContent);
-    const expectedParsed: unknown = JSON.parse(trimmedExpected);
-    return JSON.stringify(canonicalize(existingParsed)) === JSON.stringify(canonicalize(expectedParsed));
-  } catch {
-    // Fall through to text comparison for TOML and other non-JSON formats.
-  }
-
-  return existingContent.trim() === trimmedExpected;
-}
-
-/**
- * Sorts object keys recursively to produce a canonical form suitable
- * for structural equality comparison via JSON.stringify.
- */
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalize);
-  }
-  if (value !== null && typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(obj).sort()) {
-      sorted[key] = canonicalize(obj[key]);
-    }
-    return sorted;
-  }
-  return value;
-}
-
-/**
- * Creates the `.glasstrace/mcp-connected` marker file, or overwrites it
- * if the key has changed (key rotation).
- *
- * The marker file records a SHA-256 fingerprint of the anonymous key and
- * the ISO 8601 timestamp when it was written. It is used by the nudge
- * system to suppress "MCP not configured" prompts.
- *
- * If the marker already exists with the same key fingerprint, this is a
- * no-op (the timestamp is NOT refreshed).
+ * Backwards-compatible signature: passing an anonymous key writes a
+ * v2 marker with `credentialSource: "anon"`. The reader handles
+ * pre-existing v1 markers transparently. v3+ and corrupted markers
+ * are unconditionally overwritten.
  *
  * @param projectRoot - Absolute path to the project root directory.
- * @param anonKey - The anonymous API key to fingerprint.
- * @returns True if the marker was created or updated, false if it already
- *   exists with the same key fingerprint.
+ * @param anonKey - The anonymous API key whose fingerprint will be
+ *   recorded as the active credential identity.
+ * @returns True if the marker was created or updated, false if an
+ *   existing v1/v2 marker already records the same identity.
  */
 export async function scaffoldMcpMarker(
   projectRoot: string,
   anonKey: string,
 ): Promise<boolean> {
-  const dirPath = path.join(projectRoot, ".glasstrace");
-  const markerPath = path.join(dirPath, "mcp-connected");
-  const keyHash = identityFingerprint(anonKey);
-
-  // Check if marker already exists with the same key hash
-  if (fs.existsSync(markerPath)) {
-    try {
-      const existing = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as {
-        keyHash?: string;
-      };
-      if (existing.keyHash === keyHash) {
-        return false;
-      }
-    } catch {
-      // Corrupted marker — overwrite
-    }
-  }
-
-  // Create directory with restricted permissions
-  fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
-
-  const marker = JSON.stringify(
-    { keyHash, configuredAt: new Date().toISOString() },
-    null,
-    2,
-  );
-
-  fs.writeFileSync(markerPath, marker, { mode: 0o600 });
-
-  // Ensure permissions even if file pre-existed (writeFile mode only
-  // applies on creation on some platforms)
-  fs.chmodSync(markerPath, 0o600);
-
-  return true;
+  return writeMcpMarker(projectRoot, {
+    credentialSource: "anon",
+    credentialHash: identityFingerprint(anonKey),
+  });
 }

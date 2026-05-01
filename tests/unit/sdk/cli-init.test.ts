@@ -828,11 +828,15 @@ describe("scaffoldMcpMarker", () => {
     expect(fs.existsSync(markerPath)).toBe(true);
 
     const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as {
-      keyHash: string;
+      version: number;
+      credentialSource: string;
+      credentialHash: string;
       configuredAt: string;
     };
     const expectedHash = `sha256:${crypto.createHash("sha256").update(TEST_ANON_KEY).digest("hex")}`;
-    expect(marker.keyHash).toBe(expectedHash);
+    expect(marker.version).toBe(2);
+    expect(marker.credentialSource).toBe("anon");
+    expect(marker.credentialHash).toBe(expectedHash);
     expect(marker.configuredAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
@@ -1002,10 +1006,14 @@ describe("runInit — MCP auto-configuration", () => {
     expect(fs.existsSync(markerPath)).toBe(true);
 
     const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as {
-      keyHash: string;
+      version: number;
+      credentialSource: string;
+      credentialHash: string;
     };
     const expectedHash = `sha256:${crypto.createHash("sha256").update(TEST_ANON_KEY).digest("hex")}`;
-    expect(marker.keyHash).toBe(expectedHash);
+    expect(marker.version).toBe(2);
+    expect(marker.credentialSource).toBe("anon");
+    expect(marker.credentialHash).toBe(expectedHash);
   });
 
   it("is idempotent — running twice does not duplicate MCP config", async () => {

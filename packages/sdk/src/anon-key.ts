@@ -1,8 +1,9 @@
-import { AnonApiKeySchema, createAnonApiKey } from "@glasstrace/protocol";
-import type { AnonApiKey } from "@glasstrace/protocol";
+import { AnonApiKeySchema, DevApiKeySchema, createAnonApiKey } from "@glasstrace/protocol";
+import type { AnonApiKey, DevApiKey } from "@glasstrace/protocol";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const ANON_KEY_FILE = "anon_key";
+const CLAIMED_KEY_FILE = "claimed-key";
 
 /**
  * Lazily imports `node:fs/promises` and `node:path`. Returns `null` if
@@ -62,6 +63,42 @@ export async function readAnonKey(projectRoot?: string): Promise<AnonApiKey | nu
   const cached = ephemeralKeyCache.get(root);
   if (cached !== undefined) {
     return cached;
+  }
+
+  return null;
+}
+
+/**
+ * Reads a claimed developer API key persisted at
+ * `.glasstrace/claimed-key`. The file is the runtime fallback used by
+ * {@link import("./init-client.js").writeClaimedKey} when `.env.local`
+ * is not writable.
+ *
+ * Returns the key when the file exists and its contents pass
+ * `DevApiKeySchema` validation. Returns `null` when:
+ * - The file does not exist.
+ * - The file content fails strict schema validation (a malformed or
+ *   stale value cannot be distinguished from a valid one without a
+ *   server roundtrip — callers should treat this as "no key").
+ * - An I/O error occurs.
+ * - `node:fs` is unavailable (non-Node environment).
+ */
+export async function readClaimedKey(projectRoot?: string): Promise<DevApiKey | null> {
+  const root = projectRoot ?? process.cwd();
+
+  const modules = await loadFsPath();
+  if (!modules) return null;
+
+  const keyPath = modules.path.join(root, GLASSTRACE_DIR, CLAIMED_KEY_FILE);
+  try {
+    const content = await modules.fs.readFile(keyPath, "utf-8");
+    const trimmed = content.trim();
+    const parsed = DevApiKeySchema.safeParse(trimmed);
+    if (parsed.success) {
+      return parsed.data;
+    }
+  } catch {
+    // Fall through — file missing, unreadable, or invalid; treat as absent.
   }
 
   return null;

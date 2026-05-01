@@ -193,10 +193,14 @@ describe("mcpAdd", () => {
     expect(fs.existsSync(markerPath)).toBe(true);
 
     const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as {
-      keyHash: string;
+      version: number;
+      credentialSource: string;
+      credentialHash: string;
       configuredAt: string;
     };
-    expect(marker.keyHash).toMatch(/^sha256:/);
+    expect(marker.version).toBe(2);
+    expect(marker.credentialSource).toBe("anon");
+    expect(marker.credentialHash).toMatch(/^sha256:/);
     expect(marker.configuredAt).toBeTruthy();
   });
 

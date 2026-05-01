@@ -131,13 +131,15 @@ describe("Agent MCP auto-configuration integration tests", () => {
     );
     expect(gitignore).toContain(".mcp.json");
 
-    // .glasstrace/mcp-connected marker exists with key hash
+    // .glasstrace/mcp-connected marker exists with v2 schema
     const markerPath = path.join(tmpDir, ".glasstrace", "mcp-connected");
     expect(fs.existsSync(markerPath)).toBe(true);
     const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
-    expect(marker.keyHash).toBeDefined();
-    expect(typeof marker.keyHash).toBe("string");
-    expect(marker.keyHash.length).toBeGreaterThan(0);
+    expect(marker.version).toBe(2);
+    expect(marker.credentialSource).toBe("anon");
+    expect(marker.credentialHash).toBeDefined();
+    expect(typeof marker.credentialHash).toBe("string");
+    expect(marker.credentialHash.length).toBeGreaterThan(0);
     expect(marker.configuredAt).toBeDefined();
   });
 
