@@ -19,6 +19,10 @@ import {
   HttpsTransportError,
   HttpsBodyParseError,
 } from "./https-transport.js";
+import {
+  resolveEffectiveMcpCredential,
+  refreshGenericMcpConfigAtRuntime,
+} from "./mcp-runtime.js";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const CONFIG_FILE = "config";
@@ -280,6 +284,16 @@ export interface InitClaimResult {
 }
 
 /**
+ * Result of {@link writeClaimedKey}. The discriminator tells the
+ * caller which on-disk source the key now lives at — and, if both
+ * file writes failed, that no refresh of dependent state should be
+ * attempted because there is no on-disk credential to back it.
+ */
+export interface WriteClaimedKeyResult {
+  persisted: "env-local" | "claimed-key" | "none";
+}
+
+/**
  * Writes a claimed API key to disk using a fallback chain:
  *   1. `.env.local` — update or create with the new key
  *   2. `.glasstrace/claimed-key` — fallback if `.env.local` is not writable
@@ -288,11 +302,19 @@ export interface InitClaimResult {
  * The key value MUST NOT appear in any log output or stderr message.
  * In non-Node environments where `node:fs` is unavailable, falls through
  * directly to the dashboard message (step 3).
+ *
+ * Returns a {@link WriteClaimedKeyResult} so the caller can gate
+ * downstream actions (specifically: managed MCP config refresh) on
+ * the key actually having reached disk. Returning `persisted: "none"`
+ * means the SDK could not write the key anywhere; refreshing
+ * `.glasstrace/mcp.json` from the new key would put it out of sync
+ * with the credential the runtime can actually read on the next
+ * cold start.
  */
 export async function writeClaimedKey(
   newApiKey: string,
   projectRoot?: string,
-): Promise<void> {
+): Promise<WriteClaimedKeyResult> {
   const modules = await loadFsPathAsync();
 
   if (modules) {
@@ -342,7 +364,7 @@ export async function writeClaimedKey(
           "[glasstrace] Account claimed! API key written to .env.local. Restart your dev server to use it.\n",
         );
       } catch { /* stderr is best-effort */ }
-      return;
+      return { persisted: "env-local" };
     }
 
     // Step 2: Try writing to .glasstrace/claimed-key
@@ -368,7 +390,7 @@ export async function writeClaimedKey(
           "[glasstrace] Account claimed! API key written to .glasstrace/claimed-key. Copy it to your .env.local file.\n",
         );
       } catch { /* stderr is best-effort */ }
-      return;
+      return { persisted: "claimed-key" };
     }
   }
 
@@ -378,6 +400,7 @@ export async function writeClaimedKey(
       "[glasstrace] Account claimed but could not write key to disk. Visit your dashboard settings to rotate and retrieve a new API key.\n",
     );
   } catch { /* stderr is best-effort */ }
+  return { persisted: "none" };
 }
 
 /**
@@ -447,12 +470,35 @@ export async function performInit(
 
       // Handle account claim transition — write key to disk, never to stderr
       if (result.claimResult) {
+        let persisted: WriteClaimedKeyResult["persisted"] = "none";
         try {
-          await writeClaimedKey(result.claimResult.newApiKey);
+          const w = await writeClaimedKey(result.claimResult.newApiKey);
+          persisted = w.persisted;
         } catch {
           // writeClaimedKey handles its own errors internally, but guard
           // against unexpected failures to ensure claimResult is never lost
         }
+
+        // When the claimed key actually reached disk, refresh the
+        // managed `.glasstrace/mcp.json` (if SDK-shaped) so MCP queries
+        // start using the same credential ingestion now writes traces
+        // with. Refresh failure must not lose claimResult — wrap the
+        // whole thing in its own try/catch.
+        if (persisted !== "none") {
+          try {
+            const resolved = await resolveEffectiveMcpCredential();
+            await refreshGenericMcpConfigAtRuntime(
+              process.cwd(),
+              resolved.effective,
+              resolved.anonKey,
+            );
+          } catch {
+            // Refresh failure leaves the existing managed config in
+            // place. The next CLI-driven `glasstrace mcp add` run will
+            // detect the marker mismatch and prompt a re-run.
+          }
+        }
+
         return { claimResult: result.claimResult };
       }
 
