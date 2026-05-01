@@ -105,6 +105,49 @@ describe("writeMcpConfig", () => {
     expect(permissions).toBe(0o600);
   });
 
+  it("does not leak config content (which embeds the bearer) in stderr or thrown errors", async () => {
+    // Force EISDIR by pre-creating the destination as a directory.
+    // EISDIR is not a permission error, so writeMcpConfig rethrows it
+    // — that rethrow path is the one we care about for content leakage.
+    const configPath = join(testDir, "blocked.json");
+    await mkdir(configPath, { recursive: true });
+    const agent = makeAgent({ mcpConfigPath: configPath });
+
+    const bearer = "gt_dev_" + "9".repeat(48);
+    const sensitiveContent = JSON.stringify({
+      mcpServers: { glasstrace: { headers: { Authorization: `Bearer ${bearer}` } } },
+    });
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    let stderrText = "";
+    let thrownText = "";
+
+    try {
+      try {
+        await writeMcpConfig(agent, sensitiveContent, testDir);
+      } catch (err) {
+        thrownText = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
+      }
+      stderrText = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    // The EISDIR rethrow path is the one we want to audit. Assert
+    // explicitly that an error was thrown — otherwise a future change
+    // that swallows EISDIR (or gates the rethrow on something else)
+    // would leave `thrownText` empty, and the leak assertions would
+    // pass vacuously.
+    expect(thrownText).not.toBe("");
+    expect(thrownText).toMatch(/EISDIR|directory/i);
+
+    expect(stderrText).not.toContain(bearer);
+    expect(thrownText).not.toContain(bearer);
+    // Defense-in-depth: assert no Bearer-prefixed substring leaked.
+    expect(stderrText).not.toMatch(/Bearer gt_/);
+    expect(thrownText).not.toMatch(/Bearer gt_/);
+  });
+
   it.skipIf(process.getuid?.() === 0)("logs warning on permission denied and does not throw", async () => {
     // Create a read-only directory to prevent file creation
     const readOnlyDir = join(testDir, "readonly");

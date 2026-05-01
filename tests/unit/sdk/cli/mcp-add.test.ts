@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { createHash } from "node:crypto";
 
 // Valid anon key: gt_anon_ prefix + 48 hex chars (24 bytes)
 const TEST_ANON_KEY =
@@ -41,8 +42,14 @@ function writeAnonKey(dir: string): void {
 function writeMarkerFile(dir: string): void {
   const glassDir = path.join(dir, ".glasstrace");
   fs.mkdirSync(glassDir, { recursive: true });
+  // Match the v2 marker the resolver expects for an anon project so
+  // the existing idempotency tests continue to assert "already
+  // configured" instead of triggering the credential-mismatch refresh.
+  const credentialHash = `sha256:${createHash("sha256").update(TEST_ANON_KEY).digest("hex")}`;
   const marker = JSON.stringify({
-    keyHash: "sha256:abc123",
+    version: 2,
+    credentialSource: "anon",
+    credentialHash,
     configuredAt: new Date().toISOString(),
   });
   fs.writeFileSync(path.join(glassDir, "mcp-connected"), marker);
@@ -62,14 +69,28 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function loadMcpAdd(): Promise<{
+type LoadedMcpAdd = {
   mcpAdd: (options?: { force?: boolean; dryRun?: boolean }) => Promise<{
     exitCode: number;
     results: Array<{ agent: string; success: boolean; method: string; message: string }>;
     messages: string[];
   }>;
-}> {
-  return import("../../../../packages/sdk/src/cli/mcp-add.js") as ReturnType<typeof loadMcpAdd>;
+  registerViaCli: (
+    agent: {
+      name: "claude" | "codex" | "cursor" | "gemini" | "windsurf" | "generic";
+      mcpConfigPath: string | null;
+      infoFilePath: string | null;
+      cliAvailable: boolean;
+      registrationCommand: unknown;
+    },
+    bearer: string,
+  ) => Promise<boolean>;
+};
+
+async function loadMcpAdd(): Promise<LoadedMcpAdd> {
+  return (await import(
+    "../../../../packages/sdk/src/cli/mcp-add.js"
+  )) as unknown as LoadedMcpAdd;
 }
 
 describe("mcpAdd", () => {
@@ -265,5 +286,138 @@ describe("mcpAdd", () => {
       fs.readFileSync(genericPath, "utf-8"),
     ) as { mcpServers: { glasstrace: { url: string } } };
     expect(config.mcpServers.glasstrace.url).toContain("glasstrace.dev");
+  });
+
+  it("re-registers when marker exists but credential has changed (DISC-1512)", async () => {
+    writeAnonKey(tmpDir);
+    // Marker recorded an unrelated anon credential. The resolver will
+    // return the on-disk anon key, whose hash will not match the
+    // marker's, triggering a re-run without --force.
+    const glassDir = path.join(tmpDir, ".glasstrace");
+    fs.mkdirSync(glassDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(glassDir, "mcp-connected"),
+      JSON.stringify({
+        version: 2,
+        credentialSource: "anon",
+        credentialHash: "sha256:" + "f".repeat(64),
+        configuredAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+
+    const { mcpAdd } = await loadMcpAdd();
+    const result = await mcpAdd();
+
+    const output = result.messages.join("\n");
+    expect(output).toContain("credential change");
+    expect(output).not.toContain("MCP already configured");
+  });
+
+  it("embeds the dev key (not anon) when .env.local has a claimed credential", async () => {
+    writeAnonKey(tmpDir);
+    const devKey = "gt_dev_" + "1".repeat(48);
+    fs.writeFileSync(path.join(tmpDir, ".env.local"), `GLASSTRACE_API_KEY=${devKey}\n`);
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+
+    const { mcpAdd } = await loadMcpAdd();
+    await mcpAdd({ force: true });
+
+    // The Claude config should embed the dev key — not the anon key.
+    // CLI registration is mocked to fail, so the file-config branch is
+    // exercised. registerViaCli would have rejected the dev-key bearer
+    // anyway via the runtime guard.
+    const claudeConfigPath = path.join(tmpDir, ".mcp.json");
+    expect(fs.existsSync(claudeConfigPath)).toBe(true);
+    const claudeConfig = fs.readFileSync(claudeConfigPath, "utf-8");
+    expect(claudeConfig).toContain(devKey);
+    expect(claudeConfig).not.toContain(TEST_ANON_KEY);
+
+    // Marker records the effective source.
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".glasstrace", "mcp-connected"), "utf-8"),
+    ) as { credentialSource: string; credentialHash: string };
+    expect(marker.credentialSource).toBe("env-local");
+    expect(marker.credentialHash).toBe(
+      "sha256:" + createHash("sha256").update(devKey).digest("hex"),
+    );
+  });
+
+  it("Codex config never embeds bearer (D4 invariant)", async () => {
+    writeAnonKey(tmpDir);
+    // Codex marker file: a plain `.codex/` directory triggers detection.
+    fs.mkdirSync(path.join(tmpDir, ".codex"), { recursive: true });
+
+    const { mcpAdd } = await loadMcpAdd();
+    await mcpAdd({ force: true });
+
+    // The test must fail loudly if the Codex config wasn't written —
+    // otherwise a detection regression would silently neutralise the
+    // invariant assertion that follows.
+    const codexConfig = path.join(tmpDir, ".codex", "config.toml");
+    expect(fs.existsSync(codexConfig)).toBe(true);
+    const content = fs.readFileSync(codexConfig, "utf-8");
+    expect(content).toContain("bearer_token_env_var");
+    expect(content).not.toContain(TEST_ANON_KEY);
+    // No literal `gt_anon_` or `gt_dev_` substring should ever appear
+    // in a Codex config — this locks in D4.
+    expect(content).not.toMatch(/gt_(anon|dev)_/);
+  });
+
+  it("registerViaCli rejects a dev-key bearer for non-Codex agents (anon-only by design)", async () => {
+    const { registerViaCli } = await loadMcpAdd();
+    const devKey = "gt_dev_" + "2".repeat(48);
+    const claudeAgent = {
+      name: "claude" as const,
+      mcpConfigPath: path.join(tmpDir, ".mcp.json"),
+      infoFilePath: null,
+      cliAvailable: true,
+      registrationCommand: null,
+    };
+
+    const result = await registerViaCli(claudeAgent, devKey);
+    expect(result).toBe(false);
+  });
+
+  it("registerViaCli accepts a valid anon bearer for non-Codex agents", async () => {
+    const { registerViaCli } = await loadMcpAdd();
+    const claudeAgent = {
+      name: "claude" as const,
+      mcpConfigPath: path.join(tmpDir, ".mcp.json"),
+      infoFilePath: null,
+      cliAvailable: true,
+      registrationCommand: null,
+    };
+
+    // execFile mock makes the CLI call fail; we only care that the
+    // anon-only guard let the call through (returning false because of
+    // the execFile failure, not because of the guard rejection).
+    const { execFile } = await import("node:child_process");
+    const successImpl = ((_cmd: string, _args: string[], cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+      cb(null, "success", "");
+    }) as typeof execFile;
+    vi.mocked(execFile).mockImplementationOnce(successImpl);
+
+    const result = await registerViaCli(claudeAgent, TEST_ANON_KEY);
+    expect(result).toBe(true);
+  });
+
+  it("never writes raw key material to stderr across the full mcp-add flow", async () => {
+    writeAnonKey(tmpDir);
+    const devKey = "gt_dev_" + "3".repeat(48);
+    fs.writeFileSync(path.join(tmpDir, ".env.local"), `GLASSTRACE_API_KEY=${devKey}\n`);
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const { mcpAdd } = await loadMcpAdd();
+    await mcpAdd({ force: true });
+
+    const captured = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    expect(captured).not.toContain(devKey);
+    expect(captured).not.toContain(TEST_ANON_KEY);
+    expect(captured).not.toMatch(/gt_(anon|dev)_[a-f0-9]+/);
+
+    stderrSpy.mockRestore();
   });
 });

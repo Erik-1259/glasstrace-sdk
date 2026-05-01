@@ -7,13 +7,17 @@ import {
   scaffoldNextConfig,
   scaffoldEnvLocal,
   scaffoldGitignore,
-  scaffoldMcpMarker,
   addCoverageMapEnv,
   mcpConfigMatches,
   readEnvLocalApiKey,
   isDevApiKey,
   resolveInstrumentationTarget,
 } from "./scaffolder.js";
+import {
+  identityFingerprint,
+  resolveEffectiveMcpCredential,
+  writeMcpMarker,
+} from "../mcp-runtime.js";
 import { buildImportGraph } from "../import-graph.js";
 import { getOrCreateAnonKey, readAnonKey } from "../anon-key.js";
 import { detectAgents } from "../agent-detection/detect.js";
@@ -754,7 +758,30 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       );
     }
 
+    // `anyConfigWritten` covers both fresh writes AND user-preserved
+    // configs — it gates nudge suppression (we don't want to pester
+    // users about MCP setup they consciously preserved) and the
+    // gitignore update.
+    //
+    // `anyConfigRewrittenWithBearer` is stricter: it tracks whether
+    // this invocation actually wrote new content with the resolved
+    // bearer. The marker is gated on this stricter flag so we don't
+    // stamp the marker as "this credential is what's on disk" when the
+    // user declined an overwrite — that would let a later
+    // `glasstrace mcp add` falsely conclude the project is already
+    // configured for the new credential and skip the refresh
+    // (DISC-1512).
     let anyConfigWritten = false;
+    let anyConfigRewrittenWithBearer = false;
+
+    // Resolve the effective MCP credential. Managed configs embed
+    // whichever bearer the project is authenticating ingestion with —
+    // anon key on first init, dev key on a re-init after an account
+    // claim. The discovery file at `.well-known/glasstrace.json`
+    // continues to use the anon key (it is a public project
+    // identifier read by the browser extension, not an auth token).
+    const resolved = await resolveEffectiveMcpCredential(projectRoot);
+    const bearer = resolved.effective?.key ?? anonKey;
 
     if (isCI) {
       // Non-interactive: write only the generic .glasstrace/mcp.json.
@@ -768,7 +795,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
         cliAvailable: false,
         registrationCommand: null,
       };
-      const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, anonKey);
+      const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, bearer);
       const decision = await decideMcpConfigAction({
         configPath: genericAgent.mcpConfigPath,
         expectedContent: genericConfig,
@@ -776,6 +803,9 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       });
       if (decision !== "skip") {
         await writeMcpConfig(genericAgent, genericConfig, projectRoot);
+        if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
+          anyConfigRewrittenWithBearer = true;
+        }
       }
       if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
         anyConfigWritten = true;
@@ -798,10 +828,11 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
           cliAvailable: false,
           registrationCommand: null,
         };
-        const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, anonKey);
+        const genericConfig = generateMcpConfig(genericAgent, MCP_ENDPOINT, bearer);
         await writeMcpConfig(genericAgent, genericConfig, projectRoot);
         if (genericAgent.mcpConfigPath !== null && fs.existsSync(genericAgent.mcpConfigPath)) {
           anyConfigWritten = true;
+          anyConfigRewrittenWithBearer = true;
         }
         agents = [];
       }
@@ -810,7 +841,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
 
       for (const agent of agents) {
         try {
-          const configContent = generateMcpConfig(agent, MCP_ENDPOINT, anonKey);
+          const configContent = generateMcpConfig(agent, MCP_ENDPOINT, bearer);
 
           // Diff-aware MCP write (DISC-1247 Scenario 2c): if the existing
           // config differs from what init would write, prompt before
@@ -845,6 +876,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
           }
 
           anyConfigWritten = true;
+          anyConfigRewrittenWithBearer = true;
 
           const infoContent = generateInfoSection(agent, MCP_ENDPOINT);
           if (infoContent !== "") {
@@ -874,11 +906,23 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       projectRoot,
     );
 
-    // Create marker file only if at least one config was successfully written.
-    // Without this gate, a failed MCP setup would suppress future nudges,
-    // leaving users stuck without MCP configuration.
-    if (anyConfigWritten) {
-      const markerCreated = await scaffoldMcpMarker(projectRoot, anonKey);
+    // Create marker file only if this invocation actually wrote a
+    // config with the resolved bearer. We intentionally use the
+    // stricter `anyConfigRewrittenWithBearer` flag instead of the
+    // looser `anyConfigWritten`: stamping the marker for a credential
+    // we did not actually write to disk would let a later
+    // `glasstrace mcp add` short-circuit on a stale config, missing
+    // the claim-transition refresh (DISC-1512). When all configs were
+    // user-preserved, no marker is written — the existing on-disk
+    // marker (if any) stays untouched so its source/hash continues to
+    // describe what was actually written previously.
+    if (anyConfigRewrittenWithBearer) {
+      const markerSource = resolved.effective?.source ?? "anon";
+      const markerHash = identityFingerprint(bearer);
+      const markerCreated = await writeMcpMarker(projectRoot, {
+        credentialSource: markerSource,
+        credentialHash: markerHash,
+      });
       if (markerCreated) {
         summary.push("Created .glasstrace/mcp-connected marker");
       }
