@@ -420,4 +420,145 @@ describe("mcpAdd", () => {
 
     stderrSpy.mockRestore();
   });
+
+  // Acceptance suite: `glasstrace mcp add --force` must always refresh
+  // the generic `.glasstrace/mcp.json` helper. Validation/debug tooling
+  // reads that file directly; before this fix the helper was silently
+  // dropped from the target list whenever non-generic agents were
+  // detected, leaving its bearer stale across credential changes.
+
+  it("anon-only project: --force writes mcp.json with anon bearer and matching v2 marker", async () => {
+    writeAnonKey(tmpDir);
+
+    const { mcpAdd } = await loadMcpAdd();
+    await mcpAdd({ force: true });
+
+    const genericConfigPath = path.join(tmpDir, ".glasstrace", "mcp.json");
+    expect(fs.existsSync(genericConfigPath)).toBe(true);
+    const config = fs.readFileSync(genericConfigPath, "utf-8");
+    expect(config).toContain(`Bearer ${TEST_ANON_KEY}`);
+
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".glasstrace", "mcp-connected"), "utf-8"),
+    ) as { version: number; credentialSource: string; credentialHash: string };
+    expect(marker.version).toBe(2);
+    expect(marker.credentialSource).toBe("anon");
+    expect(marker.credentialHash).toBe(
+      "sha256:" + createHash("sha256").update(TEST_ANON_KEY).digest("hex"),
+    );
+  });
+
+  it("dev key in .env.local plus anon_key on disk: --force writes mcp.json with dev bearer", async () => {
+    writeAnonKey(tmpDir);
+    const devKey = "gt_dev_" + "7".repeat(48);
+    fs.writeFileSync(path.join(tmpDir, ".env.local"), `GLASSTRACE_API_KEY=${devKey}\n`);
+
+    const { mcpAdd } = await loadMcpAdd();
+    await mcpAdd({ force: true });
+
+    const genericConfigPath = path.join(tmpDir, ".glasstrace", "mcp.json");
+    expect(fs.existsSync(genericConfigPath)).toBe(true);
+    const config = fs.readFileSync(genericConfigPath, "utf-8");
+    expect(config).toContain(`Bearer ${devKey}`);
+    expect(config).not.toContain(TEST_ANON_KEY);
+
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".glasstrace", "mcp-connected"), "utf-8"),
+    ) as { credentialSource: string; credentialHash: string };
+    expect(marker.credentialSource).toBe("env-local");
+    expect(marker.credentialHash).toBe(
+      "sha256:" + createHash("sha256").update(devKey).digest("hex"),
+    );
+  });
+
+  it("non-generic agents detected: --force still writes the generic .glasstrace/mcp.json (DISC-1512 follow-up)", async () => {
+    writeAnonKey(tmpDir);
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+    fs.mkdirSync(path.join(tmpDir, ".cursor"), { recursive: true });
+
+    const { mcpAdd } = await loadMcpAdd();
+    await mcpAdd({ force: true });
+
+    // Both agent configs and the generic helper should be present.
+    const claudeConfigPath = path.join(tmpDir, ".mcp.json");
+    expect(fs.existsSync(claudeConfigPath)).toBe(true);
+
+    const genericConfigPath = path.join(tmpDir, ".glasstrace", "mcp.json");
+    expect(fs.existsSync(genericConfigPath)).toBe(true);
+    const generic = fs.readFileSync(genericConfigPath, "utf-8");
+    expect(generic).toContain(`Bearer ${TEST_ANON_KEY}`);
+  });
+
+  it("output includes an explicit generic-helper success line", async () => {
+    writeAnonKey(tmpDir);
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+
+    const { mcpAdd } = await loadMcpAdd();
+    const result = await mcpAdd({ force: true });
+    const output = result.messages.join("\n");
+
+    // The generic helper's success line uses its display name.
+    expect(output).toContain("Generic helper");
+    expect(output).toContain(".glasstrace/mcp.json");
+  });
+
+  it("exits non-zero when every detected non-generic agent fails, even if the generic helper succeeds", async () => {
+    // Pre-fix exit-code contract: a run where Claude/Cursor failed
+    // returned non-zero so automation could detect it. After the
+    // generic helper became a guaranteed target, we have to make sure
+    // its success doesn't mask a complete failure of the originally
+    // detected agents. Force Claude's config write to fail by
+    // pre-creating the destination as a directory (EISDIR), and
+    // assert the run still exits 1.
+    writeAnonKey(tmpDir);
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+    fs.mkdirSync(path.join(tmpDir, ".mcp.json"), { recursive: true });
+
+    const { mcpAdd } = await loadMcpAdd();
+    const result = await mcpAdd({ force: true });
+
+    expect(result.exitCode).toBe(1);
+    const messages = result.messages.join("\n");
+    expect(messages).toMatch(/All detected agent registrations failed/);
+
+    // The generic helper SHOULD still have been refreshed even though
+    // Claude failed — it's an independent path. Verify the helper
+    // file is on disk with the anon bearer.
+    const helper = fs.readFileSync(
+      path.join(tmpDir, ".glasstrace", "mcp.json"),
+      "utf-8",
+    );
+    expect(helper).toContain(`Bearer ${TEST_ANON_KEY}`);
+  });
+
+  it("exits zero when generic-only project succeeds (no detected non-generic agents)", async () => {
+    writeAnonKey(tmpDir);
+
+    const { mcpAdd } = await loadMcpAdd();
+    const result = await mcpAdd({ force: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(fs.existsSync(path.join(tmpDir, ".glasstrace", "mcp.json"))).toBe(true);
+  });
+
+  it("dev key + non-generic agents: generic helper and agent config both embed the dev bearer", async () => {
+    writeAnonKey(tmpDir);
+    const devKey = "gt_dev_" + "8".repeat(48);
+    fs.writeFileSync(path.join(tmpDir, ".env.local"), `GLASSTRACE_API_KEY=${devKey}\n`);
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), "# Test");
+
+    const { mcpAdd } = await loadMcpAdd();
+    await mcpAdd({ force: true });
+
+    const claudeConfig = fs.readFileSync(path.join(tmpDir, ".mcp.json"), "utf-8");
+    expect(claudeConfig).toContain(devKey);
+    expect(claudeConfig).not.toContain(TEST_ANON_KEY);
+
+    const genericConfig = fs.readFileSync(
+      path.join(tmpDir, ".glasstrace", "mcp.json"),
+      "utf-8",
+    );
+    expect(genericConfig).toContain(devKey);
+    expect(genericConfig).not.toContain(TEST_ANON_KEY);
+  });
 });

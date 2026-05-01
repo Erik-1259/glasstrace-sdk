@@ -18,7 +18,7 @@ export function formatAgentName(name: DetectedAgent["name"]): string {
     gemini: "Gemini",
     cursor: "Cursor",
     windsurf: "Windsurf",
-    generic: "Generic",
+    generic: "Generic helper",
   };
   return displayNames[name];
 }
