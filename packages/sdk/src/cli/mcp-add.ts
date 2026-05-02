@@ -262,12 +262,18 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
   const agents = await detectAgents(projectRoot);
   const detectedNonGeneric = agents.filter((a) => a.name !== "generic");
 
-  // If no specific agents found, include the generic fallback so the command
-  // still produces a usable .glasstrace/mcp.json (matching init behavior).
-  const targetAgents =
-    detectedNonGeneric.length > 0
-      ? detectedNonGeneric
-      : agents.filter((a) => a.name === "generic");
+  // The generic helper backs `.glasstrace/mcp.json`, the file
+  // validation/debug tooling reads directly. ALWAYS include it in the
+  // target list — when non-generic agents like Claude/Cursor are
+  // detected, the helper used to be silently dropped, which left the
+  // generic config stale after a credential change. `detectAgents`
+  // contract guarantees the generic entry is always appended last
+  // (see `agent-detection/detect.ts`), so we rely on that here rather
+  // than synthesising a fallback.
+  const genericAgent = agents.find((a) => a.name === "generic");
+  const targetAgents: DetectedAgent[] = genericAgent
+    ? [...detectedNonGeneric, genericAgent]
+    : detectedNonGeneric;
 
   if (dryRun) {
     messages.push("Dry run: would perform the following actions:", "");
@@ -405,6 +411,28 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
     messages.push(
       "  No agents detected. Place agent marker files (e.g., CLAUDE.md, .cursor/) in your project.",
     );
+  }
+
+  // Exit code reflects whether the originally-detected non-generic
+  // agents succeeded. The generic helper is always in `results` now —
+  // letting its success alone mask a complete failure of the agents
+  // the user actually has installed would silently break automation
+  // that bisects on `mcp add` exit code. Preserves the pre-fix
+  // contract: a run where Claude/Cursor failed still exits non-zero,
+  // even when the generic helper write succeeded.
+  const detectedNonGenericResults = results.filter((r) =>
+    detectedNonGeneric.some((a) => a.name === r.agent),
+  );
+  const allDetectedNonGenericFailed =
+    detectedNonGeneric.length > 0 &&
+    !detectedNonGenericResults.some((r) => r.success);
+
+  if (allDetectedNonGenericFailed) {
+    messages.push(
+      "",
+      "All detected agent registrations failed. Check errors above.",
+    );
+    return { exitCode: 1, results, messages };
   }
 
   if (!anySuccess && results.length > 0) {

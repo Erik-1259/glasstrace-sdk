@@ -1,5 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  identityFingerprint,
+  readMcpMarker,
+  resolveEffectiveMcpCredential,
+} from "../mcp-runtime.js";
 
 /**
  * A single artifact-state inconsistency detected by `sdk init --validate`.
@@ -10,7 +15,8 @@ export interface ValidationIssue {
     | "glasstrace-dir-without-register-import"
     | "sdk-import-without-glasstrace-dir"
     | "mcp-marker-without-configs"
-    | "mcp-configs-without-marker";
+    | "mcp-configs-without-marker"
+    | "mcp-helper-stale-credential";
   /** Human-readable message describing the inconsistency. */
   message: string;
   /** Suggested command or manual action to resolve the issue. */
@@ -32,12 +38,20 @@ export interface ValidateResult {
   issues: ValidationIssue[];
 }
 
-/** MCP config files init may create. Used to detect stale state. */
+/**
+ * MCP config files init or `mcp add` may create. Used by issue classes
+ * 3 and 4 to detect marker/config drift. The SDK-managed generic
+ * helper at `.glasstrace/mcp.json` is included so generic-only
+ * installs (e.g. CI-mode init, or workspaces whose only consumer is
+ * the validation/debug query helper) validate cleanly instead of
+ * being incorrectly reported as `mcp-marker-without-configs`.
+ */
 const MCP_CONFIG_CANDIDATES = [
   ".mcp.json",
   ".cursor/mcp.json",
   ".gemini/settings.json",
   ".codex/config.toml",
+  ".glasstrace/mcp.json",
 ] as const;
 
 /**
@@ -71,7 +85,7 @@ export function hasRegisterGlasstraceImport(content: string): boolean {
 
 /**
  * Validates consistency between the filesystem artifacts that `sdk init`
- * produces (DISC-1247 Scenario 4). Detects four classes of inconsistency:
+ * produces (DISC-1247 Scenario 4). Detects five classes of inconsistency:
  *
  * 1. `.glasstrace/` exists but `instrumentation.ts` does not import
  *    `registerGlasstrace` from `@glasstrace/sdk`.
@@ -79,6 +93,10 @@ export function hasRegisterGlasstraceImport(content: string): boolean {
  *    from `@glasstrace/sdk`.
  * 3. `.glasstrace/mcp-connected` marker exists but no MCP config files.
  * 4. MCP config files exist but no `.glasstrace/mcp-connected` marker.
+ * 5. `.glasstrace/mcp-connected` marker records a credential identity
+ *    that no longer matches the project's effective MCP credential
+ *    (e.g. project moved from anon to account/dev-key but the managed
+ *    helper config still embeds the anon bearer — DISC-1512).
  *
  * Each issue includes a stable `code`, a message, and a suggested fix.
  * Exit code is non-zero whenever any issue is detected so CI pipelines
@@ -87,7 +105,7 @@ export function hasRegisterGlasstraceImport(content: string): boolean {
  * @param options - Configuration for the validator.
  * @returns A structured result describing detected inconsistencies.
  */
-export function runValidate(options: ValidateOptions): ValidateResult {
+export async function runValidate(options: ValidateOptions): Promise<ValidateResult> {
   const { projectRoot } = options;
   const issues: ValidationIssue[] = [];
 
@@ -150,6 +168,37 @@ export function runValidate(options: ValidateOptions): ValidateResult {
       message: `MCP config files exist (${mcpConfigsPresent.join(", ")}) but .glasstrace/mcp-connected marker is missing.`,
       fix: "Run `npx glasstrace init` to re-register the marker, or `npx glasstrace uninit` to fully remove MCP configuration.",
     });
+  }
+
+  // 5. Marker records a credential identity that no longer matches
+  // the project's effective MCP credential. Catches the DISC-1512
+  // case where `.glasstrace/config` is linked to an account and
+  // `.env.local` carries a dev key, but managed MCP configs still
+  // embed an anon bearer (so MCP queries are scoped to anon rows
+  // while ingestion writes account-scoped traces).
+  if (markerExists) {
+    try {
+      const [markerState, resolved] = await Promise.all([
+        readMcpMarker(projectRoot),
+        resolveEffectiveMcpCredential(projectRoot),
+      ]);
+      if (
+        markerState.status === "valid" &&
+        resolved.effective !== null &&
+        markerState.credentialHash !== identityFingerprint(resolved.effective.key)
+      ) {
+        issues.push({
+          code: "mcp-helper-stale-credential",
+          message:
+            "Managed MCP configs were last refreshed with a different credential than the project is now using. MCP queries may return no traces while the dashboard sees them.",
+          fix: "Run `npx glasstrace mcp add --force` to refresh managed MCP configs with the current credential.",
+        });
+      }
+    } catch {
+      // Validation is best-effort and must not throw — credential
+      // resolution failures here are silent and leave the issue
+      // unflagged. Other classes still apply.
+    }
   }
 
   const summary: string[] = [];
