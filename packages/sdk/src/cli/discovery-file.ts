@@ -2,6 +2,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { AnonApiKeySchema } from "@glasstrace/protocol";
 import type { AnonApiKey } from "@glasstrace/protocol";
+import {
+  atomicWriteFileSyncWithTmp,
+  fsyncParentDirSync,
+  writeAndFsyncTempSync,
+} from "../atomic-write.js";
 
 /**
  * Standardized static discovery-file path, served at
@@ -316,9 +321,21 @@ export function writeDiscoveryFile(
   try {
     fs.mkdirSync(wellKnownDir, { recursive: true });
     const payload = serializeDiscoveryPayload(anonKey, extras);
-    fs.writeFileSync(tmpPath, payload, { encoding: "utf-8" });
 
     if (backupPath !== null) {
+      // Windows backup-rollback path. Step the SDK 2.0 §4.3 protocol
+      // out manually so the backup rename can interleave between the
+      // tmp-fsync and the final rename:
+      //   1. write tmp + fsync(tmp)
+      //   2. rename existing → backup (Windows requires destination
+      //      to be free)
+      //   3. rename tmp → final
+      //   4. fsync(parent) so the rename pair is durable
+      // Mode is 0o644 for static/discoverable files per spec §4.3.
+      writeAndFsyncTempSync(tmpPath, payload, {
+        encoding: "utf-8",
+        mode: 0o644,
+      });
       fs.renameSync(filePath, backupPath);
       try {
         fs.renameSync(tmpPath, filePath);
@@ -331,6 +348,7 @@ export function writeDiscoveryFile(
         }
         throw renameErr;
       }
+      fsyncParentDirSync(filePath);
       try {
         fs.unlinkSync(backupPath);
       } catch {
@@ -338,7 +356,12 @@ export function writeDiscoveryFile(
         // preferable to a spurious failure after a successful write.
       }
     } else {
-      fs.renameSync(tmpPath, filePath);
+      // Non-Windows / no pre-existing target: full helper composes
+      // tmp + fsync(tmp) + rename + fsync(parent) atomically.
+      atomicWriteFileSyncWithTmp(filePath, tmpPath, payload, {
+        encoding: "utf-8",
+        mode: 0o644,
+      });
     }
 
     return { action: existingAction, filePath, layout };

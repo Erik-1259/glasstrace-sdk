@@ -6,6 +6,7 @@ import {
   type DevApiKey,
 } from "@glasstrace/protocol";
 import { readAnonKey, readClaimedKey } from "./anon-key.js";
+import { atomicWriteFile } from "./atomic-write.js";
 
 /**
  * Glasstrace MCP endpoint embedded in managed MCP configs and used by
@@ -592,7 +593,6 @@ export async function refreshGenericMcpConfigAtRuntime(
 
   const dirPath = modules.path.join(projectRoot, GLASSTRACE_DIR);
   const configPath = modules.path.join(dirPath, MCP_CONFIG_FILE);
-  const tmpPath = configPath + ".tmp";
 
   let existing: string;
   try {
@@ -610,27 +610,20 @@ export async function refreshGenericMcpConfigAtRuntime(
     return { action: "preserved" };
   }
 
-  // SDK-managed and stale. Replace atomically. Any failure in the
-  // write/chmod/rename or marker update path must produce a non-throw
-  // outcome so the caller's claimResult return is preserved; the
-  // .tmp sibling is best-effort cleaned up.
+  // SDK-managed and stale. Replace atomically per SDK 2.0 §4.3:
+  // tmp + fsync(tmp) + rename + fsync(parent). Any failure in the
+  // helper or marker update path must produce a non-throw outcome
+  // so the caller's claimResult return is preserved; the helper
+  // best-effort cleans up the .tmp sibling on failure.
   const replacement = genericMcpConfigContent(MCP_ENDPOINT, effective.key);
   try {
-    await modules.fs.writeFile(tmpPath, replacement, { mode: 0o600 });
-    await modules.fs.chmod(tmpPath, 0o600);
-    await modules.fs.rename(tmpPath, configPath);
+    await atomicWriteFile(configPath, replacement, { mode: 0o600 });
 
     await writeMcpMarker(projectRoot, {
       credentialSource: effective.source,
       credentialHash: identityFingerprint(effective.key),
     });
   } catch {
-    try {
-      await modules.fs.unlink(tmpPath);
-    } catch {
-      // Tmp may not exist (rename succeeded, marker write failed) or
-      // unlink itself may fail; either way nothing else to do.
-    }
     return { action: "preserved" };
   }
 
