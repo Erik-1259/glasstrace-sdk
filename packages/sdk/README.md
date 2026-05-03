@@ -163,6 +163,42 @@ GLASSTRACE_SUPPRESS_ACTION_NUDGE=1
 The nudge never fires in production (detected via `NODE_ENV` or
 `VERCEL_ENV`) unless `GLASSTRACE_FORCE_ENABLE=true` is also set.
 
+## Capturing error response bodies
+
+When debugging a 4xx or 5xx, the response body is often the most useful
+signal — it carries the validation message, the tRPC error envelope, or
+the upstream error code. The SDK can attach the body to the span as
+`glasstrace.error.response_body`, but only under a strict three-gate
+policy designed to prevent accidental leakage of customer data:
+
+1. **Account opt-in.** The capture is gated on the
+   `errorResponseBodies` flag in your account's capture configuration,
+   which the SDK fetches at init time. The flag defaults to `false`, so
+   no body is ever attached unless your account has explicitly enabled
+   it.
+2. **HTTP error status.** The body is only attached when the span's
+   HTTP status is in `[400..599]`. A successful response (2xx/3xx)
+   never leaks even if an upstream adapter populated the internal
+   attribute.
+3. **Adapter-supplied body.** The exporter does not read response
+   bodies itself. An adapter (e.g., a future tRPC handler wrapper) sets
+   the body on `glasstrace.internal.response_body`; the exporter
+   promotes it to the public `glasstrace.error.response_body` attribute
+   only when the gates above pass.
+
+Before promotion, the body is sanitized to redact common secret
+patterns — Bearer tokens, JWT-shaped tokens, Glasstrace API keys
+(`gt_dev_*` / `gt_anon_*`), AWS access-key prefixes (`AKIA…` /
+`ASIA…`), and generic `apikey`/`secret`/`password`/`token` key-value
+pairs — and truncated to 4096 UTF-8 bytes with a `...[truncated]`
+marker appended when truncation fires. Truncation respects codepoint
+boundaries so multi-byte characters are never split mid-sequence.
+
+If your account does not enable the flag, the SDK ships zero response
+body data. If your account enables the flag but a span never carries
+the internal attribute (no adapter set it), the public attribute is
+still absent. The default is "off, twice".
+
 ## Browser-extension discovery
 
 `glasstrace init` writes a small static file at

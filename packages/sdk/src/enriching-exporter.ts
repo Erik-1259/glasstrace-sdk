@@ -8,6 +8,10 @@ import { classifyFetchTarget } from "./fetch-classifier.js";
 import { recordSpansExported, recordSpansDropped } from "./health-collector.js";
 import { sdkLog } from "./console-capture.js";
 import { maybeShowServerActionNudge } from "./nudge/error-nudge.js";
+import {
+  isHttpErrorStatus,
+  prepareErrorResponseBody,
+} from "./error-response-body.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -382,15 +386,50 @@ export class GlasstraceExporter implements SpanExporter {
         extra[ATTR.ERROR_FIELD] = errorField;
       }
 
-      // glasstrace.error.response_body (DISC-1216 Phase 1 — passthrough)
-      // Adapters (e.g., future tRPC handler wrapper) should set error response
-      // body data on `glasstrace.internal.response_body` — a Glasstrace-internal
-      // attribute that is only promoted to the public namespace when the config
-      // flag is enabled. This prevents response body leakage when disabled.
+      // glasstrace.error.response_body (DISC-1216)
+      //
+      // Adapters (e.g., a tRPC handler wrapper) populate the internal
+      // attribute `glasstrace.internal.response_body` on the active span
+      // when an HTTP handler returns a 4xx/5xx body. The exporter
+      // conditionally promotes it to the public attribute under three
+      // gates:
+      //
+      //   1. Account opt-in via `captureConfig.errorResponseBodies`. The
+      //      flag defaults to `false`, so capture is off unless the
+      //      account has explicitly enabled it server-side.
+      //   2. HTTP status in the inclusive range [400..599]. We read the
+      //      *enriched* status (`extra[HTTP_STATUS_CODE]`) first because
+      //      the inference block above may have promoted a misreported
+      //      0/200 to 5xx based on `error.type` / exception events; if
+      //      that block did not run we fall through to the raw OTel
+      //      attributes. A successful response (2xx/3xx) never leaks
+      //      even if an adapter mistakenly populated the internal attr.
+      //   3. Body shape: must be a non-empty string. Binary streams,
+      //      `null`, and structured values are silently ignored.
+      //
+      // Before promotion the body is (a) sanitized to redact common
+      // secret patterns (Bearer tokens, JWTs, Glasstrace API keys, AWS
+      // access keys, generic key/secret/password/token=value pairs) and
+      // (b) truncated to a UTF-8 byte budget with a `...[truncated]`
+      // marker appended when truncation fires. Sanitization runs before
+      // truncation so secrets straddling the boundary are still removed
+      // from the visible portion.
       if (this.getConfig().errorResponseBodies) {
         const responseBody = attrs["glasstrace.internal.response_body"];
         if (typeof responseBody === "string") {
-          extra[ATTR.ERROR_RESPONSE_BODY] = responseBody.slice(0, 500);
+          // Prefer the enriched status from the inference block above
+          // (covers the Next.js timing-race promotion of 0/200 → 5xx);
+          // fall back to the raw `statusCode` computed earlier which
+          // already merges `http.status_code` and `http.response.status_code`.
+          const enrichedStatus = extra[ATTR.HTTP_STATUS_CODE];
+          const effectiveStatus =
+            typeof enrichedStatus === "number" ? enrichedStatus : statusCode;
+          if (isHttpErrorStatus(effectiveStatus)) {
+            const prepared = prepareErrorResponseBody(responseBody);
+            if (prepared !== null) {
+              extra[ATTR.ERROR_RESPONSE_BODY] = prepared;
+            }
+          }
         }
       }
 
