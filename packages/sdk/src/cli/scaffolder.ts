@@ -3,20 +3,6 @@ import * as path from "node:path";
 import { NEXT_CONFIG_NAMES } from "./constants.js";
 import { identityFingerprint, writeMcpMarker } from "../mcp-runtime.js";
 
-// Re-exports of utilities that moved into `../mcp-runtime.ts` so the
-// runtime claim-refresh path can use them without crossing the
-// runtime/CLI boundary. Existing CLI-side and test imports continue
-// to work unchanged through these shims.
-//
-// TODO(remove-after-next-stable-release): remove these re-exports
-// once internal callers have migrated to `../mcp-runtime.js`.
-export {
-  identityFingerprint,
-  isDevApiKey,
-  mcpConfigMatches,
-  readEnvLocalApiKey,
-} from "../mcp-runtime.js";
-
 /**
  * Checks whether `content` contains a real (non-commented) `registerGlasstrace()` call.
  *
