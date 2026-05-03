@@ -4,7 +4,14 @@ Server-side debugging SDK for AI coding agents. Captures traces,
 errors, and runtime context from your Node.js application and delivers
 them to coding agents through an MCP server and live dashboard.
 
-> **Status: Pre-release** -- not yet published to npm.
+> **Status:** Stable, published as [`@glasstrace/sdk`](https://www.npmjs.com/package/@glasstrace/sdk) on npm.
+>
+> ```bash
+> npm install @glasstrace/sdk
+> ```
+>
+> See [CHANGELOG.md](https://github.com/Erik-1259/glasstrace-sdk/blob/main/packages/sdk/CHANGELOG.md)
+> for the release history.
 
 See the [monorepo README](../../README.md) for the full API overview,
 including the [Coexistence with Other OTel Tools](../../README.md#coexistence-with-other-otel-tools)
@@ -305,6 +312,40 @@ Type exports erase at runtime and are technically safe to import from
 edge code, but every runtime function that produces or consumes them is
 Node-only, so the practical signal is the same: reach for these from
 your build pipeline, not from a request handler.
+
+#### Why is X Node-only?
+
+Two mechanisms together produce the runtime split:
+
+1. **Conditional exports in `packages/sdk/package.json`** make
+   `@glasstrace/sdk/node` resolvable only under Node's `node` export
+   condition. Workerd, Vercel Edge, browsers, and any other runtime
+   that does not set the `node` condition fail at module resolution
+   rather than at evaluation. That is what keeps any given symbol off
+   the edge surface once it lives under `/node`.
+2. **The edge-bundle gate** (`packages/sdk/scripts/check-edge-bundle.mjs`)
+   then guarantees the *opposite* direction: the main edge bundle
+   (`dist/edge-entry.*`) is scanned for any reference to the Node
+   `process` global or any Node built-in specifier (`node:fs`, bare
+   `fs`, `fs/promises`, and so on), and the build fails if any are
+   found. So a symbol that reaches for `process` or a Node built-in
+   cannot accidentally end up on the edge side.
+
+The gate is scope-aware about shadowing — a local binding named
+`process` does not trip it — but it is deliberately not
+control-flow-aware: a `process.env.X` read or a static `require("fs")`
+keeps a symbol on the Node-only side even when the read is wrapped in
+`typeof process !== "undefined"` or in a `try { ... } catch` guard. A
+`typeof` guard means "this module reaches for `process`", and an
+edge-safe module should not reach for `process` at all.
+
+This is by design. Per the SDK-033 strict-gate policy, the contract
+"this bundle passes the gate" must imply "this bundle is safe in any
+edge runtime", and that implication only holds if the gate refuses
+guards rather than trusting them. If you need a symbol that is currently
+on the Node-only side to become edge-safe, the right move is to remove
+the `process` and Node built-in reaches from the symbol's transitive
+closure, not to add a runtime guard.
 
 ## Security
 

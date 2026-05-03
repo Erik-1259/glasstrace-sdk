@@ -172,6 +172,58 @@ output. Major bumps require extra scrutiny:
 5. If CI passes, test a manual `npm pack` install in a scratch project
 6. Update peer dependency ranges in `packages/*/package.json` if needed
 
+## Validating the SDK against a real consumer project
+
+Before publishing, validate a candidate build against a real consumer
+project the same way npm will install it: from a packed tarball, never
+through `npm link` or a path-based `file:` dependency. Linked workspaces
+share a single `node_modules`, which hides peer-resolution bugs and
+duplicate-dependency hazards that a real install would expose.
+
+The recommended workflow uses `npm pack` and a sibling consumer project:
+
+```bash
+# 1. Build the SDK from a clean checkout.
+npm ci
+npm run build
+
+# 2. Pack each workspace you want to validate. `--pack-destination`
+#    keeps the tarballs out of the working tree.
+mkdir -p /tmp/glasstrace-tarballs
+npm pack -w packages/protocol --pack-destination /tmp/glasstrace-tarballs
+npm pack -w packages/sdk --pack-destination /tmp/glasstrace-tarballs
+
+# 3. In the consumer project, install the tarballs. Install the
+#    protocol tarball first if the SDK depends on a not-yet-published
+#    protocol version.
+cd /path/to/consumer-project
+npm install /tmp/glasstrace-tarballs/glasstrace-protocol-*.tgz
+npm install /tmp/glasstrace-tarballs/glasstrace-sdk-*.tgz
+
+# 4. Run the consumer's tests / dev server / build to confirm the
+#    candidate build works end-to-end.
+```
+
+When you are done validating, restore the consumer's `package.json`
+and lockfile so the tarball install does not leak into a commit:
+
+```bash
+cd /path/to/consumer-project
+git checkout -- package.json package-lock.json
+npm ci
+```
+
+Two notes on common pitfalls:
+
+1. **Do not use `npm link`** for SDK validation. Symlinked workspaces
+   resolve peer dependencies against the SDK's own `node_modules`, so
+   peer-version mismatches that a real consumer would hit are silently
+   masked.
+
+2. **Tarball file names include the version**. After a `version` bump
+   the prior tarball is stale; either delete the destination directory
+   between packs or refer to the new file name explicitly.
+
 ## Reporting Issues
 
 - **Bugs:** Open a GitHub issue with reproduction steps
