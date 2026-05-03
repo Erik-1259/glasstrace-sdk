@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import {
   isAnonApiKey,
   identityFingerprint,
+  MCP_ENDPOINT,
   readMcpMarker,
   resolveEffectiveMcpCredential,
   writeMcpMarker,
@@ -18,7 +19,7 @@ import {
   updateGitignore,
 } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
-import { MCP_ENDPOINT, formatAgentName } from "./constants.js";
+import { formatAgentName } from "./constants.js";
 
 const execFileAsync = promisify(execFileCb);
 

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { NEXT_CONFIG_NAMES } from "./constants.js";
-import { readEnvLocalApiKey, isDevApiKey } from "./scaffolder.js";
+import { readEnvLocalApiKey, isDevApiKey } from "../mcp-runtime.js";
 import {
   removeDiscoveryFile,
   relativeDiscoveryPath,

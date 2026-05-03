@@ -11,7 +11,7 @@ import { readAnonKey, readClaimedKey } from "./anon-key.js";
  * Glasstrace MCP endpoint embedded in managed MCP configs and used by
  * the runtime claim-refresh path. Lives here (not in `cli/constants.ts`)
  * so the runtime helper can reach it without crossing the runtime/CLI
- * boundary; `cli/constants.ts` re-exports it for one release.
+ * boundary; CLI callers import it directly from this module.
  */
 export const MCP_ENDPOINT = "https://api.glasstrace.dev/mcp";
 

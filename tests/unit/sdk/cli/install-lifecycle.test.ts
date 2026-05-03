@@ -16,7 +16,7 @@ import {
   mcpConfigMatches,
   readEnvLocalApiKey,
   isDevApiKey,
-} from "../../../../packages/sdk/src/cli/scaffolder.js";
+} from "../../../../packages/sdk/src/mcp-runtime.js";
 import { saveCachedConfig } from "../../../../packages/sdk/src/init-client.js";
 import { checkShutdownMarker } from "../../../../packages/sdk/src/heartbeat.js";
 import * as lifecycle from "../../../../packages/sdk/src/lifecycle.js";

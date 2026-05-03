@@ -8,13 +8,14 @@ import {
   scaffoldEnvLocal,
   scaffoldGitignore,
   addCoverageMapEnv,
-  mcpConfigMatches,
-  readEnvLocalApiKey,
-  isDevApiKey,
   resolveInstrumentationTarget,
 } from "./scaffolder.js";
 import {
   identityFingerprint,
+  isDevApiKey,
+  MCP_ENDPOINT,
+  mcpConfigMatches,
+  readEnvLocalApiKey,
   resolveEffectiveMcpCredential,
   writeMcpMarker,
 } from "../mcp-runtime.js";
@@ -24,7 +25,7 @@ import { detectAgents } from "../agent-detection/detect.js";
 import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
 import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
-import { MCP_ENDPOINT, NEXT_CONFIG_NAMES, formatAgentName } from "./constants.js";
+import { NEXT_CONFIG_NAMES, formatAgentName } from "./constants.js";
 import { resolveProjectRoot } from "./monorepo.js";
 import {
   isInitCreatedInstrumentation,

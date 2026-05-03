@@ -5,7 +5,6 @@ import * as os from "node:os";
 import {
   wrapExport,
   wrapCJSExport,
-  identityFingerprint,
   scaffoldNextConfig,
   scaffoldInstrumentation,
   injectRegisterGlasstrace,
@@ -13,6 +12,7 @@ import {
   resolveInstrumentationTarget,
   appendRegisterFunction,
 } from "../../../../packages/sdk/src/cli/scaffolder.js";
+import { identityFingerprint } from "../../../../packages/sdk/src/mcp-runtime.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
