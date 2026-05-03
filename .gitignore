@@ -9,3 +9,4 @@ coverage/
 *.tgz
 .glasstrace/
 .worktrees/
+.claude/plans/
