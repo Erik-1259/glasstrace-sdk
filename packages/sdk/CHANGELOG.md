@@ -1,5 +1,57 @@
 # @glasstrace/sdk
 
+## 1.1.2
+
+### Patch Changes
+
+- a80d91d: Internal: drop transitional MCP credential helper re-export shims now that Wave A stable has shipped. `cli/scaffolder.ts` and `cli/constants.ts` no longer re-export `readEnvLocalApiKey`, `isDevApiKey`, `mcpConfigMatches`, `identityFingerprint`, or `MCP_ENDPOINT` from `mcp-runtime.ts`; in-tree CLI callers now import these symbols directly from the runtime module. No public-API change — the shimmed paths were never exposed by the `exports` map.
+- 52b8dc8: Docs: align README to published 1.x status; document validation linking workflow; add F003 strict-gate policy notes (SDK-033).
+
+  `packages/sdk/README.md`'s top banner replaces the stale "Pre-release —
+  not yet published to npm" notice with the install command and a link to
+  the published package and `CHANGELOG.md`. The `/node` symbol matrix gains
+  a "Why is X Node-only?" subsection explaining why the edge-bundle gate
+  keeps a symbol on the Node-only side even when its `process` reach is
+  wrapped in a `typeof` or `try`/`catch` guard, citing the F003 strict-gate
+  policy decision (SDK-033).
+
+  `CONTRIBUTING.md` adds a "Validating the SDK against a real consumer
+  project" section that documents the `npm pack` + tarball workflow as
+  the recommended way to validate a candidate build, with explicit notes
+  on why `npm link` masks peer-resolution bugs and how to tear the
+  validation down cleanly.
+
+  `packages/sdk/scripts/check-edge-bundle.mjs` gains a brief comment above
+  `PROCESS_SENTINEL` recording the same strict-by-design policy so the
+  rationale travels with the code, not just the docs.
+
+  No runtime behavior change; package exports and types are unchanged.
+
+- 16b5afe: Capture HTTP error response bodies when the account opts in.
+
+  When the account-side `captureConfig.errorResponseBodies` flag is `true`
+  and a span carries an HTTP status in `[400..599]`, the exporter now
+  promotes the internal `glasstrace.internal.response_body` attribute to
+  the public `glasstrace.error.response_body` attribute. The flag
+  defaults to `false`, so capture is off unless the account has
+  explicitly enabled it server-side.
+
+  Before promotion, the body is sanitized to redact common secret
+  patterns — Bearer tokens, JWT-shaped tokens, Glasstrace API keys
+  (`gt_dev_*` / `gt_anon_*`), AWS access-key prefixes (`AKIA…` /
+  `ASIA…`), and generic `apikey`/`secret`/`password`/`token` key-value
+  pairs — and truncated to 4096 UTF-8 bytes with a `...[truncated]`
+  marker appended when truncation fires. Truncation respects codepoint
+  boundaries so multi-byte characters are never split mid-sequence.
+
+  The previous Phase 1 passthrough lacked the status gate, the
+  sanitization step, and bottomed out at a 500-character truncation; an
+  adapter that mistakenly populated the internal attribute on a 200
+  response could leak through. The status gate closes that path. No
+  public API symbols are added.
+
+  Closes DISC-1216.
+
 ## 1.1.1
 
 ### Patch Changes
