@@ -1752,81 +1752,452 @@ describe("GlasstraceExporter", () => {
     });
   });
 
-  describe("Error response body passthrough (DISC-1216)", () => {
-    it("promotes glasstrace.internal.response_body to glasstrace attribute when config enabled", () => {
-      const config = { ...DEFAULT_CONFIG, errorResponseBodies: true };
+  describe("Error response body capture (DISC-1216)", () => {
+    // The exporter promotes glasstrace.internal.response_body to the public
+    // glasstrace.error.response_body attribute under three gates: account
+    // opt-in, HTTP error status, and a non-empty string body. The body is
+    // sanitized for common secret patterns and truncated to a UTF-8 byte
+    // budget before promotion. These tests cover the end-to-end behavior
+    // through GlasstraceExporter; pure-function coverage of the redaction
+    // and truncation helpers lives in error-response-body.test.ts.
+
+    function makeExporterWithConfig(overrides?: Partial<CaptureConfig>) {
+      const config: CaptureConfig = { ...DEFAULT_CONFIG, ...overrides };
       const { exporter, delegate } = createExporter();
       Object.defineProperty(exporter, "getConfig", { value: () => config });
+      return { exporter, delegate };
+    }
 
-      const span = createMockSpan({
-        attributes: {
-          "http.method": "POST",
-          "http.status_code": 403,
-          "glasstrace.internal.response_body": '{"error":{"code":"FORBIDDEN","message":"Not allowed"}}',
-        },
+    describe("Gating (config + status)", () => {
+      it("promotes the body when config is enabled and status is 4xx", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const body = '{"error":{"code":"FORBIDDEN","message":"Not allowed"}}';
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 403,
+            "glasstrace.internal.response_body": body,
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe(body);
       });
 
-      exporter.export([span], vi.fn());
+      it("promotes the body when config is enabled and status is 5xx", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const body = "Internal server error";
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": body,
+          },
+        });
 
-      const enriched = delegate.exportedSpans[0][0];
-      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe(
-        '{"error":{"code":"FORBIDDEN","message":"Not allowed"}}',
-      );
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe(body);
+      });
+
+      it("does NOT promote the body when config is disabled (default)", () => {
+        const { exporter, delegate } = makeExporterWithConfig();
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 403,
+            "glasstrace.internal.response_body": '{"error":"forbidden"}',
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+      });
+
+      it("does NOT promote the body on a 2xx success status, even with the flag enabled", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "GET",
+            "http.status_code": 200,
+            "glasstrace.internal.response_body": '{"error":"this should never leak"}',
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+      });
+
+      it("does NOT promote the body on a 3xx redirect status", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "GET",
+            "http.status_code": 302,
+            "glasstrace.internal.response_body": "Redirecting…",
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+      });
+
+      it("captures using the inferred status when raw status is misreported as 200", () => {
+        // The exporter's status-inference block (DISC-1134/DISC-1204) can
+        // promote a 0/200 status to 500 based on exception events. The
+        // body capture must read the *inferred* status, not the raw one,
+        // so error bodies are not silently dropped on Next.js dev-server
+        // timing-race spans.
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          name: "POST /api/orders",
+          status: { code: SpanStatusCode.ERROR },
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 200,
+            "exception.type": "Error",
+            "exception.message": "boom",
+            "glasstrace.internal.response_body": '{"error":"boom"}',
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe('{"error":"boom"}');
+      });
+
+      it("falls back to http.response.status_code when http.status_code is missing", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.request.method": "POST",
+            "http.response.status_code": 422,
+            "glasstrace.internal.response_body": '{"error":"validation"}',
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe('{"error":"validation"}');
+      });
     });
 
-    it("does NOT enrich response body when config disabled", () => {
-      const { exporter, delegate } = createExporter();
-      const span = createMockSpan({
-        attributes: {
-          "http.method": "POST",
-          "http.status_code": 403,
-          "glasstrace.internal.response_body": '{"error":"forbidden"}',
-        },
+    describe("Body shape", () => {
+      it("ignores a non-string body", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": 42 as unknown as string,
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
       });
 
-      exporter.export([span], vi.fn());
+      it("ignores an empty string body", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": "",
+          },
+        });
 
-      const enriched = delegate.exportedSpans[0][0];
-      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+      });
+
+      it("ignores a whitespace-only body", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": "   \n\t  ",
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+      });
     });
 
-    it("truncates response body to 500 characters", () => {
-      const config = { ...DEFAULT_CONFIG, errorResponseBodies: true };
-      const { exporter, delegate } = createExporter();
-      Object.defineProperty(exporter, "getConfig", { value: () => config });
+    describe("Sanitization", () => {
+      it("redacts a Bearer token in the body", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 401,
+            "glasstrace.internal.response_body":
+              "Authorization: Bearer abc123.def456.ghi789 was rejected",
+          },
+        });
 
-      const longBody = "x".repeat(1000);
-      const span = createMockSpan({
-        attributes: {
-          "http.method": "POST",
-          "http.status_code": 500,
-          "glasstrace.internal.response_body": longBody,
-        },
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toContain("[REDACTED]");
+        expect(body).not.toContain("abc123.def456.ghi789");
       });
 
-      exporter.export([span], vi.fn());
+      it("redacts a Glasstrace API key in the body", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const fakeKey = "gt_dev_" + "a".repeat(48);
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 401,
+            "glasstrace.internal.response_body": `key=${fakeKey} was invalid`,
+          },
+        });
 
-      const enriched = delegate.exportedSpans[0][0];
-      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe("x".repeat(500));
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toContain("[REDACTED]");
+        expect(body).not.toContain(fakeKey);
+      });
+
+      it("redacts an AWS access key prefix in the body", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": "Got AKIAIOSFODNN7EXAMPLE from caller",
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toContain("[REDACTED]");
+        expect(body).not.toContain("AKIAIOSFODNN7EXAMPLE");
+      });
+
+      it("redacts a JWT-shaped token in the body", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const jwt =
+          "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 401,
+            "glasstrace.internal.response_body": `token=${jwt} expired`,
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toContain("[REDACTED]");
+        expect(body).not.toContain(jwt);
+      });
+
+      it("redacts a generic password=value pair", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 401,
+            "glasstrace.internal.response_body": 'password="hunter2" failed',
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toContain("[REDACTED]");
+        expect(body).not.toContain("hunter2");
+      });
+
+      it("redacts a quoted multi-word password through the closing quote", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 401,
+            "glasstrace.internal.response_body": 'password="my secret phrase" failed',
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).not.toContain("my secret phrase");
+        expect(body).not.toContain("secret phrase");
+      });
+
+      it("redacts a lowercase 'bearer' token (auth-scheme casing varies)", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "GET",
+            "http.status_code": 401,
+            "glasstrace.internal.response_body":
+              "authorization: bearer abc.def.ghi was rejected",
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toContain("[REDACTED]");
+        expect(body).not.toContain("abc.def.ghi");
+      });
+
+      it("does NOT over-redact ordinary error text without secrets", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const ordinary =
+          '{"error":{"code":"NOT_FOUND","message":"Poll abc-123 does not exist"}}';
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "GET",
+            "http.status_code": 404,
+            "glasstrace.internal.response_body": ordinary,
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toBe(ordinary);
+      });
+
+      it("does NOT redact a word that contains 'password' as a substring", () => {
+        // "passwordless" must remain intact — over-redacting common English
+        // would degrade the operator experience without security gain.
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 400,
+            "glasstrace.internal.response_body":
+              "Use the passwordless flow for this provider",
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const body = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(body).toContain("passwordless");
+      });
     });
 
-    it("ignores non-string response body", () => {
-      const config = { ...DEFAULT_CONFIG, errorResponseBodies: true };
-      const { exporter, delegate } = createExporter();
-      Object.defineProperty(exporter, "getConfig", { value: () => config });
+    describe("Truncation", () => {
+      it("does not truncate a body within the 4096-byte budget", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const body = "x".repeat(4096);
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": body,
+          },
+        });
 
-      const span = createMockSpan({
-        attributes: {
-          "http.method": "POST",
-          "http.status_code": 500,
-          "glasstrace.internal.response_body": 42 as unknown as string,
-        },
+        exporter.export([span], vi.fn());
+
+        const captured = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(captured).toBe(body);
+        expect(captured).not.toContain("...[truncated]");
       });
 
-      exporter.export([span], vi.fn());
+      it("truncates a body that exceeds the budget and appends the marker", () => {
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const body = "x".repeat(4097);
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": body,
+          },
+        });
 
-      const enriched = delegate.exportedSpans[0][0];
-      expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBeUndefined();
+        exporter.export([span], vi.fn());
+
+        const captured = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(captured.endsWith("...[truncated]")).toBe(true);
+        expect(captured.startsWith("xxxx")).toBe(true);
+      });
+
+      it("does not split a multi-byte UTF-8 codepoint at the truncation boundary", () => {
+        // 1366 emoji × 3 bytes/char (we use 3-byte BMP CJK to keep math
+        // simple — the 4-byte path is exercised in the helper unit
+        // tests). 1366 × 3 = 4098 bytes, exceeding the 4096-byte budget
+        // by 2 bytes — exactly enough to land mid-codepoint if the
+        // implementation slices on UTF-16 code units instead of UTF-8
+        // bytes with codepoint backoff.
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const cjk = "猫"; // 3 bytes UTF-8
+        const body = cjk.repeat(1366);
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.status_code": 500,
+            "glasstrace.internal.response_body": body,
+          },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const captured = delegate.exportedSpans[0][0].attributes[ATTR.ERROR_RESPONSE_BODY] as string;
+        expect(captured).not.toContain("�");
+        expect(captured.endsWith("...[truncated]")).toBe(true);
+      });
+    });
+
+    describe("Integration with surrounding enrichment", () => {
+      it("does not regress other glasstrace.* attributes when capture fires", () => {
+        // A capture-on path must not break the rest of the enrichment
+        // (route, method, status, duration, error message). Regression
+        // guard for the Phase 2 wiring.
+        const { exporter, delegate } = makeExporterWithConfig({ errorResponseBodies: true });
+        const span = createMockSpan({
+          attributes: {
+            "http.method": "POST",
+            "http.route": "/api/login",
+            "http.status_code": 401,
+            "exception.type": "AuthError",
+            "exception.message": "bad password",
+            "glasstrace.internal.response_body": '{"error":"unauthorized"}',
+          },
+          status: { code: SpanStatusCode.ERROR },
+        });
+
+        exporter.export([span], vi.fn());
+
+        const enriched = delegate.exportedSpans[0][0];
+        expect(enriched.attributes[ATTR.ROUTE]).toBe("/api/login");
+        expect(enriched.attributes[ATTR.HTTP_METHOD]).toBe("POST");
+        expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(401);
+        expect(enriched.attributes[ATTR.ERROR_CODE]).toBe("AuthError");
+        expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("auth");
+        expect(enriched.attributes[ATTR.ERROR_RESPONSE_BODY]).toBe('{"error":"unauthorized"}');
+      });
     });
   });
 
