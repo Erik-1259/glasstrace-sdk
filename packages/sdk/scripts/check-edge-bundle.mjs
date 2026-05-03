@@ -248,6 +248,13 @@ async function scanBundle(entryPath, external) {
  * Returns an array of violation excerpts (at most 5, with surrounding
  * context). Empty array means no usage detected.
  */
+// Strict-by-design per the F003 / SDK-033 gate-policy decision: this
+// sentinel-and-regex scan refuses `typeof` guards, `try/catch` guards,
+// and any other runtime check around a `process` reach. A guard means
+// "this module reaches for `process`", and edge-safe code should not
+// reach for `process` at all. Relaxing the gate to scope-trust guards
+// requires a fresh decision that supersedes SDK-033, not a one-off
+// patch here.
 const PROCESS_SENTINEL = "__GT_PROCESS_GLOBAL__";
 
 async function scanGlobalProcessUsage(entryPath) {
