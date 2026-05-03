@@ -9,7 +9,7 @@
  * Task brief: SDK-026
  */
 
-import { writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   getSdkState,
@@ -17,6 +17,7 @@ import {
   CoreState,
 } from "./lifecycle.js";
 import { sdkLog } from "./console-capture.js";
+import { atomicWriteFileSync } from "./atomic-write.js";
 
 /** Schema for the runtime state file. */
 export interface RuntimeState {
@@ -136,16 +137,16 @@ function writeStateNow(): void {
 
     const dir = join(_projectRoot, ".glasstrace");
     const filePath = join(dir, "runtime-state.json");
-    const tmpPath = join(dir, "runtime-state.json.tmp");
 
     // Ensure directory exists (may not if uninit deleted it)
     mkdirSync(dir, { recursive: true, mode: 0o700 });
 
-    // Atomic write: write to temp file then rename to avoid partial reads
-    writeFileSync(tmpPath, JSON.stringify(runtimeState, null, 2) + "\n", {
+    // Atomic write per SDK 2.0 §4.3: tmp + fsync(tmp) + rename +
+    // fsync(parent). The sync variant is used because this writer
+    // runs from a signal handler that cannot await.
+    atomicWriteFileSync(filePath, JSON.stringify(runtimeState, null, 2) + "\n", {
       mode: 0o600,
     });
-    renameSync(tmpPath, filePath);
   } catch (err) {
     // Fire-and-forget — never block state transitions for a file write failure
     sdkLog(

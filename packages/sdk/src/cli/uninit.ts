@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { NEXT_CONFIG_NAMES } from "./constants.js";
 import { readEnvLocalApiKey, isDevApiKey } from "../mcp-runtime.js";
+import { atomicWriteFileSync } from "../atomic-write.js";
 import {
   removeDiscoveryFile,
   relativeDiscoveryPath,
@@ -642,25 +643,18 @@ export function writeShutdownMarker(projectRoot: string): boolean {
     return false;
   }
   const markerPath = path.join(dirPath, "shutdown-requested");
-  const tmpPath = `${markerPath}.tmp`;
   const body = JSON.stringify({ requestedAt: new Date().toISOString() });
   try {
-    fs.writeFileSync(tmpPath, body, { encoding: "utf-8", mode: 0o600 });
-    try {
-      fs.chmodSync(tmpPath, 0o600);
-    } catch {
-      // chmod may be unsupported on some filesystems; proceed with rename.
-    }
-    fs.renameSync(tmpPath, markerPath);
+    // Atomic write per SDK 2.0 §4.3: tmp + fsync(tmp) + rename +
+    // fsync(parent). The helper handles tmp-file cleanup on failure
+    // and swallows directory-fsync errors on platforms that do not
+    // support it (e.g., Windows).
+    atomicWriteFileSync(markerPath, body, { encoding: "utf-8", mode: 0o600 });
     return true;
   } catch {
-    // Best-effort cleanup of the temp file; swallow errors so uninit
-    // itself never fails because of a signal-side-channel write.
-    try {
-      fs.unlinkSync(tmpPath);
-    } catch {
-      // Ignore — the marker was best-effort to begin with.
-    }
+    // Marker write was best-effort to begin with; swallow errors so
+    // uninit itself never fails because of a signal-side-channel
+    // write.
     return false;
   }
 }
