@@ -2507,6 +2507,103 @@ describe("GlasstraceExporter", () => {
         nudgeMod.__resetNudgeStateForTests();
       }
     });
+
+    // SDK-035 / DISC-1177: real-world Next.js 16.2.1 fixtures observed
+    // during the Server Action capture investigation. These regression
+    // tests pin behavior against the span shapes Next.js actually emits
+    // (per `next/dist/server/base-server.js:474-525` in 16.2.1) so a
+    // future Next.js minor that reshapes spans cannot silently break
+    // Server Action labelling.
+
+    it("flags the route-resolved span in Next 16.2.1's three-span Server Action pattern", () => {
+      // Empirical shape captured during the DISC-1253 investigation
+      // against rallly (Next 16.2.1, Turbopack dev): one Server Action
+      // POST produces three spans — a middleware span, a method-only
+      // span, and the route-resolved span. Only the third carries
+      // http.route, and only that one should be flagged.
+      const { exporter, delegate } = createExporter();
+      const middlewareSpan = createMockSpan({
+        name: "middleware POST",
+        attributes: {
+          "http.method": "POST",
+          // No http.route — middleware runs before route resolution.
+        },
+      });
+      const methodOnlySpan = createMockSpan({
+        name: "POST",
+        attributes: {
+          "http.method": "POST",
+          "http.status_code": 200,
+        },
+      });
+      const routeResolvedSpan = createMockSpan({
+        name: "POST /[locale]/[...notFound]",
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/[locale]/[...notFound]",
+          "http.status_code": 404,
+        },
+      });
+
+      exporter.export(
+        [middlewareSpan, methodOnlySpan, routeResolvedSpan],
+        vi.fn(),
+      );
+
+      const enriched = delegate.exportedSpans[0];
+      expect(enriched).toHaveLength(3);
+      expect(enriched[0].attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+      expect(enriched[1].attributes[ATTR.NEXT_ACTION_DETECTED]).toBeUndefined();
+      expect(enriched[2].attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("flags Server Action POSTs that report method via OTel 1.x http.request.method", () => {
+      // Next.js + the OTel API can carry the method on either the
+      // legacy `http.method` (semconv 1.x) or the stable
+      // `http.request.method` (semconv 1.23+). The exporter reads both
+      // (enriching-exporter.ts:241-243); pin the heuristic against the
+      // newer key so a Next version bump that switches semconv does not
+      // silently disable Server Action labelling.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.request.method": "POST",
+          "http.route": "/login",
+          "http.response.status_code": 200,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+    });
+
+    it("flags rallly's representative Server Action route '/[locale]/login'", () => {
+      // Concrete fixture for the SDK-035 verification report: rallly's
+      // login form invokes the `setVerificationEmail` Server Action
+      // (apps/web/src/app/[locale]/(auth)/login/actions.ts), which
+      // POSTs to the page route /[locale]/login. This test pins the
+      // heuristic against that exact route so a regression in route
+      // normalization is caught before it reaches a real consumer.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "POST /[locale]/login",
+        attributes: {
+          "http.method": "POST",
+          "http.route": "/[locale]/login",
+          "http.status_code": 200,
+          "next.span_type": "BaseServer.handleRequest",
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.NEXT_ACTION_DETECTED]).toBe(true);
+      expect(enriched.attributes[ATTR.HTTP_METHOD]).toBe("POST");
+      expect(enriched.attributes[ATTR.ROUTE]).toBe("/[locale]/login");
+    });
   });
 
   describe("extractLeadingPath (DISC-1253 helper)", () => {
