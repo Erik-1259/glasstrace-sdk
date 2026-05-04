@@ -13,6 +13,7 @@ export default defineConfig({
     "cli/status": "src/cli/status.ts",
     "cli/validate": "src/cli/validate.ts",
     "adapters/drizzle": "src/adapters/drizzle.ts",
+    "trpc/index": "src/trpc/index.ts",
   },
   format: ["esm", "cjs"],
   tsconfig: "tsconfig.build.json",
