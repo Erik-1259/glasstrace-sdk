@@ -1,8 +1,9 @@
 /**
  * Atomic file-write helper.
  *
- * Implements the durability half of the SDK 2.0 atomic-write protocol
- * (`docs/component-designs/sdk-architecture.md` §4.3 / `sdk-architecture.md:416–419`):
+ * Implements the durability half of the atomic-write protocol
+ * (`docs/component-designs/sdk-architecture.md` §4.3 — Atomic file
+ * writes; durability protocol steps 6–9):
  *
  *   1. Write the payload to a sibling temp file in the **same**
  *      directory as the final target. The shared directory guarantees
@@ -24,12 +25,13 @@
  *
  * Out-of-scope by design:
  *   - The `lstat → tmp → rename → re-lstat` TOCTOU re-check (spec
- *     §4.3 steps 1–2 and 7's re-verification) is SDK 2.0 scope per
- *     `sdk-architecture.md:511`.
+ *     §4.3 steps 1–2 and 7's re-verification) is next-major scope per
+ *     `sdk-architecture.md` §4.3 — TOCTOU protection.
  *   - The `GLASSTRACE_TEST_CRASH_AFTER` crash-injection harness is
- *     SDK 2.0 scope per `sdk-architecture.md:426`.
- *   - Structured error-with-step-number reporting is SDK 2.0 scope
- *     per `sdk-architecture.md:420`.
+ *     next-major scope per `sdk-architecture.md` §4.3 — Crash-injection
+ *     harness.
+ *   - Structured error-with-step-number reporting is next-major scope
+ *     per `sdk-architecture.md` §4.3 — durability protocol step 9.
  *
  * Cross-platform behavior:
  *   - On POSIX (Linux, macOS), the parent-directory fsync uses an

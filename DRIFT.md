@@ -48,8 +48,8 @@ Two Tier-1 surfaces named in sdk-architecture.md §8.2 are **deferred** and not
 yet in the table:
 
 - **CLI exit codes** — waiting on `EXIT_CODES` being extracted into
-  `@glasstrace/protocol` (sdk-architecture.md §8.1 row 7).
-- **`SHUTDOWN_PRIORITY` table** — waiting on LIFE-3 (sdk-architecture.md §10.1),
+  `@glasstrace/protocol` (sdk-architecture.md §10.4 `CONT-4`).
+- **`SHUTDOWN_PRIORITY` table** — waiting on LIFE-3 (sdk-architecture.md §10.3),
   which consolidates the four shipped priority constants into a
   single `SHUTDOWN_PRIORITY as const` table. The currently shipped
   `HEARTBEAT_SHUTDOWN_PRIORITY` row above will be superseded by that
