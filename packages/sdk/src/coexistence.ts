@@ -274,12 +274,25 @@ export function emitNudgeMessage(): void {
 
 /**
  * Emits a guidance message when auto-attach fails (Scenarios C, F).
+ *
+ * Log level escalates to `error` under `process.env.NODE_ENV ===
+ * "production"` so the message survives common production log-level
+ * filters that suppress `warn` (DISC-1556 Option C). Development and
+ * test runs keep the `warn` level to avoid console-noise regressions
+ * for local Sentry/Datadog users who routinely see this branch.
  */
 export function emitGuidanceMessage(): void {
   const isSentry = detectSentry();
+  // Read from process.env at call time — not module-init time — so test
+  // suites that toggle NODE_ENV per case observe the new value. Falls
+  // back gracefully if `process` is unavailable (non-Node runtimes).
+  const isProduction =
+    typeof process !== "undefined" &&
+    process.env?.NODE_ENV === "production";
+  const level: "warn" | "error" = isProduction ? "error" : "warn";
 
   if (isSentry) {
-    sdkLog("warn",
+    sdkLog(level,
       `[glasstrace] An existing OTel TracerProvider is registered but Glasstrace ` +
       `could not auto-attach its span processor.\n` +
       `Add Glasstrace to your Sentry config:\n\n` +
@@ -290,7 +303,7 @@ export function emitGuidanceMessage(): void {
       `  });`,
     );
   } else {
-    sdkLog("warn",
+    sdkLog(level,
       `[glasstrace] An existing OTel TracerProvider is registered but Glasstrace ` +
       `could not auto-attach its span processor.\n` +
       `Add Glasstrace to your provider configuration:\n\n` +

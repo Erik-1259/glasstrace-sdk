@@ -176,6 +176,142 @@ describe("configureOtel()", () => {
       expect(guidanceWarning).toBeDefined();
     });
 
+    it("Scenario C/F (DISC-1556): emits otel:failed with structured lastError payload", async () => {
+      // Reproduces the Next 16 production "auto-attach returned null"
+      // failure mode. The opaque provider has neither addSpanProcessor
+      // (v1) nor _activeSpanProcessor._spanProcessors (v2), so
+      // tryAutoAttachGlasstraceProcessor returns null. The coexistence
+      // path must emit a structured `otel:failed` event whose payload
+      // is safe to persist via the runtime-state CLI bridge.
+      const opaqueProvider = {
+        getTracer: () => ({ constructor: { name: "DDTracer" } }),
+      };
+      // Set the global so the proxy unwrap inside readProviderClass()
+      // resolves the same opaque object as the delegate.
+      otelApi.trace.setGlobalTracerProvider(
+        opaqueProvider as unknown as otelApi.TracerProvider,
+      );
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const failedEvents: unknown[] = [];
+      lifecycle.onLifecycleEvent("otel:failed", (payload) => {
+        failedEvents.push(payload);
+      });
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      expect(failedEvents).toHaveLength(1);
+      const payload = failedEvents[0] as {
+        category: string;
+        message: string;
+        timestamp: string;
+        providerClass?: string;
+      };
+      expect(payload.category).toBe("auto-attach-returned-null");
+      expect(payload.message).toContain(
+        "tryAutoAttachGlasstraceProcessor returned null",
+      );
+      // ISO 8601 timestamp.
+      expect(() => new Date(payload.timestamp).toISOString()).not.toThrow();
+      // PII-safety: providerClass is the constructor name of the
+      // unwrapped delegate. The opaque object literal's constructor is
+      // `Object`, not a URL or header.
+      expect(payload.providerClass).toBe("Object");
+      // Negative assertion: nothing in the message reveals user-app
+      // internals like delegate URLs or headers.
+      expect(payload.message).not.toMatch(/https?:\/\//);
+      expect(payload.message).not.toMatch(/authorization/i);
+    });
+
+    it("Scenario C/F (DISC-1556 + DISC-1247): preserves FSM guard — KEY_PENDING does not transition to ACTIVE_DEGRADED", async () => {
+      // Regression test against a future change that relaxes the
+      // FSM and accidentally allows KEY_PENDING → ACTIVE_DEGRADED.
+      // VALID_CORE_TRANSITIONS at lifecycle.ts (DISC-1247) rejects
+      // this transition; the guard at otel-config.ts must continue
+      // to skip setCoreState(ACTIVE_DEGRADED) when prior state is
+      // KEY_PENDING.
+      const opaqueProvider = {
+        getTracer: () => ({ constructor: { name: "DDTracer" } }),
+      };
+      otelApi.trace.setGlobalTracerProvider(
+        opaqueProvider as unknown as otelApi.TracerProvider,
+      );
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      // Drive core state to KEY_PENDING via the legitimate path.
+      lifecycle.setCoreState(lifecycle.CoreState.REGISTERING);
+      lifecycle.setCoreState(lifecycle.CoreState.KEY_PENDING);
+      expect(lifecycle.getCoreState()).toBe(lifecycle.CoreState.KEY_PENDING);
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      // The C/F branch must NOT have transitioned the core state.
+      expect(lifecycle.getCoreState()).toBe(lifecycle.CoreState.KEY_PENDING);
+    });
+
+    it("Scenario C/F (DISC-1556): readProviderClass falls back to undefined when constructor access throws", async () => {
+      // Defensive contract: a hostile provider that throws on
+      // constructor lookup must not crash the failure path. The
+      // sanitized providerClass simply becomes undefined.
+      const hostileProvider = new Proxy(
+        {
+          getTracer: () => ({ constructor: { name: "Tracer" } }),
+        },
+        {
+          get(target, prop) {
+            if (prop === "constructor") {
+              throw new Error("hostile constructor access");
+            }
+            return (target as Record<string | symbol, unknown>)[prop];
+          },
+        },
+      );
+      otelApi.trace.setGlobalTracerProvider(
+        hostileProvider as unknown as otelApi.TracerProvider,
+      );
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const failedEvents: unknown[] = [];
+      lifecycle.onLifecycleEvent("otel:failed", (payload) => {
+        failedEvents.push(payload);
+      });
+
+      // Must not throw — the failure-emit path is defensive.
+      await expect(
+        configureOtel(createTestConfig(), sessionManager),
+      ).resolves.not.toThrow();
+
+      expect(failedEvents).toHaveLength(1);
+      const payload = failedEvents[0] as { providerClass?: string };
+      // The Proxy throws on constructor access — readProviderClass
+      // catches and returns undefined.
+      expect(payload.providerClass).toBeUndefined();
+    });
+
+    it("Scenario C/F (DISC-1556 + DISC-1247): ACTIVE transitions to ACTIVE_DEGRADED (preserved behavior)", async () => {
+      const opaqueProvider = {
+        getTracer: () => ({ constructor: { name: "DDTracer" } }),
+      };
+      otelApi.trace.setGlobalTracerProvider(
+        opaqueProvider as unknown as otelApi.TracerProvider,
+      );
+
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      // Drive to ACTIVE via the legitimate path.
+      lifecycle.setCoreState(lifecycle.CoreState.REGISTERING);
+      lifecycle.setCoreState(lifecycle.CoreState.KEY_PENDING);
+      lifecycle.setCoreState(lifecycle.CoreState.KEY_RESOLVED);
+      lifecycle.setCoreState(lifecycle.CoreState.ACTIVE);
+
+      await configureOtel(createTestConfig(), sessionManager);
+
+      expect(lifecycle.getCoreState()).toBe(lifecycle.CoreState.ACTIVE_DEGRADED);
+    });
+
     it("Scenario E regression: Vercel path skipped when existing provider present", async () => {
       // Even if @vercel/otel is installed (mocked), the Vercel path should
       // NOT run when an existing provider is detected — coexistence path

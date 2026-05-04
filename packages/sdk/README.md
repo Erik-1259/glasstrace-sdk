@@ -163,6 +163,94 @@ GLASSTRACE_SUPPRESS_ACTION_NUDGE=1
 The nudge never fires in production (detected via `NODE_ENV` or
 `VERCEL_ENV`) unless `GLASSTRACE_FORCE_ENABLE=true` is also set.
 
+## Production deployment under Next 16
+
+Next 16 (`next build && next start`) registers an OpenTelemetry
+TracerProvider before user code runs. When `registerGlasstrace()` then
+detects that provider, the SDK attempts to attach its span processor to
+the existing pipeline. On most providers this auto-attach succeeds and
+no further action is required; on a small number of provider shapes —
+including Next 16's production-runtime provider in some versions — the
+provider exposes no injection point and auto-attach returns
+unsuccessfully. In that case spans flow through the existing pipeline
+without reaching the Glasstrace exporter, so no traces appear in MCP
+queries or the dashboard.
+
+The SDK signals this case in three ways:
+
+1. **Log line.** The SDK logs a guidance message at `warn` level in
+   development and `error` level under `NODE_ENV=production`:
+
+   ```text
+   [glasstrace] An existing OTel TracerProvider is registered but
+   Glasstrace could not auto-attach its span processor.
+   Add Glasstrace to your provider configuration:
+   ...
+   ```
+
+2. **Programmatic signal.** `getStatus().tracing === "not-configured"`
+   after `registerGlasstrace()` has resolved indicates spans are not
+   reaching the Glasstrace exporter. Poll this from a health endpoint
+   or a startup readiness check:
+
+   ```ts
+   import { getStatus } from "@glasstrace/sdk";
+
+   const { tracing } = getStatus();
+   if (tracing === "not-configured") {
+     // Spans are not being exported. Apply the manual workaround below.
+   }
+   ```
+
+3. **CLI bridge.** `.glasstrace/runtime-state.json` carries a
+   structured `lastError` record that downstream tooling (custom
+   dashboards, CI assertions, the `npx @glasstrace/sdk status`
+   command in future releases) can surface verbatim:
+
+   ```json
+   {
+     "otel": { "state": "COEXISTENCE_FAILED", "scenario": "C/F" },
+     "lastError": {
+       "category": "auto-attach-returned-null",
+       "message": "tryAutoAttachGlasstraceProcessor returned null — ...",
+       "timestamp": "2026-05-04T12:34:56.789Z",
+       "providerClass": "BasicTracerProvider"
+     }
+   }
+   ```
+
+   The `providerClass` field is the constructor name of the existing
+   provider's delegate. URLs, headers, and credentials are never
+   captured.
+
+### Manual workaround
+
+When auto-attach cannot succeed, register Glasstrace's span processor
+on the provider you already own:
+
+```ts
+import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import { createGlasstraceSpanProcessor } from "@glasstrace/sdk";
+
+const provider = new BasicTracerProvider({
+  spanProcessors: [
+    // ... your existing processors,
+    createGlasstraceSpanProcessor(),
+  ],
+});
+```
+
+`createGlasstraceSpanProcessor()` produces a processor with the same
+branded exporter the auto-attach path uses, so duplicate
+`registerGlasstrace()` calls remain idempotent. `registerGlasstrace()`
+is still required when wiring the processor manually — it handles the
+init handshake, anonymous-key resolution, session management, and
+discovery endpoint, none of which are owned by the span processor.
+
+A future SDK release may extend the auto-attach detection to recognize
+additional Next 16 provider shapes; until that ships, the manual path
+above is the production-supported integration.
+
 ## Capturing error response bodies
 
 When debugging a 4xx or 5xx, the response body is often the most useful

@@ -143,6 +143,23 @@ export interface SdkLifecycleEvents {
   "otel:configured": { state: OtelState; scenario?: string };
   "otel:injection_succeeded": { method: string };
   "otel:injection_failed": { reason: string };
+  /**
+   * Structured fail-loud diagnostic emitted when the OTel coexistence
+   * path observes an unrecoverable auto-attach failure (DISC-1556).
+   * Distinct from `otel:injection_failed` (which carries a free-form
+   * `reason` string for logging) — `otel:failed` carries a
+   * machine-readable payload destined for the runtime-state CLI bridge.
+   *
+   * **PII-safety:** the payload's `message` is built from a fixed
+   * template; `providerClass` is a sanitized constructor name. See
+   * `RuntimeStateLastError` in `runtime-state.ts` for the full contract.
+   */
+  "otel:failed": {
+    category: "auto-attach-returned-null";
+    message: string;
+    timestamp: string;
+    providerClass?: string;
+  };
   "otel:shutdown_started": Record<string, never>;
   "otel:shutdown_completed": Record<string, never>;
 
@@ -500,6 +517,25 @@ export function waitForReady(timeoutMs = 30000): Promise<void> {
 /**
  * Simplified public state query for external consumers.
  * Hides implementation details like coexistence scenarios.
+ *
+ * The returned `tracing` field is the canonical user-observable signal
+ * for OTel coexistence outcomes:
+ *
+ * - `"active"` — the SDK owns the OTel provider and is exporting spans.
+ * - `"coexistence"` — another OTel provider was detected and the SDK
+ *   either auto-attached its span processor or found one already
+ *   present. Spans are exported through the existing pipeline.
+ * - `"degraded"` — the SDK is exporting but the core lifecycle entered
+ *   `ACTIVE_DEGRADED` (e.g., a non-fatal export failure).
+ * - `"not-configured"` — the SDK could not configure tracing. Covers
+ *   `OtelState.UNCONFIGURED`, `OtelState.CONFIGURING`, and
+ *   `OtelState.COEXISTENCE_FAILED` (the DISC-1556 Next 16 production
+ *   "auto-attach returned null" path). When the value is
+ *   `"not-configured"` after `registerGlasstrace()` has resolved,
+ *   spans are NOT reaching the Glasstrace exporter and the manual
+ *   `createGlasstraceSpanProcessor()` workaround should be applied.
+ *   See `runtime-state.json`'s `lastError` field for the structured
+ *   failure record.
  */
 export function getStatus(): {
   ready: boolean;
