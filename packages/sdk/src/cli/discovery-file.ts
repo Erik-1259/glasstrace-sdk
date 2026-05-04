@@ -18,7 +18,7 @@ import {
  * `static/` for SvelteKit) and the browser extension fetches it from
  * the same path under the deployed origin.
  *
- * @drift-check RFC 8615 (https://www.rfc-editor.org/rfc/rfc8615) + ../glasstrace-product/docs/component-designs/sdk-2.0.md §7.1 Static discovery file
+ * @drift-check RFC 8615 (https://www.rfc-editor.org/rfc/rfc8615) + ../glasstrace-product/docs/component-designs/sdk-architecture.md §7.1 Static discovery file
  */
 export const WELL_KNOWN_GLASSTRACE_PATH = ".well-known/glasstrace.json" as const;
 

@@ -1,7 +1,7 @@
 /**
  * Tests for the atomic-write helper. Covers the durability invariant
  * `tmp + fsync(tmp) + rename + fsync(parent)` from SDK 2.0 §4.3
- * (`docs/component-designs/sdk-2.0.md:416–419`).
+ * (`docs/component-designs/sdk-architecture.md:416–419`).
  *
  * Closes DISC-1515.
  */

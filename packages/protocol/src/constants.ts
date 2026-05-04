@@ -7,7 +7,7 @@ import type { CaptureConfig } from "./config.js";
 /**
  * All glasstrace.* semantic attribute keys used by the SDK.
  *
- * @drift-check OpenTelemetry Semantic Conventions (https://opentelemetry.io/docs/specs/semconv/) + ../glasstrace-product/docs/component-designs/sdk-2.0.md §7.5 Span attributes (Tier 1)
+ * @drift-check OpenTelemetry Semantic Conventions (https://opentelemetry.io/docs/specs/semconv/) + ../glasstrace-product/docs/component-designs/sdk-architecture.md §7.5 Span attributes (Tier 1)
  */
 export const GLASSTRACE_ATTRIBUTE_NAMES = {
   // Server-side attributes
