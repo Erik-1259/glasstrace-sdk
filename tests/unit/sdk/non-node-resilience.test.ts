@@ -174,3 +174,40 @@ describe("error-nudge without node:fs", () => {
     expect(output).toContain("[glasstrace] Error captured: Test error");
   });
 });
+
+describe("heartbeat checkShutdownMarker without node:fs", () => {
+  // Wave 10 10G audit (DISC-1563) regression guard. The other three
+  // ESM-reachable sync `require("node:*")` sites in SDK source —
+  // `init-client.loadFsSyncOrNull`, `nudge.markerFileExists`, and
+  // `atomic-write.loadFsSync` (via `isSyncFsAvailable`) — already had
+  // dedicated coverage for the catch-branch behavior. The audit found
+  // `heartbeat.checkShutdownMarker` was the lone owner whose ESM-
+  // unavailable branch was untested. The catch already returns the
+  // same `{ triggered: false }` shape as the marker-absent branch, so
+  // this test pins that contract against an `node:fs is unavailable`
+  // simulation indistinguishable from the tsup `__require` throw the
+  // production failure mode produces.
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doMock("node:fs", () => {
+      throw new Error("Module not found: node:fs");
+    });
+    vi.doMock("node:path", () => {
+      throw new Error("Module not found: node:path");
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("node:fs");
+    vi.doUnmock("node:path");
+  });
+
+  it("returns { triggered: false } and does not throw", async () => {
+    const { checkShutdownMarker } = await import(
+      "../../../packages/sdk/src/heartbeat.js"
+    );
+    expect(() => checkShutdownMarker("/tmp/glasstrace-disc-1563-noexist")).not.toThrow();
+    const result = checkShutdownMarker("/tmp/glasstrace-disc-1563-noexist");
+    expect(result).toEqual({ triggered: false });
+  });
+});

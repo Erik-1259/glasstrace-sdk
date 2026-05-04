@@ -58,9 +58,9 @@ async function loadFsPathAsync(): Promise<{ fs: typeof import("node:fs/promises"
  */
 function loadFsSyncOrNull(): { readFileSync: typeof import("node:fs").readFileSync; join: typeof import("node:path").join } | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the surrounding try/catch in `loadFsSyncOrNull`; throw returns `null`, callers (e.g. `loadCachedConfig`) treat it as no cached config (DISC-1555).
     const fs = require("node:fs") as typeof import("node:fs");
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the same try/catch as the preceding `node:fs` require (DISC-1555).
     const path = require("node:path") as typeof import("node:path");
     return { readFileSync: fs.readFileSync, join: path.join };
   } catch {
