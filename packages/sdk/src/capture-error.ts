@@ -6,7 +6,9 @@
  */
 
 import * as otelApi from "@opentelemetry/api";
+import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import { maybeShowMcpNudge } from "./nudge/error-nudge.js";
+import { parseTopStackFrame } from "./stack-frame.js";
 
 /**
  * Records an error as a span event on the currently active OTel span.
@@ -37,7 +39,7 @@ export function captureError(error: unknown): void {
     const span = otelApi.trace.getSpan(otelApi.context.active());
     if (!span) return;
 
-    const attributes: Record<string, string> = {
+    const attributes: Record<string, string | number> = {
       "error.message": String(error),
     };
 
@@ -45,6 +47,24 @@ export function captureError(error: unknown): void {
       attributes["error.type"] = error.constructor.name;
       if (error.stack) {
         attributes["error.stack"] = error.stack;
+
+        // Stamp the top user-attributable frame as glasstrace.source.file
+        // and glasstrace.source.line. Errors are the only span signal
+        // for which a single canonical source location exists; emitting
+        // these attributes lets ingestion's source-map resolver
+        // (packages/ingestion/src/services/source-map-resolver.ts) map
+        // the compiled-output path back to the original source via the
+        // build-time uploaded sourcemap, surfacing mapped frames in the
+        // dashboard and the enrichment LLM prompt (DISC-1543, SDK-040).
+        //
+        // parseTopStackFrame returns null on any parse failure so a
+        // future V8 stack-format change cannot break error capture —
+        // the attributes are simply omitted.
+        const frame = parseTopStackFrame(error.stack);
+        if (frame) {
+          attributes[GLASSTRACE_ATTRIBUTE_NAMES.SOURCE_FILE] = frame.file;
+          attributes[GLASSTRACE_ATTRIBUTE_NAMES.SOURCE_LINE] = frame.line;
+        }
       }
     }
 

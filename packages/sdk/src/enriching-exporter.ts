@@ -13,6 +13,7 @@ import {
   isHttpErrorStatus,
   prepareErrorResponseBody,
 } from "./error-response-body.js";
+import { getBuildHash } from "./build-info.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -196,6 +197,21 @@ export class GlasstraceExporter implements SpanExporter {
       const env = this.environment ?? process.env.GLASSTRACE_ENV;
       if (env) {
         extra[ATTR.ENVIRONMENT] = env;
+      }
+
+      // glasstrace.build.hash (DISC-1543 / SDK-040).
+      // Stamped from `process.env.GLASSTRACE_BUILD_HASH` captured at
+      // module load by `build-info.ts`. Ingestion uses the value to
+      // construct the sourcemap blob key
+      // (`sourcemaps/{accountId}/{buildHash}/{file}`); a missing hash
+      // leaves stored traces' `buildHash` column null and prevents the
+      // dashboard from rendering mapped frames for those traces. The
+      // SDK silently omits the attribute when the env var is unset so
+      // deployments that have not adopted the convention behave
+      // exactly as before.
+      const buildHash = getBuildHash();
+      if (buildHash) {
+        extra[ATTR.BUILD_HASH] = buildHash;
       }
 
       // glasstrace.correlation.id

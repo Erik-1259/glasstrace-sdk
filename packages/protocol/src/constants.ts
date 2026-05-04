@@ -33,6 +33,7 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   FETCH_DURATION_MS: "glasstrace.fetch.duration_ms",
   FETCH_TARGET: "glasstrace.fetch.target",
   ENV_REFERENCED: "glasstrace.env.referenced",
+  BUILD_HASH: "glasstrace.build.hash",
   SOURCE_FILE: "glasstrace.source.file",
   SOURCE_LINE: "glasstrace.source.line",
   SOURCE_MAPPED: "glasstrace.source.mapped",
