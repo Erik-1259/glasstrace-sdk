@@ -2,7 +2,7 @@
  * Atomic file-write helper.
  *
  * Implements the durability half of the SDK 2.0 atomic-write protocol
- * (`docs/component-designs/sdk-2.0.md` §4.3 / `sdk-2.0.md:416–419`):
+ * (`docs/component-designs/sdk-architecture.md` §4.3 / `sdk-architecture.md:416–419`):
  *
  *   1. Write the payload to a sibling temp file in the **same**
  *      directory as the final target. The shared directory guarantees
@@ -25,11 +25,11 @@
  * Out-of-scope by design:
  *   - The `lstat → tmp → rename → re-lstat` TOCTOU re-check (spec
  *     §4.3 steps 1–2 and 7's re-verification) is SDK 2.0 scope per
- *     `sdk-2.0.md:511`.
+ *     `sdk-architecture.md:511`.
  *   - The `GLASSTRACE_TEST_CRASH_AFTER` crash-injection harness is
- *     SDK 2.0 scope per `sdk-2.0.md:426`.
+ *     SDK 2.0 scope per `sdk-architecture.md:426`.
  *   - Structured error-with-step-number reporting is SDK 2.0 scope
- *     per `sdk-2.0.md:420`.
+ *     per `sdk-architecture.md:420`.
  *
  * Cross-platform behavior:
  *   - On POSIX (Linux, macOS), the parent-directory fsync uses an
