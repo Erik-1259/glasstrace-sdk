@@ -48,15 +48,44 @@ export interface ParsedStackFrame {
  * Allows but does not require a function name before the parens
  * (a bare `    at (file:line:col)` is unusual but valid).
  *
- * The file-path capture group `[^()\s]+` excludes parenthesis and
- * whitespace characters. This deliberately rejects V8's nested
- * `eval` frame shape — `at eval (eval at <anonymous> (/file:1:1), <anonymous>:1:1)` —
+ * The file-path capture group accepts:
+ *
+ *   1. Plain non-paren / non-whitespace characters — the common case
+ *      (`/abs/path.ts`, `file:///url`, `C:\\win32\\path`, `node:fs`).
+ *      Colons are allowed inside the path; the trailing
+ *      `:(\d+):(\d+)\)` anchor in the regex relies on greedy
+ *      backtracking to split the final `:line:col)` off the path
+ *      tail, which is how the original parser already handled
+ *      paths like `node:internal/timers:512:7`.
+ *   2. Embedded `(<segment>)` markers — the Next.js App Router
+ *      bundler emits paths like
+ *      `webpack-internal:///(rsc)/./src/app/page.tsx`,
+ *      `webpack-internal:///(middleware)/middleware.js`, and similar
+ *      forms with `(api)`, `(client)`, `(server)`, `(action)`, etc.
+ *      The same shape also appears for App Router *route groups*
+ *      authored by users — folders like `app/(marketing)/page.tsx`
+ *      or `app/(v2)/page.tsx` — and for *intercepting-route*
+ *      markers `(.)`, `(..)`, `(...)` documented by Next. The
+ *      marker alphabet `[A-Za-z0-9_.-]` covers the published Next
+ *      layer set, webpack-internal markers like `(__SLOT__)`,
+ *      digit-bearing route-group folders the user may name
+ *      themselves, and the dotted intercepting-route shapes.
+ *
+ * The leading negative lookahead `(?!eval\s+\(eval\s+at\b)` rejects
+ * V8's nested eval frame shape —
+ * `at eval (eval at <anonymous> (/file:1:1), <anonymous>:1:1)` —
  * which would otherwise greedy-match the whole inner expression and
  * stamp a non-resolvable pseudo-path as `glasstrace.source.file`.
  * Eval-origin frames have no real source location to report; the
  * parser skips them rather than emit a misleading attribute.
+ *
+ * Backtracking posture: the file capture is structured so each
+ * inner alternation is anchored on a literal `(` and never overlaps
+ * with the plain-character segment. There is no `(a*)*`-style
+ * nesting, so the regex runs in linear time on adversarial inputs.
  */
-const PAREN_FRAME = /^\s*at\s+(?:[^()]+\s+)?\(([^()\s]+):(\d+):(\d+)\)\s*$/;
+const PAREN_FRAME =
+  /^\s*at\s+(?!eval\s+\(eval\s+at\b)(?:[^()]+\s+)?\(([^()\s]+(?:\([A-Za-z0-9_.-]+\)[^()\s]*)*):(\d+):(\d+)\)\s*$/;
 
 /**
  * Match a V8 frame in the bare anonymous form:
@@ -70,13 +99,15 @@ const PAREN_FRAME = /^\s*at\s+(?:[^()]+\s+)?\(([^()\s]+):(\d+):(\d+)\)\s*$/;
  * the optional `async` token the next whitespace-delimited token is
  * the file path; line and column trail it.
  *
- * The file-path capture group `[^()\s]+` excludes the parenthesis
- * characters, so a parenthesized frame (with or without a function
- * name) will not match here — those land at {@link PAREN_FRAME}. A
- * malformed truncated frame like `    at fn (file:line:col` is
- * therefore rejected by both patterns rather than being misparsed.
+ * The file-path capture mirrors {@link PAREN_FRAME}'s embedded
+ * `(<segment>)` marker support so a top-level evaluated module
+ * loaded via webpack-internal also resolves correctly. A malformed
+ * truncated frame like `    at fn (file:line:col` is rejected by
+ * both patterns rather than being misparsed because the bare shape
+ * has no leading `\(` wrapper.
  */
-const BARE_FRAME = /^\s*at\s+(?:async\s+)?([^()\s]+):(\d+):(\d+)\s*$/;
+const BARE_FRAME =
+  /^\s*at\s+(?:async\s+)?([^()\s]+(?:\([A-Za-z0-9_.-]+\)[^()\s]*)*):(\d+):(\d+)\s*$/;
 
 /**
  * V8 internal-frame prefixes that should be skipped when looking for
