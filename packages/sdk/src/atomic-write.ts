@@ -541,6 +541,34 @@ export function writeAndFsyncTempSync(
 }
 
 /**
+ * Returns `true` when synchronous `node:fs` is reachable in the current
+ * runtime, `false` otherwise. Callers that prefer a silent-skip path
+ * over a thrown `node:fs is unavailable` error use this probe before
+ * dispatching to {@link atomicWriteFileSync}.
+ *
+ * The probe shares the lazy-loader cache with the sync helpers, so a
+ * `true` result also primes the cache for the subsequent write. This
+ * keeps the probe overhead to one `require("node:fs")` per process.
+ *
+ * Background: tsup's bundled `__require` shim throws "Dynamic require
+ * of \"node:fs\" is not supported" when the SDK is loaded as an ESM
+ * module from a host like Next.js (DISC-1555). The runtime is a real
+ * Node process — it just lacks a working synchronous `require()`
+ * binding in the ESM scope. Async helpers are unaffected because
+ * `await import("node:fs/promises")` is ESM-native.
+ *
+ * @internal Sibling-module use only.
+ */
+export function isSyncFsAvailable(): boolean {
+  try {
+    loadFsSync();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Test-only: clear the cached lazy-loaded modules. Allows test suites
  * that mock `node:fs`/`node:fs/promises` to ensure the helper re-runs
  * its module probe.
