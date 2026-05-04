@@ -517,6 +517,7 @@ function mockPresignedResponse(files: Array<{ filePath: string }>) {
       clientToken: `token-${f.filePath}`,
       pathname: `source-maps/${f.filePath}`,
       maxBytes: 10_000_000,
+      access: "public" as const,
     })),
   };
 }

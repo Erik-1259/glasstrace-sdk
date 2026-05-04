@@ -79,6 +79,7 @@ describe("PresignedUploadResponseSchema", () => {
         clientToken: "tok_abc123",
         pathname: "/uploads/abc123/main.js.map",
         maxBytes: 5_242_880,
+        access: "public" as const,
       },
     ],
   };
@@ -89,7 +90,60 @@ describe("PresignedUploadResponseSchema", () => {
     if (result.success) {
       expect(result.data.uploadId).toBe(validResponse.uploadId);
       expect(result.data.files[0].clientToken).toBe("tok_abc123");
+      expect(result.data.files[0].access).toBe("public");
     }
+  });
+
+  it("accepts expiresAt: 0 (TimestampSchema is nonnegative, not strictly positive)", () => {
+    // DISC-1544: align with backend `TimestampSchema` (`int().nonnegative()`).
+    // The pre-fix schema used `positive()` which rejected `0`; backend has always
+    // emitted `nonnegative` timestamps.
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      expiresAt: 0,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects expiresAt: -1 (must be nonnegative)", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      expiresAt: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects per-file entry missing the `access` field", () => {
+    // DISC-1544: backend has required `access: "public"` per DISC-756; the SDK
+    // protocol now matches the canonical wire shape.
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          filePath: "dist/main.js.map",
+          clientToken: "tok_abc123",
+          pathname: "/uploads/abc123/main.js.map",
+          maxBytes: 5_242_880,
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects per-file `access` value other than \"public\"", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          filePath: "dist/main.js.map",
+          clientToken: "tok_abc123",
+          pathname: "/uploads/abc123/main.js.map",
+          maxBytes: 5_242_880,
+          access: "private",
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
   });
 
   it("rejects invalid uploadId (not UUID)", () => {
@@ -108,6 +162,7 @@ describe("PresignedUploadResponseSchema", () => {
           filePath: "dist/main.js.map",
           pathname: "/uploads/abc123/main.js.map",
           maxBytes: 5_242_880,
+          access: "public",
         },
       ],
     });
@@ -123,6 +178,7 @@ describe("PresignedUploadResponseSchema", () => {
           clientToken: "",
           pathname: "/uploads/abc123/main.js.map",
           maxBytes: 5_242_880,
+          access: "public",
         },
       ],
     });
