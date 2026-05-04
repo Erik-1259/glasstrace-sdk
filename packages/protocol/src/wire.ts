@@ -121,10 +121,23 @@ export const PresignedUploadRequestSchema = z.object({
 });
 export type PresignedUploadRequest = z.infer<typeof PresignedUploadRequestSchema>;
 
-/** Response containing presigned upload tokens and storage pathnames. */
+/**
+ * Response containing presigned upload tokens and storage pathnames.
+ *
+ * Each entry in `files` carries a Vercel Blob `access` mode that pins the
+ * storage visibility for the resulting blob in the wire contract (DISC-756).
+ * The current Glasstrace SDK upload path passes a fixed `access: "public"`
+ * to `@vercel/blob/client` `put()`; carrying the field on the response
+ * keeps the protocol shape canonical so any future visibility mode is
+ * negotiable without a schema change.
+ *
+ * `expiresAt` is a Unix timestamp in milliseconds since the epoch and uses
+ * the canonical timestamp validator (`int().nonnegative()`) shared with the
+ * backend wire schema.
+ */
 export const PresignedUploadResponseSchema = z.object({
   uploadId: z.string().uuid(),
-  expiresAt: z.number().int().positive(),
+  expiresAt: z.number().int().nonnegative(),
   files: z
     .array(
       z.object({
@@ -132,6 +145,8 @@ export const PresignedUploadResponseSchema = z.object({
         clientToken: z.string().min(1),
         pathname: z.string().min(1),
         maxBytes: z.number().int().positive(),
+        /** Vercel Blob access mode — explicit in the contract per DISC-756. */
+        access: z.enum(["public"]),
       }),
     )
     .min(1)

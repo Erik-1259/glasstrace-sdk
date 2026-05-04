@@ -157,6 +157,7 @@ describe("no-api-key-in-body: requestPresignedTokens", () => {
             clientToken: "token-main.js",
             pathname: "source-maps/main.js",
             maxBytes: 10_000_000,
+            access: "public",
           },
         ],
       }),
