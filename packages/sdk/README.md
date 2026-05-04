@@ -229,6 +229,18 @@ projects that have not adopted the convention behave exactly as
 before; their stored traces simply do not render mapped frames in
 the dashboard.
 
+When `GLASSTRACE_BUILD_HASH` is set but does not match the typical
+git SHA shape (7-64 hexadecimal characters, covering abbreviated
+SHA-1, full SHA-1, and full SHA-256), the SDK logs a one-shot warning
+at startup and still ships the value — the build hash is
+informational metadata, so a misconfiguration must never prevent the
+SDK from starting. The warning surfaces common failure modes
+(path-traversal-shaped values, wrong env-var name copied from
+another tool, internal whitespace from a CI variable with a stray
+newline) earlier than waiting to notice the dashboard rendering no
+mapped frames. The captured value is redacted in the warning text in
+case a secret was accidentally substituted.
+
 The error-source attributes are stamped only by the manual
 `captureError()` API, on the `glasstrace.error` span event. They
 report the compiled-output `file:line` from the top user-attributable
