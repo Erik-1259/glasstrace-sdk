@@ -165,6 +165,12 @@ The nudge never fires in production (detected via `NODE_ENV` or
 
 ## Production deployment under Next 16
 
+As of `@glasstrace/sdk@1.3.5`, auto-attach detection now classifies the
+SDK's own bundled proxy correctly under bundler minification (DISC-1556
+— verified against the `clean-next-sdk130` validation fixture). The
+manual integration documented below remains supported for users who
+prefer explicit configuration.
+
 Next 16 (`next build && next start`) registers an OpenTelemetry
 TracerProvider before user code runs. When `registerGlasstrace()` then
 detects that provider, the SDK attempts to attach its span processor to
