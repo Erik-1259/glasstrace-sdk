@@ -17,6 +17,23 @@ import {
   SessionIdSchema,
 } from "./ids.js";
 import { CaptureConfigSchema } from "./config.js";
+import {
+  MAX_SOURCE_MAP_FILE_COUNT,
+  MAX_SOURCE_MAP_FILE_PATH_LENGTH,
+  MAX_SOURCE_MAP_FILE_SIZE,
+} from "./constants.js";
+
+/**
+ * Maximum length of `clientToken` carried on a presigned upload response,
+ * in characters. Mirrors the backend canonical bound.
+ */
+const MAX_PRESIGNED_CLIENT_TOKEN_LENGTH = 2048;
+
+/**
+ * Maximum length of `pathname` carried on a presigned upload response, in
+ * characters. Mirrors the backend canonical bound.
+ */
+const MAX_PRESIGNED_PATHNAME_LENGTH = 1024;
 
 // --- ImportGraphPayload ---
 
@@ -106,18 +123,43 @@ export type SourceMapUploadResponse = z.infer<typeof SourceMapUploadResponseSche
 
 // --- Presigned Source Map Upload ---
 
-/** Request to obtain presigned upload URLs for source map files. */
+/**
+ * Request to obtain presigned upload URLs for source map files.
+ *
+ * Per-file `filePath` is bounded to {@link MAX_SOURCE_MAP_FILE_PATH_LENGTH}
+ * characters; `sizeBytes` is bounded to {@link MAX_SOURCE_MAP_FILE_SIZE} bytes.
+ * The `files` array carries between 1 and {@link MAX_SOURCE_MAP_FILE_COUNT}
+ * entries. These bounds mirror the backend canonical bounds (DISC-1562) so
+ * external tooling that validates against the SDK schema observes the same
+ * acceptance envelope the backend enforces at write time.
+ */
 export const PresignedUploadRequestSchema = z.object({
   buildHash: BuildHashSchema,
   files: z
     .array(
       z.object({
-        filePath: z.string().min(1),
-        sizeBytes: z.number().int().positive(),
+        filePath: z
+          .string()
+          .min(1)
+          .max(
+            MAX_SOURCE_MAP_FILE_PATH_LENGTH,
+            `filePath length exceeds maximum of ${MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters`,
+          ),
+        sizeBytes: z
+          .number()
+          .int()
+          .positive()
+          .max(
+            MAX_SOURCE_MAP_FILE_SIZE,
+            `sizeBytes exceeds maximum of ${MAX_SOURCE_MAP_FILE_SIZE} bytes (${MAX_SOURCE_MAP_FILE_SIZE / (1024 * 1024)} MiB)`,
+          ),
       }),
     )
     .min(1)
-    .max(100),
+    .max(
+      MAX_SOURCE_MAP_FILE_COUNT,
+      `files array exceeds maximum of ${MAX_SOURCE_MAP_FILE_COUNT} entries`,
+    ),
 });
 export type PresignedUploadRequest = z.infer<typeof PresignedUploadRequestSchema>;
 
@@ -134,6 +176,18 @@ export type PresignedUploadRequest = z.infer<typeof PresignedUploadRequestSchema
  * `expiresAt` is a Unix timestamp in milliseconds since the epoch and uses
  * the canonical timestamp validator (`int().nonnegative()`) shared with the
  * backend wire schema.
+ *
+ * Per-file bounds mirror the backend canonical bounds (DISC-1562):
+ *
+ * - `filePath` ≤ {@link MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters
+ * - `clientToken` ≤ 2048 characters
+ * - `pathname` ≤ 1024 characters
+ * - `maxBytes` ≤ {@link MAX_SOURCE_MAP_FILE_SIZE} bytes (50 MiB)
+ *
+ * The `files` array carries between 1 and {@link MAX_SOURCE_MAP_FILE_COUNT}
+ * entries. These bounds keep the SDK schema in lockstep with the backend
+ * acceptance envelope; third-party tooling that validates against the SDK
+ * schema sees the same upper bounds the backend enforces at write time.
  */
 export const PresignedUploadResponseSchema = z.object({
   uploadId: z.string().uuid(),
@@ -141,33 +195,85 @@ export const PresignedUploadResponseSchema = z.object({
   files: z
     .array(
       z.object({
-        filePath: z.string().min(1),
-        clientToken: z.string().min(1),
-        pathname: z.string().min(1),
-        maxBytes: z.number().int().positive(),
+        filePath: z
+          .string()
+          .min(1)
+          .max(
+            MAX_SOURCE_MAP_FILE_PATH_LENGTH,
+            `filePath length exceeds maximum of ${MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters`,
+          ),
+        clientToken: z
+          .string()
+          .min(1)
+          .max(
+            MAX_PRESIGNED_CLIENT_TOKEN_LENGTH,
+            `clientToken length exceeds maximum of ${MAX_PRESIGNED_CLIENT_TOKEN_LENGTH} characters`,
+          ),
+        pathname: z
+          .string()
+          .min(1)
+          .max(
+            MAX_PRESIGNED_PATHNAME_LENGTH,
+            `pathname length exceeds maximum of ${MAX_PRESIGNED_PATHNAME_LENGTH} characters`,
+          ),
+        maxBytes: z
+          .number()
+          .int()
+          .positive()
+          .max(
+            MAX_SOURCE_MAP_FILE_SIZE,
+            `maxBytes exceeds maximum of ${MAX_SOURCE_MAP_FILE_SIZE} bytes (${MAX_SOURCE_MAP_FILE_SIZE / (1024 * 1024)} MiB)`,
+          ),
         /** Vercel Blob access mode — explicit in the contract per DISC-756. */
         access: z.enum(["public"]),
       }),
     )
     .min(1)
-    .max(100),
+    .max(
+      MAX_SOURCE_MAP_FILE_COUNT,
+      `files array exceeds maximum of ${MAX_SOURCE_MAP_FILE_COUNT} entries`,
+    ),
 });
 export type PresignedUploadResponse = z.infer<typeof PresignedUploadResponseSchema>;
 
-/** Request to finalize a presigned upload by registering the manifest. */
+/**
+ * Request to finalize a presigned upload by registering the manifest.
+ *
+ * Per-file `filePath` is bounded to {@link MAX_SOURCE_MAP_FILE_PATH_LENGTH}
+ * characters; `sizeBytes` is bounded to {@link MAX_SOURCE_MAP_FILE_SIZE}
+ * bytes. The `files` array carries between 1 and
+ * {@link MAX_SOURCE_MAP_FILE_COUNT} entries. These bounds mirror the
+ * backend canonical bounds (DISC-1562).
+ */
 export const SourceMapManifestRequestSchema = z.object({
   uploadId: z.string().uuid(),
   buildHash: BuildHashSchema,
   files: z
     .array(
       z.object({
-        filePath: z.string().min(1),
-        sizeBytes: z.number().int().positive(),
+        filePath: z
+          .string()
+          .min(1)
+          .max(
+            MAX_SOURCE_MAP_FILE_PATH_LENGTH,
+            `filePath length exceeds maximum of ${MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters`,
+          ),
+        sizeBytes: z
+          .number()
+          .int()
+          .positive()
+          .max(
+            MAX_SOURCE_MAP_FILE_SIZE,
+            `sizeBytes exceeds maximum of ${MAX_SOURCE_MAP_FILE_SIZE} bytes (${MAX_SOURCE_MAP_FILE_SIZE / (1024 * 1024)} MiB)`,
+          ),
         blobUrl: z.string().url(),
       }),
     )
     .min(1)
-    .max(100),
+    .max(
+      MAX_SOURCE_MAP_FILE_COUNT,
+      `files array exceeds maximum of ${MAX_SOURCE_MAP_FILE_COUNT} entries`,
+    ),
 });
 export type SourceMapManifestRequest = z.infer<typeof SourceMapManifestRequestSchema>;
 
