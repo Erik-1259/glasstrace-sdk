@@ -149,6 +149,92 @@ Minor and patch bumps are grouped; major bumps get individual PRs.
   validates that the packages still work when installed with minimum
   supported peer dependency versions.
 
+### Automated Linux-runner lockfile fixup
+
+Dependabot regenerates `package-lock.json` in its own runner whose npm
+view differs from this repo's CI runners (`ubuntu-latest` with the
+declared `npm@11.6.1`). The mismatch prunes platform-specific optional
+peer entries (e.g. `@emnapi/core`, `@emnapi/runtime`) from the lockfile
+Dependabot commits, and `npm ci` on Linux CI then rejects the PR with
+`EUSAGE: Missing: <package> from lock file` before the DISC-1317 drift
+guard ever runs.
+
+`.github/workflows/dependabot-lockfile-fixup.yml` triggers on every
+Dependabot pull request (events `opened`, `synchronize`, `reopened`),
+regenerates `package-lock.json` on `ubuntu-latest` under `npm@11.6.1`,
+and pushes a fixup commit back to the Dependabot branch. As a result,
+Dependabot PRs in this repo may carry a second auto-generated commit
+titled `chore(deps): regenerate package-lock.json on Linux runner` —
+this is expected and required for the PR to pass CI. Pushing a new
+commit to the branch (e.g. via Dependabot's "Recreate" or "Rebase"
+comment commands) or reopening a closed PR retriggers the workflow.
+
+#### Required repository secret
+
+The workflow prefers a fine-grained Personal Access Token (PAT) stored
+as the `DEPENDABOT_LOCKFILE_TOKEN` repository secret so the fixup push
+retriggers CI on the same cycle. Pushes authenticated by the default
+`secrets.GITHUB_TOKEN` do not retrigger workflow runs on `push` or
+`pull_request` (GitHub's loop-prevention rule), so without the PAT the
+corrected lockfile takes effect only on Dependabot's next rebase. The
+workflow falls back to `GITHUB_TOKEN` automatically when the secret is
+absent — the lockfile is still fixed; only the CI-retrigger latency is
+affected.
+
+> **Important:** GitHub exposes a separate secret store to workflow
+> runs triggered by Dependabot. The PAT must be added under repository
+> Settings → Secrets and variables → **Dependabot** (NOT under
+> Actions). Secrets stored under Actions are not visible to
+> Dependabot-triggered runs, so a misplaced secret silently disables
+> the CI-retrigger path.
+
+To create the secret:
+
+1. **Create a fine-grained PAT** at GitHub → Settings → Developer
+   settings → Fine-grained tokens. Set "Resource owner" to the
+   account that owns this repository, "Repository access" to
+   "Only select repositories" → `glasstrace-sdk`, and grant
+   "Repository permissions → Contents: Read and write" with no other
+   permissions. Set an expiration that fits your rotation cadence
+   (one year is the maximum).
+2. **Add the secret to the Dependabot secret store** at repository
+   Settings → Secrets and variables → **Dependabot** → "New
+   repository secret". Name it `DEPENDABOT_LOCKFILE_TOKEN`, paste the
+   PAT value, and save. Adding it under Settings → Secrets and
+   variables → Actions does NOT work — that store is not exposed to
+   Dependabot-triggered workflow runs.
+3. **Enable the repo-level setting** "Allow GitHub Actions to create
+   and approve pull requests" at Settings → Actions → General →
+   Workflow permissions. This is required for the workflow's
+   job-level `permissions: contents: write` to take effect on
+   Dependabot-triggered runs.
+
+#### Rotation runbook
+
+Fine-grained PATs expire (one-year maximum). Calendar a rotation
+reminder at issuance time. When rotation is due:
+
+1. Issue a new PAT with the same scope (`Contents: Read and write` on
+   `glasstrace-sdk` only).
+2. Update the `DEPENDABOT_LOCKFILE_TOKEN` secret under Settings →
+   Secrets and variables → **Dependabot** with the new PAT value.
+3. Revoke the prior PAT.
+
+If the PAT lapses without rotation, the workflow continues to run via
+the `GITHUB_TOKEN` fallback; you will only notice the latency on the
+next Dependabot rebase. Watch for the workflow's notice annotation
+"Pushed via GITHUB_TOKEN" in the workflow run's summary.
+
+#### Audit identity note
+
+When the workflow uses the PAT path, the `git push` event in the
+repository's audit log records the PAT-issuing account as the pusher.
+The on-commit author and committer are still set to
+`github-actions[bot]` so the commit reads as a bot in the PR's
+"Files changed" UI; the PAT identity is visible only to repo admins
+in the audit log. This trade-off is documented per the SDK-038
+fallback enumeration.
+
 ### Critical dependencies to watch
 
 These dependencies directly affect the SDK's public API or build
