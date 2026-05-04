@@ -16,6 +16,7 @@ import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
 import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, setAuthState, emitLifecycleEvent, registerSignalHandlers, resetLifecycleForTesting } from "./lifecycle.js";
 import { setCoexistenceState } from "./signal-handler.js";
 import { startRuntimeStateWriter, _resetRuntimeStateForTesting } from "./runtime-state.js";
+import { isProxyTracerProvider, isProxyTracer } from "./proxy-detection.js";
 
 /** Mask an API key for safe event emission — shows prefix + last 4 chars. */
 function maskKey(key: string): string {
@@ -119,11 +120,28 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // context manager installation below. If another tracing tool (Datadog,
     // Sentry, New Relic) has already registered a provider, the SDK must
     // NOT claim the global context manager slot — doing so would break
-    // the other tool's context propagation. The ProxyTracer check is
-    // synchronous; it sees any provider installed before registerGlasstrace()
-    // was called (the standard instrumentation order).
-    const existingProbe = otelApi.trace.getTracerProvider().getTracer("glasstrace-probe");
-    const anotherProviderRegistered = existingProbe.constructor.name !== "ProxyTracer";
+    // the other tool's context propagation.
+    //
+    // DISC-1556: classification is structural rather than constructor-name
+    // based. Next.js 16's production bundler renames `@opentelemetry/api`'s
+    // `ProxyTracerProvider` / `ProxyTracer` to short minified identifiers
+    // (`eN`/`ek`/etc.), which previously caused the SDK's own bundled proxy
+    // to be misidentified as an external provider — see
+    // `/tmp/recon-option-A-DISC-1556.md` and {@link isProxyTracerProvider}.
+    //
+    // OR-ordering edge case: if a third party extends a real provider
+    // (e.g. `BasicTracerProvider`) and stamps the four `getDelegate*`
+    // method names onto the subclass, `isProxyTracerProvider` returns
+    // `true`, but the probe tracer (returned by the subclass's real
+    // `getTracer()`) is a real `Tracer`, not a `ProxyTracer` —
+    // `isProxyTracer` returns `false`. The OR short-circuit then sets
+    // `anotherProviderRegistered = true`, which is the correct behavior
+    // for a real provider with a custom shape.
+    const existingTracerProvider = otelApi.trace.getTracerProvider();
+    const existingProbe = existingTracerProvider.getTracer("glasstrace-probe");
+    const anotherProviderRegistered =
+      !isProxyTracerProvider(existingTracerProvider) ||
+      !isProxyTracer(existingProbe, existingTracerProvider);
 
     // When another provider is already present, set coexistenceState BEFORE
     // installing the signal handler. Without this, the handler would see

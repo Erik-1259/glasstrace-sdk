@@ -14,6 +14,7 @@ import {
   tryAutoAttachGlasstraceProcessor,
 } from "./coexistence.js";
 import { setCoexistenceState, _resetCoexistenceStateForTesting } from "./signal-handler.js";
+import { isProxyTracerProvider, isProxyTracer } from "./proxy-detection.js";
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let resolvedApiKey: string = API_KEY_PENDING;
@@ -138,9 +139,27 @@ export async function configureOtel(
   // Step 2: Probe for an existing OTel provider BEFORE the Vercel/bare split.
   // This unified detection ensures coexistence works regardless of whether
   // @vercel/otel is installed (sdk-otel-coexistence.md Section 2.4).
+  //
+  // DISC-1556: classification is structural rather than constructor-name
+  // based. Next.js 16's production bundler renames `@opentelemetry/api`'s
+  // `ProxyTracerProvider` / `ProxyTracer` to short minified identifiers
+  // (`eN`/`ek`/etc.), which previously caused the SDK's own bundled proxy
+  // to be misidentified as an external provider — see
+  // `/tmp/recon-option-A-DISC-1556.md` and {@link isProxyTracerProvider}.
+  //
+  // OR-ordering edge case: if a third party extends a real provider (e.g.
+  // `BasicTracerProvider`) and stamps the four `getDelegate*` method
+  // names onto the subclass, `isProxyTracerProvider` returns `true`, but
+  // the probe tracer (returned by the subclass's real `getTracer()`) is
+  // a real `Tracer`, not a `ProxyTracer` — `isProxyTracer` returns
+  // `false`. The OR short-circuit then sets
+  // `anotherProviderRegistered = true`, which is the correct behavior
+  // for a real provider with a custom shape.
   const existingProvider = otelApi.trace.getTracerProvider();
   const probeTracer = existingProvider.getTracer("glasstrace-probe");
-  const anotherProviderRegistered = probeTracer.constructor.name !== "ProxyTracer";
+  const anotherProviderRegistered =
+    !isProxyTracerProvider(existingProvider) ||
+    !isProxyTracer(probeTracer, existingProvider);
 
   // Step 3: If another provider exists → shared coexistence path.
   // This is the DISC-493 Issues 2 and 4 fix: instead of silently giving up
