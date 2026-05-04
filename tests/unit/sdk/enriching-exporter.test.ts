@@ -1358,6 +1358,192 @@ describe("GlasstraceExporter", () => {
     });
   });
 
+  describe("String-shaped HTTP status code coercion (DISC-1551)", () => {
+    // OTel attribute values are typed `string | number | boolean | array`.
+    // Several real-world instrumentations (custom HTTP wrappers, edge
+    // runtimes that round-trip headers verbatim) emit `http.status_code`
+    // as strings. The exporter must coerce at the read site so the wire
+    // payload always carries a number and the inference block's
+    // `=== 200` / `=== 0` discriminators behave correctly.
+
+    it("writes a numeric wire payload when http.status_code arrives as a string", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          // Cast: OTel's AttributeValue is wider than the test helper's
+          // signature; a real instrumentation can emit a string here.
+          "http.status_code": "201" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(201);
+      expect(typeof enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe("number");
+    });
+
+    it("writes a numeric wire payload when http.response.status_code arrives as a string", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.response.status_code": "404" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(404);
+      expect(typeof enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe("number");
+    });
+
+    it("infers 500 when http.status_code is the string \"200\" on an ERROR span (DISC-1134 + DISC-1551)", () => {
+      // Without runtime coercion the inference block's
+      // `statusCode === 200` discriminator was `false` for `"200"`,
+      // and the exporter declined to promote a misreported success
+      // to 5xx — defeating the purpose of DISC-1134's inference for
+      // string-status spans.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR, message: "Internal Server Error" },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": "200" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("infers 500 when http.status_code is the string \"0\" on an ERROR span", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": "0" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    });
+
+    it("keeps the existing string-shaped error status code when already >= 400", () => {
+      // String "503" coerces to numeric 503; the inference block sees
+      // a non-zero, non-200 status and leaves it alone.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": "503" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(503);
+      expect(typeof enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe("number");
+    });
+
+    it("treats a non-numeric http.status_code string as undefined (drops from wire payload)", () => {
+      // Garbage attribute values must not poison the wire payload.
+      // The downstream consumer expects either a number or absence;
+      // a string of non-numeric junk would break ingestion type
+      // assumptions just as badly as a verbatim string-shaped
+      // numeric.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": "not-a-number" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBeUndefined();
+    });
+
+    it("falls back to http.response.status_code when http.status_code is a non-numeric string", () => {
+      // A custom adapter might emit garbage on the OTel-1.0 attribute
+      // and the right value on the OTel-1.20 attribute. The fallback
+      // chain must not short-circuit on the bad value.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": "garbage" as unknown as number,
+          "http.response.status_code": "204" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(204);
+    });
+
+    it("falls back to http.response.status_code when http.status_code is whitespace-only (Codex P2 / Copilot)", () => {
+      // `Number("   ")` is `0` — without the trim+length-0 guard,
+      // a whitespace-only attribute would coerce to `0`, blocking the
+      // `??` fallback to the OTel-1.20 attribute and emitting a `0`
+      // status on the wire payload. The whitespace-only string must
+      // be treated as invalid input so the fallback fires.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": "   " as unknown as number,
+          "http.response.status_code": "204" as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(204);
+    });
+
+    it("drops a whitespace-only http.status_code from the wire payload on an OK span", () => {
+      // Pre-fix: `Number("   ")` is `0`, so a whitespace-only attribute
+      // would land as `0` in the public wire attribute on a healthy
+      // OK span — a synthesized "successful zero" with no
+      // corresponding real status. Post-fix the attribute is dropped
+      // entirely; downstream consumers see absence (correct) rather
+      // than a fabricated `0`.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": "   " as unknown as number,
+        },
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBeUndefined();
+    });
+  });
+
   describe("Error detection via exception events (DISC-1204)", () => {
     it("infers 500 when exception event present and status is UNSET with status_code 200", () => {
       const { exporter, delegate } = createExporter();

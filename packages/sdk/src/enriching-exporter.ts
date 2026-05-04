@@ -9,6 +9,7 @@ import { recordSpansExported, recordSpansDropped } from "./health-collector.js";
 import { sdkLog } from "./console-capture.js";
 import { maybeShowServerActionNudge } from "./nudge/error-nudge.js";
 import {
+  coerceHttpStatus,
   isHttpErrorStatus,
   prepareErrorResponseBody,
 } from "./error-response-body.js";
@@ -276,9 +277,24 @@ export class GlasstraceExporter implements SpanExporter {
       }
 
       // glasstrace.http.status_code
+      //
+      // OTel attribute values are typed
+      // `string | number | boolean | (string | number | boolean)[]`.
+      // Several real-world instrumentations (custom HTTP wrappers,
+      // edge runtimes that round-trip headers verbatim, some community
+      // Node adapters) emit `http.status_code` and
+      // `http.response.status_code` as strings. A TypeScript `as number`
+      // cast applies no runtime coercion, so a string-shaped `"200"`
+      // would (a) flow verbatim into the wire payload — downstream
+      // ingestion and UI assume numeric — and (b) defeat the inference
+      // block below (`statusCode === 200` is `false` for `"200"`),
+      // silently failing the Next.js timing-race promotion
+      // (DISC-1134 / DISC-1204) on string-status spans (DISC-1551).
+      // `coerceHttpStatus` returns `number | undefined` at runtime, not
+      // just at the TS type level.
       const statusCode =
-        (attrs["http.status_code"] as number | undefined) ??
-        (attrs["http.response.status_code"] as number | undefined);
+        coerceHttpStatus(attrs["http.status_code"]) ??
+        coerceHttpStatus(attrs["http.response.status_code"]);
       if (statusCode !== undefined) {
         extra[ATTR.HTTP_STATUS_CODE] = statusCode;
       }

@@ -62,33 +62,91 @@ export const ERROR_STATUS_MIN = 400;
 export const ERROR_STATUS_MAX = 599;
 
 /**
+ * Coerces an OTel attribute value to an HTTP status number, or returns
+ * `undefined` when the value is not a finite numeric (or numeric-string)
+ * representation of a status.
+ *
+ * The OpenTelemetry attribute spec allows
+ * `string | number | boolean | (string | number | boolean)[]`. Several
+ * real-world instrumentations (custom HTTP wrappers, edge runtimes that
+ * round-trip headers verbatim, some community Node adapters) emit
+ * `http.status_code` and `http.response.status_code` as strings (e.g.
+ * `"500"`). The SDK exporter previously read these via TypeScript
+ * `as number | undefined` casts that perform no runtime coercion, so a
+ * string-shaped `"200"` would (a) flow verbatim into the public
+ * `glasstrace.http.status_code` wire attribute (which downstream
+ * ingestion expects to be numeric) and (b) fail the
+ * `statusCode === 200` comparison that the Next.js timing-race
+ * inference block (DISC-1134, DISC-1204) relies on. This helper closes
+ * both gaps at the read site.
+ *
+ * Postel's Law: be liberal in what we accept. The behavior is identical
+ * to {@link isHttpErrorStatus}'s coercion step (the latter delegates
+ * here for symmetry), and `Number()`'s semantics determine string
+ * acceptance:
+ *
+ *   - Numbers pass through when {@link Number.isFinite} is `true`.
+ *     `NaN` and `±Infinity` return `undefined`.
+ *   - Strings are trimmed and rejected when the trimmed value is
+ *     empty (so `""`, `"   "`, `"\t\n"` all return `undefined`). The
+ *     trimmed value is then coerced via `Number(value)` and accepted
+ *     when the result is finite. `"500"`, `" 500 "`, `"5e2"`, `"0x1F4"`
+ *     all yield `500`.
+ *   - Empty / whitespace-only strings, non-numeric strings (`"foo"`,
+ *     `"4xx"`), `null`, `undefined`, booleans, objects, arrays, and
+ *     symbols all return `undefined`.
+ *
+ * The whitespace-only guard matters: `Number("   ") === 0`, so without
+ * the trim check a whitespace-only attribute would (a) emit a numeric
+ * `0` into the wire payload — masking a fallback to
+ * `http.response.status_code` via `??` — and (b) trigger the
+ * inference block's `statusCode === 0` discriminator, synthesizing a
+ * 500 from blank input. Treat blank strings the same as the empty
+ * string and the other invalid shapes.
+ *
+ * Note: this helper coerces to a numeric *type*; it does not validate
+ * the value lies in any HTTP-status range. The caller is responsible
+ * for any further range checks (e.g. {@link isHttpErrorStatus} for the
+ * 4xx/5xx capture gate).
+ */
+export function coerceHttpStatus(value: unknown): number | undefined {
+  let numeric: number;
+  if (typeof value === "number") {
+    numeric = value;
+  } else if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return undefined;
+    numeric = Number(trimmed);
+  } else {
+    return undefined;
+  }
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+/**
  * Returns `true` when the supplied status code is an HTTP error status
  * (4xx or 5xx). Non-finite, non-numeric, and out-of-range values yield
  * `false`. The status comes from OTel attribute values which are typed
  * `unknown`-ish in practice (string | number | boolean | array), so the
  * caller may pass anything and rely on this guard.
  *
- * Numeric strings (e.g. `"500"`) are coerced before the range check.
- * The OTel attribute spec allows `string | number | boolean | array`,
- * and several real-world instrumentations (custom HTTP wrappers, edge
- * runtimes that round-trip headers verbatim) emit `http.status_code`
- * and `http.response.status_code` as strings. Without coercion the
- * exporter would silently drop `glasstrace.error.response_body` on
- * those spans, which is a false negative — Postel's Law: be liberal in
- * what we accept. `Number(non-numeric)` returns `NaN`, which fails the
- * `Number.isFinite` check, so `"foo"` still yields `false`. Empty
- * strings coerce to `0`, which is out of range and also yields `false`.
+ * Numeric strings (e.g. `"500"`) are coerced via {@link coerceHttpStatus}
+ * before the range check. The OTel attribute spec allows
+ * `string | number | boolean | array`, and several real-world
+ * instrumentations (custom HTTP wrappers, edge runtimes that round-trip
+ * headers verbatim) emit `http.status_code` and
+ * `http.response.status_code` as strings. Without coercion the exporter
+ * would silently drop `glasstrace.error.response_body` on those spans,
+ * which is a false negative — Postel's Law: be liberal in what we accept.
+ * `Number(non-numeric)` returns `NaN`, which fails the
+ * `Number.isFinite` check, so `"foo"` still yields `false`. Empty and
+ * whitespace-only strings are rejected by `coerceHttpStatus` before
+ * reaching the range check, so they cannot coerce to `0` and trigger an
+ * out-of-range `false` via the numeric path.
  */
 export function isHttpErrorStatus(status: unknown): boolean {
-  let numeric: number;
-  if (typeof status === "number") {
-    numeric = status;
-  } else if (typeof status === "string" && status.length > 0) {
-    numeric = Number(status);
-  } else {
-    return false;
-  }
-  if (!Number.isFinite(numeric)) return false;
+  const numeric = coerceHttpStatus(status);
+  if (numeric === undefined) return false;
   return numeric >= ERROR_STATUS_MIN && numeric <= ERROR_STATUS_MAX;
 }
 
