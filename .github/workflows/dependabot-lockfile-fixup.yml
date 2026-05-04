@@ -1,0 +1,325 @@
+name: Dependabot Lockfile Fixup
+
+# =============================================================================
+# Dependabot lockfile regeneration workflow.
+# =============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# Dependabot regenerates `package-lock.json` in its own runner whose npm
+# view differs from this repo's CI runners (`ubuntu-latest` with the
+# declared `npm@11.6.1`). The mismatch prunes platform-specific optional
+# peer entries (for example `@emnapi/core@1.10.0`, `@emnapi/runtime@1.10.0`)
+# from the lockfile Dependabot commits, and `npm ci` on the Linux CI
+# runner then rejects the PR with `EUSAGE: Missing: <package>@<version>
+# from lock file` before the DISC-1317 drift guard ever runs.
+#
+# This workflow regenerates the lockfile on the same OS and npm version
+# CI validates against, then force-pushes the corrected lockfile back to
+# the Dependabot branch. After the push, CI sees a Linux-canonical
+# lockfile and proceeds normally. See SDK-038 / DISC-1361 for the full
+# decision rationale.
+#
+# This generalizes the pattern in `update-transitive-dep.yml`
+# (workflow_dispatch-triggered manual lockfile regeneration) to a
+# Dependabot-triggered automated path.
+#
+# CI RETRIGGER NOTE
+# -----------------
+# Pushes authenticated by `secrets.GITHUB_TOKEN` do NOT trigger workflow
+# runs that listen on `push` or `pull_request` (GitHub's loop-prevention
+# rule, also documented in `update-transitive-dep.yml`'s header). To
+# make the corrected lockfile take effect on the same cycle rather than
+# waiting for Dependabot's next rebase, this workflow prefers a
+# fine-grained PAT stored as `secrets.DEPENDABOT_LOCKFILE_TOKEN` for the
+# push. When that secret is unset, the workflow falls back to
+# `secrets.GITHUB_TOKEN`; the lockfile is still fixed, but CI on the
+# corrected branch retriggers only on Dependabot's next rebase.
+#
+# IMPORTANT: GitHub exposes a different secret store to workflow runs
+# triggered by Dependabot than to other runs. The
+# `DEPENDABOT_LOCKFILE_TOKEN` secret MUST be added under
+# Settings → Secrets and variables → **Dependabot** (NOT under Actions),
+# otherwise `secrets.DEPENDABOT_LOCKFILE_TOKEN` resolves empty in the
+# actual Dependabot-triggered run and the workflow always falls back to
+# `GITHUB_TOKEN`. See CONTRIBUTING.md → "Reviewing Dependabot PRs" →
+# "Automated Linux-runner lockfile fixup" for the PAT scope, the
+# Dependabot-secret-store setup steps, the rotation runbook, and the
+# graceful-degradation contract.
+#
+# CONCURRENCY GUARANTEES
+# ----------------------
+# Dependabot's own rebase loop may run concurrently with this workflow.
+# Three layers protect against lost-update writes:
+#   1. `concurrency:` block keyed on the PR number with
+#      `cancel-in-progress: true` — a Dependabot rebase that triggers
+#      a fresh fixup-workflow run cancels the in-flight run.
+#   2. Pre-push HEAD-equality check — compares `git ls-remote origin
+#      refs/heads/<branch>` against the SHA the workflow checked out
+#      and aborts if remote has advanced.
+#   3. `git push --force-with-lease=refs/heads/<branch>:<expected-sha>`
+#      — even if (1) and (2) lose the race, the push fails
+#      non-destructively rather than clobbering the Dependabot rebase.
+#
+# SCOPE / SAFETY
+# --------------
+# - Trigger guard: `if: github.event.pull_request.user.login ==
+#   'dependabot[bot]'` so the workflow body runs only on Dependabot-
+#   authored PRs. Forks, contributor PRs, and human-authored branches
+#   are unaffected. The PR author is constant across `opened`,
+#   `synchronize`, and `reopened` events, so the guard fires correctly
+#   on a human-initiated reopen of a Dependabot PR — `github.actor`
+#   would resolve to the maintainer who clicked "Reopen" and skip the
+#   run, leaving stale lockfiles unfixed until Dependabot's next push.
+# - `permissions: contents: write` is declared at the job level (not
+#   the workflow level), so the elevated scope is granted only to the
+#   regeneration job.
+# - The PR branch's `package.json` scripts are untrusted input. The
+#   workflow runs only `npm install --package-lock-only --no-audit`,
+#   which does not execute lifecycle scripts (per the npm 11.x docs).
+#   It does not run `npm ci`, `npm install` without
+#   `--package-lock-only`, `npm run`, or any code from the PR branch.
+# - This trigger is `pull_request`, not `pull_request_target`, so the
+#   workflow definition that runs is the one on `main`, not the one on
+#   the PR branch — a Dependabot PR cannot edit this workflow file in
+#   the same PR that triggers it. (Dependabot does not edit workflow
+#   files except in the `github-actions` ecosystem, where the PR's
+#   diff is action-version pinning only and is reviewed by a human
+#   before merge.)
+#
+# RELATIONSHIP TO DISC-1317 DRIFT GUARD
+# -------------------------------------
+# This workflow defends against the DISC-1361 failure (committed
+# lockfile is missing platform-optional peers; `npm ci` itself fails).
+# The DISC-1317 drift guard (`git diff --exit-code -- package-lock.json`
+# after `npm ci` in `ci.yml`) defends against post-`npm ci` mutation.
+# The two defenses cover disjoint failure modes and remain
+# belt-and-suspenders. SDK-038 §C5 documents the interaction in detail.
+# =============================================================================
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Concurrency block keyed on the PR number cancels an in-flight run
+# when a Dependabot rebase triggers a fresh workflow run, so the two
+# never race to the push step. `cancel-in-progress: true` is the first
+# of three concurrency-control layers (HEAD-equality check + force-
+# with-lease push are the other two; both live in the regenerate job).
+concurrency:
+  group: dependabot-lockfile-fixup-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Workflow-level permissions stay at read-only. `contents: write` is
+# granted only to the `regenerate` job below.
+permissions:
+  contents: read
+
+jobs:
+  regenerate:
+    name: Regenerate lockfile on Linux
+    # Trigger guard: only Dependabot-authored PRs invoke this body.
+    # Forks, human PRs, and any other author are skipped without
+    # consuming runner time beyond the job-startup overhead. Gating on
+    # `pull_request.user.login` (the PR author) rather than
+    # `github.actor` (the user who triggered the event) ensures the
+    # guard still fires on a human-initiated `reopened` event.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Job-level grant. GitHub downgrades secrets.GITHUB_TOKEN to
+      # read-only on Dependabot-triggered runs as a "pwn-request"
+      # defense; the explicit job-level write grant is the documented
+      # escape. The repo setting "Allow GitHub Actions to create and
+      # approve pull requests" must also be enabled (Settings →
+      # Actions → General). See SDK-038 §O1 Cons for details.
+      contents: write
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v6
+        with:
+          # `github.event.pull_request.head.ref` is the Dependabot
+          # branch name (e.g. `dependabot/npm_and_yarn/...`). Checking
+          # out the PR head rather than the merge ref keeps the
+          # regenerated lockfile committed to the original branch.
+          ref: ${{ github.event.pull_request.head.ref }}
+          # Prefer the PAT for checkout when available so the
+          # subsequent push uses the same identity. When the PAT is
+          # unset, the default GITHUB_TOKEN is used and the push falls
+          # back accordingly.
+          #
+          # IMPORTANT: GitHub exposes a separate secret store to
+          # Dependabot-triggered runs. `DEPENDABOT_LOCKFILE_TOKEN` MUST
+          # be added under repository Settings → Secrets and variables
+          # → Dependabot (NOT Actions), otherwise this expression
+          # always resolves to GITHUB_TOKEN at runtime and the
+          # CI-retrigger path is silently disabled. See CONTRIBUTING.md
+          # for the setup steps.
+          token: ${{ secrets.DEPENDABOT_LOCKFILE_TOKEN || secrets.GITHUB_TOKEN }}
+          # Full history is unnecessary for a lockfile regeneration;
+          # the default shallow clone is sufficient.
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Pin to 22.15 to match release.yml and update-transitive-dep.yml,
+          # avoiding Node 22.22.2's broken bundled npm. See DISC-443.
+          node-version: 22.15
+          cache: npm
+
+      - name: Pin npm to declared packageManager version
+        # The repo's package.json declares `"packageManager":
+        # "npm@11.6.1"`. Aligning the workflow's npm with the CI
+        # runner's npm is the load-bearing step — it eliminates the
+        # cross-npm-version optional-peer-pruning failure that
+        # DISC-1361 documents.
+        run: npm install -g npm@11.6.1
+
+      - name: Capture checkout SHA
+        id: checkout
+        # The pre-push HEAD-equality check (the second concurrency-
+        # control layer) compares this captured SHA against
+        # `git ls-remote` immediately before the push. The push step
+        # also passes this SHA to `--force-with-lease`.
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Checked out SHA: $sha"
+
+      - name: Regenerate lockfile
+        # `--package-lock-only` updates package-lock.json without
+        # writing to node_modules and without running lifecycle
+        # scripts. `--no-audit` skips the audit pass; the CI run that
+        # follows on the corrected branch performs `npm audit
+        # --audit-level=high` separately.
+        run: npm install --package-lock-only --no-audit
+
+      - name: Detect lockfile diff
+        id: diff
+        # `git diff --quiet` exits 0 when there is no diff, 1 when
+        # there is. `set +e` lets us inspect the exit code rather
+        # than failing the step.
+        run: |
+          set +e
+          git diff --quiet -- package-lock.json
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "No lockfile changes needed."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Lockfile differs after Linux regeneration."
+            git diff --stat -- package-lock.json
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify remote tip has not advanced
+        id: verify
+        if: steps.diff.outputs.changed == 'true'
+        # Pre-push HEAD-equality check (concurrency-control layer 2).
+        # If Dependabot rebased the branch while we were regenerating,
+        # the remote tip will have advanced past the SHA we captured.
+        # Abort cleanly and let the next workflow run (triggered by the
+        # rebase via `concurrency: cancel-in-progress`) handle it.
+        #
+        # `head.ref` is passed via env (not interpolated into the shell
+        # command line) so a malicious branch name with shell
+        # metacharacters cannot inject. GitHub validates branch names
+        # against a strict character set, but defense-in-depth here
+        # follows the GitHub Actions security hardening guidance for
+        # untrusted input from PR contexts.
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EXPECTED_SHA: ${{ steps.checkout.outputs.sha }}
+        run: |
+          set -euo pipefail
+          remote_sha=$(git ls-remote origin "refs/heads/${HEAD_REF}" | cut -f1)
+          if [ -z "$remote_sha" ]; then
+            echo "::error::Remote branch not found for the PR head ref."
+            echo "safe_to_push=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$remote_sha" != "$EXPECTED_SHA" ]; then
+            echo "::warning::Remote tip advanced during regeneration. Aborting push; the next workflow run will handle the new tip."
+            echo "safe_to_push=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Remote tip matches checkout SHA."
+          echo "safe_to_push=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push lockfile fix
+        id: push
+        if: steps.diff.outputs.changed == 'true' && steps.verify.outputs.safe_to_push == 'true'
+        # `actions/checkout@v6` was invoked above with the chosen
+        # token (PAT when available, GITHUB_TOKEN otherwise) and its
+        # default `persist-credentials: true`, so `origin` is already
+        # configured with an `http.extraheader` carrying that token.
+        # `git push origin` therefore authenticates with the same
+        # identity that fetched the branch — no need to embed the
+        # token in a URL on the command line, no `/proc` exposure on
+        # the runner, and no need to echo or stage the secret in a
+        # shell variable.
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EXPECTED_SHA: ${{ steps.checkout.outputs.sha }}
+        # The commit identity is set to github-actions[bot] regardless
+        # of the underlying push token, so the on-commit author reads
+        # as the bot. Auditors who inspect the push event in the
+        # repo's audit log will see the PAT-issuing account when the
+        # PAT path is used; CONTRIBUTING.md documents this.
+        #
+        # `--force-with-lease=<ref>:<expected-sha>` is the third
+        # concurrency-control layer: even if layers (1) and (2) lose
+        # the race, the push fails non-destructively rather than
+        # clobbering a concurrent Dependabot rebase. NOT bare `--force`.
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          # Build the commit message via printf so YAML / shell
+          # indentation does not leak into the message body. The
+          # trailing reference to SDK-038 and DISC-1361 lets a future
+          # auditor trace the commit back to the brief and discovery
+          # without checking out this workflow file.
+          commit_message=$(printf '%s\n\n%s\n%s\n%s\n' \
+            'chore(deps): regenerate package-lock.json on Linux runner' \
+            'Auto-generated by .github/workflows/dependabot-lockfile-fixup.yml' \
+            'to canonicalize the lockfile under the declared packageManager' \
+            '(npm@11.6.1) on ubuntu-latest. See SDK-038 / DISC-1361.')
+          git commit -m "$commit_message"
+          git push \
+            --force-with-lease="refs/heads/${HEAD_REF}:${EXPECTED_SHA}" \
+            origin \
+            "HEAD:refs/heads/${HEAD_REF}"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize outcome
+        if: always()
+        env:
+          DIFF_CHANGED: ${{ steps.diff.outputs.changed }}
+          SAFE_TO_PUSH: ${{ steps.verify.outputs.safe_to_push }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          PAT_SET: ${{ secrets.DEPENDABOT_LOCKFILE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "${DIFF_CHANGED:-}" != "true" ]; then
+            echo "No lockfile change required; nothing pushed."
+            exit 0
+          fi
+          if [ "${SAFE_TO_PUSH:-}" != "true" ]; then
+            echo "::warning::Lockfile diff detected but push was skipped because the remote tip advanced during regeneration."
+            exit 0
+          fi
+          if [ "${PUSHED:-}" != "true" ]; then
+            echo "::warning::Push step did not record success; review prior steps."
+            exit 0
+          fi
+          echo "Pushed lockfile fixup to the Dependabot branch."
+          if [ "${PAT_SET}" = "true" ]; then
+            echo "Pushed via DEPENDABOT_LOCKFILE_TOKEN; CI on the corrected branch should retrigger on the same cycle."
+          else
+            echo "::notice::Pushed via GITHUB_TOKEN. CI on the corrected branch will retrigger only on Dependabot's next rebase. Set DEPENDABOT_LOCKFILE_TOKEN to retrigger CI on the same cycle. See CONTRIBUTING.md."
+          fi
