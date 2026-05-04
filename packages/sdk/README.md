@@ -280,7 +280,7 @@ file directly and no longer needs the runtime handler.
 
 ## Subpath exports
 
-`@glasstrace/sdk` ships three public entries:
+`@glasstrace/sdk` ships four public entries:
 
 - **`@glasstrace/sdk`** — primary import site. Use from
   `instrumentation.ts` (runtime instrumentation) and `next.config.ts`
@@ -298,6 +298,8 @@ file directly and no longer needs the runtime handler.
   condition; non-Node runtimes (workerd, edge-light) fail cleanly at
   module resolution rather than at evaluation.
 - **`@glasstrace/sdk/drizzle`** — Drizzle ORM adapter.
+- **`@glasstrace/sdk/trpc`** — tRPC middleware-chain instrumentation.
+  See "tRPC middleware instrumentation" below.
 
 The source-map and import-graph helpers previously reachable from the
 `@glasstrace/sdk` root specifier have moved to `@glasstrace/sdk/node`
@@ -382,6 +384,57 @@ guards rather than trusting them. If you need a symbol that is currently
 on the Node-only side to become edge-safe, the right move is to remove
 the `process` and Node built-in reaches from the symbol's transitive
 closure, not to add a runtime guard.
+
+## tRPC middleware instrumentation
+
+The `@glasstrace/sdk/trpc` subpath exposes `tracedMiddleware`, a thin
+wrapper that turns a user-supplied tRPC middleware function into a
+span-emitting middleware function. Each invocation opens a child span
+named `options.name` under the active OTel context (typically the HTTP
+server span), so middleware steps land as children of the HTTP span
+without manual context plumbing. Errors thrown from the middleware
+body are recorded via `span.recordException` and propagate unchanged;
+short-circuit `{ ok: false, error }` results mark the span `ERROR`
+without recording an exception.
+
+`@trpc/server` is declared as an optional peer dependency
+(`^10.0.0 || ^11.0.0`); projects that do not use tRPC pay no runtime
+cost because the subpath is excluded from the root barrel and is
+tree-shakeable.
+
+```ts
+// trpc.ts — your project
+import { initTRPC, TRPCError } from "@trpc/server";
+import { tracedMiddleware } from "@glasstrace/sdk/trpc";
+
+interface MyContext { session?: { userId: string }; tier?: string }
+const t = initTRPC.context<MyContext>().create();
+
+const isAuthed = t.middleware(
+  tracedMiddleware({ name: "isAuthed" }, async ({ ctx, next }) => {
+    if (!ctx.session) throw new TRPCError({ code: "UNAUTHORIZED" });
+    return next({ ctx: { ...ctx, session: ctx.session } });
+  }),
+);
+
+const isPro = t.middleware(
+  tracedMiddleware({ name: "isPro" }, async ({ ctx, next }) => {
+    if (ctx.tier !== "pro") throw new TRPCError({ code: "FORBIDDEN" });
+    return next();
+  }),
+);
+
+export const proProcedure = t.procedure.use(isAuthed).use(isPro);
+```
+
+The wrapped function preserves the original middleware's call-site type,
+so tRPC's procedure-builder context narrowing flows through unchanged.
+The existing `glasstrace.trpc.procedure` attribute (set on the parent
+HTTP span) is not duplicated on the middleware child spans — middleware
+spans carry only `trpc.path`, `trpc.type`, and any caller-supplied
+`options.attributes`. Caller-supplied attributes are forwarded as-is;
+the SDK does not redact them, so callers must avoid placing tokens or
+credentials in `options.attributes`.
 
 ## Security
 
