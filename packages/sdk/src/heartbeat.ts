@@ -150,9 +150,9 @@ export function checkShutdownMarker(projectRoot?: string): {
   let fsSync: typeof import("node:fs") | null = null;
   let pathSync: typeof import("node:path") | null = null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the surrounding try/catch (line 152) which returns `{ triggered: false }` on the tsup `__require` throw, identical to the no-marker branch (DISC-1555).
     fsSync = require("node:fs") as typeof import("node:fs");
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the same try/catch as the preceding `node:fs` require; throw collapses to `{ triggered: false }` (DISC-1555).
     pathSync = require("node:path") as typeof import("node:path");
   } catch {
     return { triggered: false };

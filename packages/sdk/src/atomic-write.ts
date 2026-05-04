@@ -199,7 +199,7 @@ function loadFsSync(): typeof import("node:fs") {
     return fsSyncCache;
   }
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the surrounding try/catch which caches `null` and surfaces a clean Error on subsequent calls; consumers gate with `isSyncFsAvailable()` (DISC-1555).
     fsSyncCache = require("node:fs") as typeof import("node:fs");
     return fsSyncCache;
   } catch {

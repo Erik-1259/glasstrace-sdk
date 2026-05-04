@@ -310,6 +310,47 @@ Two notes on common pitfalls:
    the prior tarball is stale; either delete the destination directory
    between packs or refer to the new file name explicitly.
 
+## Synchronous `require("node:*")` discipline
+
+The SDK is published as both CJS and ESM and is loaded as ESM under
+common Next.js setups (`next dev` with Turbopack, `next start` with
+the production Node server). Under ESM, tsup's bundled CJS-
+compatibility shim cannot resolve `require()` from an ESM scope and
+throws at the call site. DISC-1555 documented the failure mode and the
+fix landed in `runtime-state.ts`; the Wave 10 10G audit
+(`audit-DISC-1563.md` in the same PR that introduced this rule)
+classified every other call site shipping at the time and confirmed
+each one was guarded.
+
+The custom ESLint rule `glasstrace/no-unguarded-node-require` flags
+new synchronous `require("node:*")` calls (and the chained
+`createRequire(import.meta.url)("node:*")` workaround) anywhere in
+`packages/sdk/src/`. The rule is intentionally strict and does not try
+to recognise specific guard patterns structurally — that judgement
+belongs to a code review. Suppress at the call site with a one-line
+disable directive that names the guard:
+
+```ts
+// eslint-disable-next-line glasstrace/no-unguarded-node-require -- guarded by the surrounding try/catch which returns null on the tsup __require throw (DISC-1555).
+const fs = require("node:fs") as typeof import("node:fs");
+```
+
+When you add a new sync `require("node:*")` call site:
+
+1. Wrap the call in a `try { ... } catch { ... }` that converts the
+   throw into a benign return value (`null`, `false`, or a clean
+   user-facing `Error`). Do **not** let the raw "Dynamic require of
+   '...' is not supported" message reach the user.
+2. Add a regression test that simulates the failure mode by mocking
+   the requested module to throw — see
+   `tests/unit/sdk/non-node-resilience.test.ts` for the canonical
+   pattern (`vi.doMock("node:fs", () => { throw new Error("...") })`).
+3. Suppress the lint rule with the disable directive above; name the
+   guard pattern in plain English in the trailing `--` comment.
+4. Prefer async `await import("node:*")` whenever the call site is
+   already async — it lowers cleanly under tsup ESM output and is
+   not subject to the `__require` failure mode.
+
 ## Reporting Issues
 
 - **Bugs:** Open a GitHub issue with reproduction steps

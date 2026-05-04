@@ -28,9 +28,9 @@ function sanitize(input: string): string {
  */
 function markerFileExists(): boolean {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the surrounding try/catch in `markerFileExists`; throw returns `false`, the nudge proceeds as if no marker exists (DISC-1555).
     const fs = require("node:fs") as typeof import("node:fs");
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the same try/catch as the preceding `node:fs` require (DISC-1555).
     const path = require("node:path") as typeof import("node:path");
     const markerPath = path.join(process.cwd(), ".glasstrace", "mcp-connected");
     return fs.existsSync(markerPath);
