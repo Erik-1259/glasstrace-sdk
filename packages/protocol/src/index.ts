@@ -63,6 +63,9 @@ export {
 export {
   GLASSTRACE_ATTRIBUTE_NAMES,
   DEFAULT_CAPTURE_CONFIG,
+  MAX_SOURCE_MAP_FILE_PATH_LENGTH,
+  MAX_SOURCE_MAP_FILE_SIZE,
+  MAX_SOURCE_MAP_FILE_COUNT,
 } from "./constants.js";
 
 // --- Session ID derivation ---

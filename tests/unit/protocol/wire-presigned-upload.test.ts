@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  MAX_SOURCE_MAP_FILE_COUNT,
+  MAX_SOURCE_MAP_FILE_PATH_LENGTH,
+  MAX_SOURCE_MAP_FILE_SIZE,
   PresignedUploadRequestSchema,
   PresignedUploadResponseSchema,
   SourceMapManifestRequestSchema,
@@ -7,6 +10,15 @@ import {
 } from "../../../packages/protocol/src/index.js";
 
 const validBuildHash = "abc123";
+
+/** Build a `filePath` string of exactly `length` characters. */
+function filePathOfLength(length: number): string {
+  // The leading "dist/" prefix is realistic; pad with "a" to reach `length`.
+  if (length <= 0) return "";
+  const prefix = "dist/";
+  if (length <= prefix.length) return prefix.slice(0, length);
+  return prefix + "a".repeat(length - prefix.length);
+}
 
 describe("PresignedUploadRequestSchema", () => {
   it("parses a valid request with 1 file", () => {
@@ -66,6 +78,102 @@ describe("PresignedUploadRequestSchema", () => {
       files: [{ filePath: "dist/main.js.map", sizeBytes: -100 }],
     });
     expect(result.success).toBe(false);
+  });
+
+  // --- DISC-1562: backend canonical max() bounds ---
+
+  it("accepts filePath at the maximum allowed length (boundary)", () => {
+    const result = PresignedUploadRequestSchema.safeParse({
+      buildHash: validBuildHash,
+      files: [
+        {
+          filePath: filePathOfLength(MAX_SOURCE_MAP_FILE_PATH_LENGTH),
+          sizeBytes: 1024,
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects filePath one character above the maximum with an informative message", () => {
+    const result = PresignedUploadRequestSchema.safeParse({
+      buildHash: validBuildHash,
+      files: [
+        {
+          filePath: filePathOfLength(MAX_SOURCE_MAP_FILE_PATH_LENGTH + 1),
+          sizeBytes: 1024,
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `filePath length exceeds maximum of ${MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters`,
+      );
+    }
+  });
+
+  it("accepts sizeBytes at the maximum allowed file size (boundary)", () => {
+    const result = PresignedUploadRequestSchema.safeParse({
+      buildHash: validBuildHash,
+      files: [
+        { filePath: "dist/main.js.map", sizeBytes: MAX_SOURCE_MAP_FILE_SIZE },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects sizeBytes one byte above the maximum file size with an informative message", () => {
+    const result = PresignedUploadRequestSchema.safeParse({
+      buildHash: validBuildHash,
+      files: [
+        {
+          filePath: "dist/main.js.map",
+          sizeBytes: MAX_SOURCE_MAP_FILE_SIZE + 1,
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `sizeBytes exceeds maximum of ${MAX_SOURCE_MAP_FILE_SIZE} bytes (${MAX_SOURCE_MAP_FILE_SIZE / (1024 * 1024)} MiB)`,
+      );
+    }
+  });
+
+  it("accepts a files array of exactly the maximum count (boundary)", () => {
+    const files = Array.from({ length: MAX_SOURCE_MAP_FILE_COUNT }, (_, i) => ({
+      filePath: `dist/chunk-${i}.js.map`,
+      sizeBytes: 1024,
+    }));
+    const result = PresignedUploadRequestSchema.safeParse({
+      buildHash: validBuildHash,
+      files,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a files array exceeding the maximum count with an informative message", () => {
+    const files = Array.from(
+      { length: MAX_SOURCE_MAP_FILE_COUNT + 1 },
+      (_, i) => ({
+        filePath: `dist/chunk-${i}.js.map`,
+        sizeBytes: 1024,
+      }),
+    );
+    const result = PresignedUploadRequestSchema.safeParse({
+      buildHash: validBuildHash,
+      files,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `files array exceeds maximum of ${MAX_SOURCE_MAP_FILE_COUNT} entries`,
+      );
+    }
   });
 });
 
@@ -184,6 +292,175 @@ describe("PresignedUploadResponseSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  // --- DISC-1562: backend canonical max() bounds ---
+
+  it("accepts filePath at the maximum allowed length (boundary)", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          filePath: filePathOfLength(MAX_SOURCE_MAP_FILE_PATH_LENGTH),
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects filePath one character above the maximum with an informative message", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          filePath: filePathOfLength(MAX_SOURCE_MAP_FILE_PATH_LENGTH + 1),
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `filePath length exceeds maximum of ${MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters`,
+      );
+    }
+  });
+
+  it("accepts clientToken at the maximum allowed length (boundary)", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          clientToken: "a".repeat(2048),
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects clientToken one character above the maximum with an informative message", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          clientToken: "a".repeat(2049),
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        "clientToken length exceeds maximum of 2048 characters",
+      );
+    }
+  });
+
+  it("accepts pathname at the maximum allowed length (boundary)", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          pathname: "/" + "a".repeat(1023),
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects pathname one character above the maximum with an informative message", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          pathname: "/" + "a".repeat(1024),
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        "pathname length exceeds maximum of 1024 characters",
+      );
+    }
+  });
+
+  it("accepts maxBytes at the maximum allowed file size (boundary)", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          maxBytes: MAX_SOURCE_MAP_FILE_SIZE,
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects maxBytes one byte above the maximum file size with an informative message", () => {
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files: [
+        {
+          ...validResponse.files[0],
+          maxBytes: MAX_SOURCE_MAP_FILE_SIZE + 1,
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `maxBytes exceeds maximum of ${MAX_SOURCE_MAP_FILE_SIZE} bytes (${MAX_SOURCE_MAP_FILE_SIZE / (1024 * 1024)} MiB)`,
+      );
+    }
+  });
+
+  it("accepts a files array of exactly the maximum count (boundary)", () => {
+    const files = Array.from({ length: MAX_SOURCE_MAP_FILE_COUNT }, (_, i) => ({
+      filePath: `dist/chunk-${i}.js.map`,
+      clientToken: `tok_${i}`,
+      pathname: `/uploads/abc123/chunk-${i}.js.map`,
+      maxBytes: 5_242_880,
+      access: "public" as const,
+    }));
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a files array exceeding the maximum count with an informative message", () => {
+    const files = Array.from(
+      { length: MAX_SOURCE_MAP_FILE_COUNT + 1 },
+      (_, i) => ({
+        filePath: `dist/chunk-${i}.js.map`,
+        clientToken: `tok_${i}`,
+        pathname: `/uploads/abc123/chunk-${i}.js.map`,
+        maxBytes: 5_242_880,
+        access: "public" as const,
+      }),
+    );
+    const result = PresignedUploadResponseSchema.safeParse({
+      ...validResponse,
+      files,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `files array exceeds maximum of ${MAX_SOURCE_MAP_FILE_COUNT} entries`,
+      );
+    }
+  });
 });
 
 describe("SourceMapManifestRequestSchema", () => {
@@ -227,6 +504,101 @@ describe("SourceMapManifestRequestSchema", () => {
       uploadId: "invalid",
     });
     expect(result.success).toBe(false);
+  });
+
+  // --- DISC-1562: backend canonical max() bounds ---
+
+  it("accepts filePath at the maximum allowed length (boundary)", () => {
+    const result = SourceMapManifestRequestSchema.safeParse({
+      ...validRequest,
+      files: [
+        {
+          ...validRequest.files[0],
+          filePath: filePathOfLength(MAX_SOURCE_MAP_FILE_PATH_LENGTH),
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects filePath one character above the maximum with an informative message", () => {
+    const result = SourceMapManifestRequestSchema.safeParse({
+      ...validRequest,
+      files: [
+        {
+          ...validRequest.files[0],
+          filePath: filePathOfLength(MAX_SOURCE_MAP_FILE_PATH_LENGTH + 1),
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `filePath length exceeds maximum of ${MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters`,
+      );
+    }
+  });
+
+  it("accepts sizeBytes at the maximum allowed file size (boundary)", () => {
+    const result = SourceMapManifestRequestSchema.safeParse({
+      ...validRequest,
+      files: [
+        { ...validRequest.files[0], sizeBytes: MAX_SOURCE_MAP_FILE_SIZE },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects sizeBytes one byte above the maximum file size with an informative message", () => {
+    const result = SourceMapManifestRequestSchema.safeParse({
+      ...validRequest,
+      files: [
+        { ...validRequest.files[0], sizeBytes: MAX_SOURCE_MAP_FILE_SIZE + 1 },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `sizeBytes exceeds maximum of ${MAX_SOURCE_MAP_FILE_SIZE} bytes (${MAX_SOURCE_MAP_FILE_SIZE / (1024 * 1024)} MiB)`,
+      );
+    }
+  });
+
+  it("accepts a files array of exactly the maximum count (boundary)", () => {
+    const files = Array.from({ length: MAX_SOURCE_MAP_FILE_COUNT }, (_, i) => ({
+      filePath: `dist/chunk-${i}.js.map`,
+      sizeBytes: 1024,
+      blobUrl: `https://storage.example.com/uploads/abc123/chunk-${i}.js.map`,
+    }));
+    const result = SourceMapManifestRequestSchema.safeParse({
+      ...validRequest,
+      files,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a files array exceeding the maximum count with an informative message", () => {
+    const files = Array.from(
+      { length: MAX_SOURCE_MAP_FILE_COUNT + 1 },
+      (_, i) => ({
+        filePath: `dist/chunk-${i}.js.map`,
+        sizeBytes: 1024,
+        blobUrl: `https://storage.example.com/uploads/abc123/chunk-${i}.js.map`,
+      }),
+    );
+    const result = SourceMapManifestRequestSchema.safeParse({
+      ...validRequest,
+      files,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages).toContain(
+        `files array exceeds maximum of ${MAX_SOURCE_MAP_FILE_COUNT} entries`,
+      );
+    }
   });
 });
 

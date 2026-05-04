@@ -60,3 +60,40 @@ export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
   consoleErrors: false,
   errorResponseBodies: false,
 };
+
+// --- Source map upload limits ---
+//
+// These constants mirror the backend canonical bounds enforced on the
+// presigned source map upload pipeline. They are exported from
+// `@glasstrace/protocol` so SDK code and external tooling that consumes
+// the wire schemas can reference the same numeric ceilings the backend
+// applies at write time, instead of duplicating literal magic numbers.
+
+/**
+ * Maximum length, in characters, of a source map `filePath` carried in the
+ * presigned upload wire schemas.
+ *
+ * Backend-canonical: applied to `PresignedUploadResponseSchema.files[].filePath`,
+ * `PresignedUploadRequestSchema.files[].filePath`, and
+ * `SourceMapManifestRequestSchema.files[].filePath`.
+ */
+export const MAX_SOURCE_MAP_FILE_PATH_LENGTH = 512;
+
+/**
+ * Maximum size, in bytes, of an individual source map file (50 MiB).
+ *
+ * Backend-canonical: applied to `PresignedUploadResponseSchema.files[].maxBytes`,
+ * `PresignedUploadRequestSchema.files[].sizeBytes`, and
+ * `SourceMapManifestRequestSchema.files[].sizeBytes`.
+ */
+export const MAX_SOURCE_MAP_FILE_SIZE = 50 * 1024 * 1024;
+
+/**
+ * Maximum number of source map files per presigned upload request or
+ * manifest activation.
+ *
+ * Backend-canonical: applied to the top-level `files` array bound on
+ * `PresignedUploadRequestSchema`, `PresignedUploadResponseSchema`, and
+ * `SourceMapManifestRequestSchema`.
+ */
+export const MAX_SOURCE_MAP_FILE_COUNT = 100;
