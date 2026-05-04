@@ -109,6 +109,49 @@ describe("OTel Coexistence Public API", () => {
 
       spy.mockRestore();
     });
+
+    it("emitGuidanceMessage escalates to error level under NODE_ENV=production (DISC-1556)", () => {
+      const original = process.env.NODE_ENV;
+      const spy = vi.spyOn(consoleCapture, "sdkLog").mockImplementation(() => {});
+      try {
+        process.env.NODE_ENV = "production";
+        emitGuidanceMessage();
+
+        const errorCalls = spy.mock.calls.filter((c) => c[0] === "error");
+        const warnCalls = spy.mock.calls.filter((c) => c[0] === "warn");
+        expect(errorCalls).toHaveLength(1);
+        expect(warnCalls).toHaveLength(0);
+        expect(errorCalls[0][1]).toContain("could not auto-attach");
+      } finally {
+        if (original === undefined) {
+          delete process.env.NODE_ENV;
+        } else {
+          process.env.NODE_ENV = original;
+        }
+        spy.mockRestore();
+      }
+    });
+
+    it("emitGuidanceMessage stays at warn level outside production (DISC-1556)", () => {
+      const original = process.env.NODE_ENV;
+      const spy = vi.spyOn(consoleCapture, "sdkLog").mockImplementation(() => {});
+      try {
+        process.env.NODE_ENV = "development";
+        emitGuidanceMessage();
+
+        const errorCalls = spy.mock.calls.filter((c) => c[0] === "error");
+        const warnCalls = spy.mock.calls.filter((c) => c[0] === "warn");
+        expect(warnCalls).toHaveLength(1);
+        expect(errorCalls).toHaveLength(0);
+      } finally {
+        if (original === undefined) {
+          delete process.env.NODE_ENV;
+        } else {
+          process.env.NODE_ENV = original;
+        }
+        spy.mockRestore();
+      }
+    });
   });
 
   describe("shouldShowNudge()", () => {

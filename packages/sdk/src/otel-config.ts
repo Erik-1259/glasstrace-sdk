@@ -252,11 +252,59 @@ async function runCoexistencePath(
   setOtelState(OtelState.COEXISTENCE_FAILED);
   emitLifecycleEvent("otel:configured", { state: OtelState.COEXISTENCE_FAILED, scenario: "C/F" });
   emitLifecycleEvent("otel:injection_failed", { reason: "provider internals inaccessible" });
+  // DISC-1556 Option C: emit a structured fail-loud diagnostic that the
+  // runtime-state CLI bridge can persist. Distinct from
+  // `otel:injection_failed` above, which carries a free-form reason for
+  // logging only.
+  //
+  // PII-safety: only `delegate.constructor.name` is read. `delegate.url`,
+  // `delegate._exporter.endpoint`, `delegate._headers`, and any other
+  // field that could carry user-app data are deliberately untouched —
+  // see `RuntimeStateLastError` in `runtime-state.ts` for the contract.
+  emitLifecycleEvent("otel:failed", {
+    category: "auto-attach-returned-null",
+    message:
+      "tryAutoAttachGlasstraceProcessor returned null — the existing OTel " +
+      "TracerProvider exposed no injection point. Spans are not reaching " +
+      "the Glasstrace exporter. Apply the manual createGlasstraceSpanProcessor() " +
+      "workaround documented in the SDK README.",
+    timestamp: new Date().toISOString(),
+    providerClass: readProviderClass(existingProvider),
+  });
   // Cross-layer effect: trigger ACTIVE_DEGRADED if core state permits it
   // (per DISC-1247, KEY_PENDING → ACTIVE_DEGRADED is not valid, so we guard).
   const coreState = getCoreState();
   if (coreState === CoreState.ACTIVE || coreState === CoreState.KEY_RESOLVED) {
     setCoreState(CoreState.ACTIVE_DEGRADED);
+  }
+}
+
+/**
+ * Reads the constructor name of an existing TracerProvider's concrete
+ * delegate for inclusion in the structured fail-loud diagnostic. Strict
+ * PII-safety contract: this function MUST NOT read fields that could
+ * carry user-app data (e.g. `delegate.url`, `delegate._exporter.endpoint`,
+ * `delegate._headers`). Only the constructor name is captured.
+ *
+ * Returns `undefined` if the provider exposes no readable constructor
+ * (defensive — a provider that throws on property access must not crash
+ * the failure path).
+ */
+function readProviderClass(
+  tracerProvider: ReturnType<typeof otelApi.trace.getTracerProvider>,
+): string | undefined {
+  try {
+    // Unwrap ProxyTracerProvider to reach the concrete delegate, the same
+    // shape `tryAutoAttachGlasstraceProcessor` introspects.
+    const proxy = tracerProvider as unknown as { getDelegate?: () => unknown };
+    const delegate = typeof proxy.getDelegate === "function"
+      ? proxy.getDelegate()
+      : tracerProvider;
+    const name = (delegate as { constructor?: { name?: unknown } } | null)
+      ?.constructor?.name;
+    return typeof name === "string" && name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
   }
 }
 

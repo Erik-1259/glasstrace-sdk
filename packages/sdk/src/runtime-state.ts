@@ -27,6 +27,57 @@ export interface RuntimeState {
   core: { state: string };
   auth: { state: string };
   otel: { state: string; scenario?: string };
+  /**
+   * Most recent structured failure observed by the SDK. Optional and
+   * additive — absent on successful runs and on consumers that wrote
+   * the file before this field existed. Surfaces SDK self-diagnostics
+   * only; never user request URLs, headers, payloads, or credentials.
+   *
+   * Currently emitted by the OTel coexistence path when
+   * `tryAutoAttachGlasstraceProcessor` returns `null` under a non-
+   * inert pre-registered provider (the Next 16 production failure
+   * mode tracked in DISC-1556). Additional structured failures may
+   * extend the `category` enum in future revisions.
+   *
+   * **PII-safety constraint (load-bearing):** populated values must
+   * not include the existing OTel provider's `delegate.url`,
+   * `delegate._exporter.endpoint`, `delegate._headers`, or any field
+   * that could carry user-app data. `providerClass` captures only
+   * the constructor name (e.g., `"BasicTracerProvider"`).
+   */
+  lastError?: RuntimeStateLastError;
+}
+
+/**
+ * Structured failure record stored on {@link RuntimeState.lastError}.
+ *
+ * Extending the `category` enum is non-breaking; renaming or removing
+ * a member is a public-contract change because CLI consumers may
+ * surface the value verbatim.
+ */
+export interface RuntimeStateLastError {
+  /**
+   * Discriminator identifying the failure class.
+   *
+   * - `"auto-attach-returned-null"`: the OTel coexistence path detected
+   *   a pre-registered provider but could not inject the Glasstrace
+   *   span processor (DISC-1556). Spans flowing through the existing
+   *   provider will not reach the Glasstrace exporter; the documented
+   *   manual `createGlasstraceSpanProcessor()` workaround applies.
+   */
+  category: "auto-attach-returned-null";
+  /** Human-readable summary built from a fixed template — no user data. */
+  message: string;
+  /** ISO 8601 timestamp of the failure. */
+  timestamp: string;
+  /**
+   * Sanitized constructor name of the existing provider's delegate
+   * (e.g., `"BasicTracerProvider"`, `"NextTracerProvider"`). Reflects
+   * `delegate.constructor.name` only — never URLs, headers, or
+   * credentials. Absent if the provider exposes no readable
+   * constructor.
+   */
+  providerClass?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +87,7 @@ export interface RuntimeState {
 let _projectRoot: string | null = null;
 let _sdkVersion: string = "unknown";
 let _lastScenario: string | undefined;
+let _lastError: RuntimeStateLastError | undefined;
 let _debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let _started = false;
 
@@ -99,6 +151,16 @@ export function startRuntimeStateWriter(options: {
     debouncedWrite();
   });
 
+  // DISC-1556 Option C: persist structured fail-loud diagnostics so the
+  // CLI bridge can surface auto-attach failures that today emit only a
+  // log line. Snapshot-by-value semantics preserve the failure across
+  // subsequent writes (including the SHUTDOWN bypass) without coupling
+  // to the lifecycle emitter for read-back.
+  onLifecycleEvent("otel:failed", (payload) => {
+    _lastError = { ...payload };
+    debouncedWrite();
+  });
+
   // Auth events — write when key resolves or claim transitions occur
   onLifecycleEvent("auth:key_resolved", () => debouncedWrite());
   onLifecycleEvent("auth:claim_started", () => debouncedWrite());
@@ -124,6 +186,7 @@ export function _resetRuntimeStateForTesting(): void {
   _projectRoot = null;
   _sdkVersion = "unknown";
   _lastScenario = undefined;
+  _lastError = undefined;
   _started = false;
 }
 
@@ -158,6 +221,12 @@ function writeStateNow(): void {
       auth: { state: state.auth },
       otel: { state: state.otel, scenario: _lastScenario },
     };
+    // Only set `lastError` when the SDK has observed a structured
+    // failure. Omitting the field on success keeps the JSON compact
+    // and lets typed CLI consumers branch on `hasOwnProperty`.
+    if (_lastError) {
+      runtimeState.lastError = _lastError;
+    }
 
     const dir = join(_projectRoot, ".glasstrace");
     const filePath = join(dir, "runtime-state.json");

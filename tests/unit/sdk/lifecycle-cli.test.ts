@@ -106,6 +106,72 @@ describe("Runtime State Bridge (SDK-026)", () => {
       }
     });
 
+    it("persists lastError from otel:failed event (DISC-1556)", async () => {
+      vi.useFakeTimers();
+      try {
+        startRuntimeStateWriter({ projectRoot: tempDir, sdkVersion: "1.0.0" });
+
+        emitLifecycleEvent("otel:failed", {
+          category: "auto-attach-returned-null",
+          message: "stub failure for round-trip test",
+          timestamp: "2026-05-04T12:00:00.000Z",
+          providerClass: "BasicTracerProvider",
+        });
+
+        await vi.advanceTimersByTimeAsync(1100);
+
+        const content = JSON.parse(
+          readFileSync(join(tempDir, ".glasstrace", "runtime-state.json"), "utf-8"),
+        ) as RuntimeState;
+        expect(content.lastError).toBeDefined();
+        expect(content.lastError?.category).toBe("auto-attach-returned-null");
+        expect(content.lastError?.message).toBe("stub failure for round-trip test");
+        expect(content.lastError?.timestamp).toBe("2026-05-04T12:00:00.000Z");
+        expect(content.lastError?.providerClass).toBe("BasicTracerProvider");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("omits lastError on a successful run (DISC-1556)", () => {
+      // Ensures the field is absent (not null, not an empty object) when
+      // no failure occurred — old CLI consumers parsing the file before
+      // the field existed see no shape change on the success path.
+      startRuntimeStateWriter({ projectRoot: tempDir, sdkVersion: "1.0.0" });
+
+      const content = readFileSync(
+        join(tempDir, ".glasstrace", "runtime-state.json"),
+        "utf-8",
+      );
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      expect("lastError" in parsed).toBe(false);
+    });
+
+    it("preserves lastError across the SHUTDOWN bypass write (DISC-1556)", () => {
+      // The SHUTDOWN listener calls writeStateNow() synchronously,
+      // bypassing debounce. The previously-captured lastError must
+      // round-trip through that path so the CLI bridge surfaces the
+      // failure even on a fast-exiting process.
+      startRuntimeStateWriter({ projectRoot: tempDir, sdkVersion: "1.0.0" });
+
+      emitLifecycleEvent("otel:failed", {
+        category: "auto-attach-returned-null",
+        message: "captured before shutdown",
+        timestamp: "2026-05-04T12:00:00.000Z",
+        providerClass: "BasicTracerProvider",
+      });
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.SHUTTING_DOWN);
+      setCoreState(CoreState.SHUTDOWN);
+
+      const content = JSON.parse(
+        readFileSync(join(tempDir, ".glasstrace", "runtime-state.json"), "utf-8"),
+      ) as RuntimeState;
+      expect(content.core.state).toBe(CoreState.SHUTDOWN);
+      expect(content.lastError?.message).toBe("captured before shutdown");
+    });
+
     it("creates .glasstrace directory if missing", () => {
       // tempDir has no .glasstrace/ yet
       expect(existsSync(join(tempDir, ".glasstrace"))).toBe(false);
@@ -195,6 +261,38 @@ describe("Runtime State Bridge (SDK-026)", () => {
       const result = runStatus({ projectRoot: tempDir });
       expect(result.runtime.available).toBe(true);
       expect(result.runtime.stale).toBe(true);
+    });
+
+    it("ignores unknown lastError field on read (forward-compat for DISC-1556)", () => {
+      // The CLI's runStatus() reads runtime-state.json with loose
+      // parsing and surfaces only the fields it knows about. Adding
+      // `lastError` to the file must not break consumers that parse
+      // the file with the pre-Wave-11 schema in mind.
+      const dir = join(tempDir, ".glasstrace");
+      mkdirSync(dir, { recursive: true });
+      const state = {
+        updatedAt: new Date().toISOString(),
+        pid: process.pid,
+        sdkVersion: "1.0.0",
+        core: { state: "ACTIVE_DEGRADED" },
+        auth: { state: "ANONYMOUS" },
+        otel: { state: "COEXISTENCE_FAILED", scenario: "C/F" },
+        lastError: {
+          category: "auto-attach-returned-null",
+          message: "stub",
+          timestamp: new Date().toISOString(),
+          providerClass: "BasicTracerProvider",
+        },
+      };
+      writeFileSync(
+        join(dir, "runtime-state.json"),
+        JSON.stringify(state),
+      );
+
+      const result = runStatus({ projectRoot: tempDir });
+      expect(result.runtime.available).toBe(true);
+      expect(result.runtime.coreState).toBe("ACTIVE_DEGRADED");
+      expect(result.runtime.otelScenario).toBe("C/F");
     });
 
     it("reports SHUTDOWN as not stale", () => {
