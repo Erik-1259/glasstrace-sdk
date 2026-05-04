@@ -199,6 +199,53 @@ body data. If your account enables the flag but a span never carries
 the internal attribute (no adapter set it), the public attribute is
 still absent. The default is "off, twice".
 
+## Source maps
+
+Glasstrace uploads server-side source maps at build time and resolves
+compiled-output stack frames back to original source on the dashboard
+and in agent prompts. Three span attributes connect the runtime trace
+to the build-time manifest:
+
+| Attribute | When stamped | Source |
+|---|---|---|
+| `glasstrace.build.hash` | every server span | `process.env.GLASSTRACE_BUILD_HASH` (read once at module load) |
+| `glasstrace.source.file` | error spans only | top user-attributable frame of `Error.stack` |
+| `glasstrace.source.line` | error spans only | top user-attributable frame of `Error.stack` |
+
+The build hash links a runtime span to the source maps uploaded
+during the same build. Set the env var in your deploy step:
+
+```bash
+# Vercel / GitHub Actions / any CI
+GLASSTRACE_BUILD_HASH=$(git rev-parse HEAD) npm run start
+```
+
+The Glasstrace `next.config.ts` wrapper (`withGlasstraceConfig`) and
+the `@glasstrace/sdk/node` upload helpers compute the same hash via
+`computeBuildHash()` (preferring `git rev-parse HEAD`, falling back
+to a deterministic content hash). When the runtime env var is unset,
+the SDK silently omits the attribute — no crash, no diagnostic — so
+projects that have not adopted the convention behave exactly as
+before; their stored traces simply do not render mapped frames in
+the dashboard.
+
+The error-source attributes are stamped only by the manual
+`captureError()` API, on the `glasstrace.error` span event. They
+report the compiled-output `file:line` from the top user-attributable
+frame; ingestion's resolver then maps that pair back to original
+source via the uploaded source map manifest. The SDK skips frames
+inside Node's built-in modules (`node:internal/*`, `node:fs`, etc.)
+and inside its own `node_modules/@glasstrace/sdk/` closure, so the
+reported frame is always the caller of `captureError()`. If
+`Error.stack` is absent, malformed, or contains only internal frames,
+the attributes are silently omitted and only the existing
+`error.message` / `error.type` / `error.stack` event attributes are
+recorded.
+
+These attributes are additive: any consumer that does not understand
+them ignores them. Existing trace pipelines and dashboards continue
+to work unchanged.
+
 ## Browser-extension discovery
 
 `glasstrace init` writes a small static file at

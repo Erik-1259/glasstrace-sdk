@@ -177,4 +177,109 @@ describe("captureError", () => {
 
     expect(mockMaybeShowMcpNudge).not.toHaveBeenCalled();
   });
+
+  it("stamps glasstrace.source.file and glasstrace.source.line for parseable Error.stack", async () => {
+    const { addEvent } = mockOtelWithActiveSpan();
+    mockNudge();
+
+    const mod = await import("../../../packages/sdk/src/capture-error.js");
+    mod._resetCaptureErrorForTesting();
+    await mod._preloadOtelApi();
+
+    // Synthesize a stack-bearing error with a deterministic top frame
+    // outside the SDK's internal-frame skip patterns.
+    const error = new Error("source-stamp test");
+    error.stack = [
+      "Error: source-stamp test",
+      "    at userHandler (/repo/app/src/users.ts:42:13)",
+      "    at runHandler (/repo/app/src/router.ts:88:5)",
+    ].join("\n");
+
+    mod.captureError(error);
+
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [, attrs] = addEvent.mock.calls[0];
+    expect(attrs["glasstrace.source.file"]).toBe("/repo/app/src/users.ts");
+    expect(attrs["glasstrace.source.line"]).toBe(42);
+  });
+
+  it("does not stamp source.file / source.line when stack has only internal frames", async () => {
+    const { addEvent } = mockOtelWithActiveSpan();
+    mockNudge();
+
+    const mod = await import("../../../packages/sdk/src/capture-error.js");
+    mod._resetCaptureErrorForTesting();
+    await mod._preloadOtelApi();
+
+    const error = new Error("internal-only stack");
+    error.stack = [
+      "Error: internal-only stack",
+      "    at process.processTimers (node:internal/timers:512:7)",
+      "    at fs.readFileSync (node:fs:1234:5)",
+    ].join("\n");
+
+    mod.captureError(error);
+
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [, attrs] = addEvent.mock.calls[0];
+    expect(attrs["glasstrace.source.file"]).toBeUndefined();
+    expect(attrs["glasstrace.source.line"]).toBeUndefined();
+    // The error.stack itself is still recorded for debugging
+    expect(attrs["error.stack"]).toBeDefined();
+  });
+
+  it("does not stamp source.file / source.line for non-Error values", async () => {
+    const { addEvent } = mockOtelWithActiveSpan();
+    mockNudge();
+
+    const mod = await import("../../../packages/sdk/src/capture-error.js");
+    mod._resetCaptureErrorForTesting();
+    await mod._preloadOtelApi();
+
+    mod.captureError("string error has no stack");
+
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [, attrs] = addEvent.mock.calls[0];
+    expect(attrs["glasstrace.source.file"]).toBeUndefined();
+    expect(attrs["glasstrace.source.line"]).toBeUndefined();
+  });
+
+  it("does not stamp source.file / source.line for an Error with no stack", async () => {
+    const { addEvent } = mockOtelWithActiveSpan();
+    mockNudge();
+
+    const mod = await import("../../../packages/sdk/src/capture-error.js");
+    mod._resetCaptureErrorForTesting();
+    await mod._preloadOtelApi();
+
+    const error = new Error("no stack");
+    // Some custom error subclasses or sanitizers strip the stack
+    Object.defineProperty(error, "stack", { value: undefined });
+
+    mod.captureError(error);
+
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [, attrs] = addEvent.mock.calls[0];
+    expect(attrs["glasstrace.source.file"]).toBeUndefined();
+    expect(attrs["glasstrace.source.line"]).toBeUndefined();
+    expect(attrs["error.stack"]).toBeUndefined();
+  });
+
+  it("never throws when the stack is malformed", async () => {
+    const { addEvent } = mockOtelWithActiveSpan();
+    mockNudge();
+
+    const mod = await import("../../../packages/sdk/src/capture-error.js");
+    mod._resetCaptureErrorForTesting();
+    await mod._preloadOtelApi();
+
+    const error = new Error("malformed");
+    error.stack = "this is not a real stack at all";
+
+    expect(() => mod.captureError(error)).not.toThrow();
+    expect(addEvent).toHaveBeenCalledOnce();
+    const [, attrs] = addEvent.mock.calls[0];
+    expect(attrs["glasstrace.source.file"]).toBeUndefined();
+    expect(attrs["glasstrace.source.line"]).toBeUndefined();
+  });
 });
