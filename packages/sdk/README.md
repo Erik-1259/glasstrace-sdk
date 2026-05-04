@@ -246,6 +246,32 @@ These attributes are additive: any consumer that does not understand
 them ignores them. Existing trace pipelines and dashboards continue
 to work unchanged.
 
+### Path information in `glasstrace.source.file`
+
+`glasstrace.source.file` carries the path string V8 reported for the
+top user-attributable frame, exactly as the JavaScript runtime emitted
+it. On a developer machine this is typically an absolute filesystem
+path including your home directory and repository root; in a built or
+served runtime (Vercel, AWS Lambda, a container image) it is the
+deployment-controlled directory the runtime evaluated the file from;
+in bundler-instrumented runtimes (Next.js webpack, Turbopack) it can be
+a pseudo-path such as `webpack-internal:///(rsc)/./app/page.tsx`. The
+SDK preserves whichever form V8 reported.
+
+The same path already appears in the `error.stack` event attribute on
+captured `glasstrace.error` events whose underlying value is an `Error`
+instance with a `stack` property (every frame's path lands in the
+serialized stack string). The `glasstrace.source.file` attribute is a
+strict subset of what `error.stack` exposes for those events, so
+adopting source-map enrichment introduces no incremental path
+disclosure beyond what existing error traces already carry.
+
+The SDK forwards the path verbatim — without stripping the working
+directory or bundler prefix — because ingestion's source-map resolver
+matches against the path the compiler emitted into the source map.
+Stripping at the writer would prevent the dashboard from rendering
+mapped frames.
+
 ## Browser-extension discovery
 
 `glasstrace init` writes a small static file at
