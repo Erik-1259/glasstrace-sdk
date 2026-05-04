@@ -17,7 +17,7 @@ import {
   CoreState,
 } from "./lifecycle.js";
 import { sdkLog } from "./console-capture.js";
-import { atomicWriteFileSync } from "./atomic-write.js";
+import { atomicWriteFileSync, isSyncFsAvailable } from "./atomic-write.js";
 
 /** Schema for the runtime state file. */
 export interface RuntimeState {
@@ -49,12 +49,36 @@ let _started = false;
  *
  * Writes are debounced to max once per second. The final SHUTDOWN state
  * bypasses debounce to ensure it's always persisted.
+ *
+ * Probes synchronous `node:fs` availability once before registering any
+ * listeners. When the probe fails — for example, when the SDK is loaded as
+ * an ESM module under a Next.js dev/start server, where tsup's bundled
+ * `__require` shim cannot resolve `require("node:fs")` from an ESM scope
+ * (DISC-1555) — registration is skipped silently. The runtime-state file
+ * is a best-effort CLI bridge; trace capture continues unaffected. A
+ * later `npx @glasstrace/sdk status` call falls back to its existing
+ * "no runtime state available" path, matching the behavior on a project
+ * that has not yet run the SDK. The skip is intentional and not surfaced
+ * even under `verbose` because "synchronous node:fs is unreachable here"
+ * is not an actionable debug signal in production.
  */
 export function startRuntimeStateWriter(options: {
   projectRoot: string;
   sdkVersion: string;
 }): void {
   if (_started) return;
+
+  // Probe synchronous `node:fs` availability once. atomicWriteFileSync()
+  // calls the same loader internally; calling it here lets a single
+  // probe gate every subsequent write without paying for repeated
+  // try/catch on each lifecycle event. The cache is shared with
+  // atomic-write, so the probe also primes the loader for downstream
+  // CLI sites in the rare case they run in the same process.
+  if (!isSyncFsAvailable()) {
+    _started = true;
+    return;
+  }
+
   _started = true;
 
   _projectRoot = options.projectRoot;
