@@ -1,5 +1,15 @@
 # @glasstrace/sdk
 
+## 1.2.0
+
+### Minor Changes
+
+- 96d5027: feat(sdk): add `@glasstrace/sdk/trpc` subpath with `tracedMiddleware` helper for tRPC middleware-chain instrumentation (DISC-1217). Wraps each user-supplied tRPC middleware in an OTel span (via `tracer.startActiveSpan`) so enrichment can pinpoint _which_ middleware short-circuited a request rather than just _that_ an auth or tier check failed. Spans are children of the HTTP server span via standard OTel context propagation; the existing `glasstrace.trpc.procedure` attribute (DISC-1215) is not duplicated. `@trpc/server` is declared as an optional peer dependency (`^10.0.0 || ^11.0.0`); the subpath is excluded from the root barrel and tree-shakeable for projects that do not use tRPC.
+
+### Patch Changes
+
+- 0b9c4f8: Fix Next.js 16 + Turbopack `RangeError: Map maximum size exceeded` crash by making `installContextManager()` idempotent across module re-evaluations. Under `next dev --turbopack`, Next re-runs the server `instrumentation.ts` hook on every HMR rebuild; the SDK's in-process `_coreState` guard does not survive module re-evaluation, so each rebuild previously constructed a fresh `AsyncLocalStorage` whose internal `async_hooks.init` callbacks fed Next's `app-page-turbo.runtime.dev.js` Map until V8's `2^24 − 1` cap was exceeded. Closes DISC-1310. The fix anchors a three-state record under `globalThis[Symbol.for("glasstrace.context-manager.installed")]` (`{ glasstraceContextManagerBrand: 1, manager: ContextManager | null }`) so the first successful registration is reused on every subsequent call within the V8 isolate while OTel's global slot still holds it. The cached record is validated against OTel's actual registered manager on every call: if another component has run `otelApi.context.disable()` or replaced the manager, the SDK re-registers (reusing the cached `AsyncLocalStorage`, never allocating a fresh one) instead of returning a stale outcome — restoring the recovery behavior of the previous implementation while preserving the DISC-1310 allocation guard. The `InstallationRecord` predicate validates the `manager` field against the full OTel `ContextManager` shape (`active`, `with`, `bind`, `enable`, `disable`); foreign squatters and corrupt records (e.g. `{ glasstraceContextManagerBrand: 1, manager: {} }`) are detected and overwritten rather than silently honored. The existing DISC-1183 context-propagation contract is preserved across all guard states. Per-isolate scope (`globalThis`); `node:worker_threads` and `node:vm` contexts get their own slot, which is the correct behavior. No public-API change.
+
 ## 1.1.3
 
 ### Patch Changes
