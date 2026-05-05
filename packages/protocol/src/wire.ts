@@ -4,7 +4,10 @@
  * These schemas define the request/response shapes for:
  * - SDK initialization (POST /v1/sdk/init)
  * - SDK health diagnostics (embedded in init requests)
- * - Discovery endpoint (GET /__glasstrace/config)
+ * - Discovery payload (served at `/.well-known/glasstrace.json` from the
+ *   project's static root — `public/` for Next.js and most frameworks,
+ *   `static/` for SvelteKit; the internal `/__glasstrace/config` handler
+ *   reuses this shape for backwards compatibility)
  * - Source map upload (POST /v1/source-maps)
  * - Presigned source map upload (POST /v1/source-maps/presign, POST /v1/source-maps/manifest)
  */

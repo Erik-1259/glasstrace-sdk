@@ -55,10 +55,15 @@ export interface ClaimState {
  * discovery endpoint.
  *
  * Called from {@link registerGlasstrace} when the SDK runs in anonymous +
- * development mode. External consumers should run `npx glasstrace init` to
- * generate a static file at `public/.well-known/glasstrace.json`; the
- * runtime handler is installed automatically and is no longer part of the
- * public API (removed from the root barrel in v1.0.0).
+ * development mode. The supported discovery contract is the static file
+ * served at `/.well-known/glasstrace.json` (written by
+ * `npx glasstrace init` under the framework's static root — `public/`
+ * for Next.js and most frameworks, `static/` for SvelteKit). The runtime
+ * handler here is internal compatibility for older consumer integrations
+ * during local development and is not part of the supported discovery
+ * contract (removed from the root barrel in v1.0.0; may be removed
+ * without deprecation in a future release). See `packages/sdk/README.md`
+ * "Browser-extension discovery" for the canonical statement.
  *
  * The returned handler checks if the request URL path is
  * `/__glasstrace/config`. If not, returns `null` (pass-through). If it
