@@ -117,6 +117,7 @@ export function generateMcpConfig(
         {
           mcpServers: {
             glasstrace: {
+              type: "http",
               url: endpoint,
               headers: {
                 Authorization: `Bearer ${bearer}`,

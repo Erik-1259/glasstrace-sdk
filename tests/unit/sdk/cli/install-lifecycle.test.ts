@@ -14,6 +14,7 @@ import {
 } from "../../../../packages/sdk/src/cli/init.js";
 import {
   mcpConfigMatches,
+  genericMcpConfigOrLegacyShapeMatches,
   readEnvLocalApiKey,
   isDevApiKey,
 } from "../../../../packages/sdk/src/mcp-runtime.js";
@@ -198,6 +199,98 @@ describe("Scenario 2: re-install preservation", () => {
     const a = JSON.stringify({ mcpServers: { glasstrace: { url: "http://old" } } });
     const b = JSON.stringify({ mcpServers: { glasstrace: { url: "http://new" } } });
     expect(mcpConfigMatches(a, b)).toBe(false);
+  });
+
+  // DISC-1572 (Copilot review of PR #241): the shared matcher must stay
+  // strict. `decideMcpConfigAction` runs against every detected agent,
+  // including Claude. A user who hand-edits their Claude `.mcp.json`
+  // to remove `type: "http"` must NOT have their file silently
+  // overwritten on re-init. Legacy-shape recognition for the generic
+  // `.glasstrace/mcp.json` flow lives in
+  // `genericMcpConfigOrLegacyShapeMatches`, not here.
+  it("mcpConfigMatches rejects a hand-edited Claude config with `type: \"http\"` removed", () => {
+    const handEditedClaude = JSON.stringify({
+      mcpServers: {
+        glasstrace: {
+          url: "https://api.glasstrace.dev/mcp",
+          headers: { Authorization: "Bearer gt_anon_xxx" },
+        },
+      },
+    });
+    const claudeExpected = JSON.stringify({
+      mcpServers: {
+        glasstrace: {
+          type: "http",
+          url: "https://api.glasstrace.dev/mcp",
+          headers: { Authorization: "Bearer gt_anon_xxx" },
+        },
+      },
+    });
+    expect(mcpConfigMatches(handEditedClaude, claudeExpected)).toBe(false);
+  });
+
+  // DISC-1572: the post-claim refresh path uses
+  // `genericMcpConfigOrLegacyShapeMatches`, which extends the strict
+  // matcher with a bounded legacy-shape fallback so existing
+  // `.glasstrace/mcp.json` files written by SDK versions prior to
+  // DISC-1572 are still recognized as SDK-managed and upgraded on the
+  // next credential rotation.
+  it("genericMcpConfigOrLegacyShapeMatches accepts the legacy (no-`type`) generic shape against the new Claude-compatible expected", () => {
+    const legacyOnDisk = JSON.stringify({
+      mcpServers: {
+        glasstrace: {
+          url: "https://api.glasstrace.dev/mcp",
+          headers: { Authorization: "Bearer gt_anon_xxx" },
+        },
+      },
+    });
+    const newExpected = JSON.stringify({
+      mcpServers: {
+        glasstrace: {
+          type: "http",
+          url: "https://api.glasstrace.dev/mcp",
+          headers: { Authorization: "Bearer gt_anon_xxx" },
+        },
+      },
+    });
+    expect(genericMcpConfigOrLegacyShapeMatches(legacyOnDisk, newExpected)).toBe(true);
+  });
+
+  // DISC-1572 negative: the legacy fallback is bounded — it only
+  // strips `type: "http"` from `mcpServers.glasstrace`. Any other
+  // field divergence must still report a mismatch so user edits are
+  // preserved by the post-claim refresh path.
+  it("genericMcpConfigOrLegacyShapeMatches rejects on-disk content that differs in fields other than `type`", () => {
+    const tamperedOnDisk = JSON.stringify({
+      mcpServers: {
+        glasstrace: {
+          url: "https://api.glasstrace.dev/mcp",
+          // headers omitted
+        },
+      },
+    });
+    const newExpected = JSON.stringify({
+      mcpServers: {
+        glasstrace: {
+          type: "http",
+          url: "https://api.glasstrace.dev/mcp",
+          headers: { Authorization: "Bearer gt_anon_xxx" },
+        },
+      },
+    });
+    expect(genericMcpConfigOrLegacyShapeMatches(tamperedOnDisk, newExpected)).toBe(false);
+  });
+
+  // DISC-1572: the fallback strips only when `type === "http"`. A
+  // hand-edited file that sets `type` to a non-"http" value (e.g.
+  // mid-refactor experiment, or a typo) on the EXPECTED side should
+  // not match a no-`type` on-disk file.
+  it("genericMcpConfigOrLegacyShapeMatches does not strip `type` when its value is not exactly \"http\"", () => {
+    const onDisk = JSON.stringify({ mcpServers: { glasstrace: { url: "x" } } });
+    const expectedWithStdio = JSON.stringify({
+      mcpServers: { glasstrace: { type: "stdio", url: "x" } },
+    });
+    expect(genericMcpConfigOrLegacyShapeMatches(onDisk, expectedWithStdio)).toBe(false);
   });
 
   it("decideMcpConfigAction returns 'write' when file does not exist", async () => {

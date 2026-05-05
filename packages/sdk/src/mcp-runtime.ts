@@ -65,9 +65,9 @@ export function identityFingerprint(token: string): string {
 }
 
 /**
- * Compares two MCP config strings for canonical-JSON equality. Returns
- * `true` when both inputs parse as JSON and produce structurally equal
- * objects after recursive key sorting; falls back to trimmed text
+ * Compares two MCP config strings for strict canonical-JSON equality.
+ * Returns `true` when both inputs parse as JSON and produce structurally
+ * equal objects after recursive key sorting; falls back to trimmed text
  * comparison for TOML and other non-JSON formats. Returns `false` on
  * parse errors that don't fall through to text comparison.
  *
@@ -75,6 +75,14 @@ export function identityFingerprint(token: string): string {
  * (DISC-1247 Scenario 2c) and as the staleness signal for SDK-managed
  * configs that must be refreshed when the project's effective
  * credential changes.
+ *
+ * The matcher is intentionally strict: a hand-edited file that drops
+ * any field (including `type: "http"` on a Claude `.mcp.json`) must
+ * NOT be treated as SDK-managed and silently overwritten on re-init.
+ * Callers that need backwards-compatible recognition of the legacy
+ * generic `.glasstrace/mcp.json` shape (no `type: "http"`, written by
+ * SDK versions prior to DISC-1572) should use
+ * {@link genericMcpConfigOrLegacyShapeMatches} instead.
  *
  * @internal Exported for unit testing only.
  */
@@ -96,6 +104,99 @@ export function mcpConfigMatches(
   }
 
   return existingContent.trim() === trimmedExpected;
+}
+
+/**
+ * Generic-shape variant of {@link mcpConfigMatches} that also recognizes
+ * the legacy `.glasstrace/mcp.json` shape written by SDK versions prior
+ * to DISC-1572 (the same generic shape minus `type: "http"`).
+ *
+ * Scoped to callers that operate exclusively on `.glasstrace/mcp.json`
+ * (currently {@link refreshMcpConfigAfterClaim}). It must not be used
+ * by per-agent init paths: `decideMcpConfigAction` runs against every
+ * detected agent's `.mcp.json`, and a Claude file whose `type` field
+ * was hand-edited away must NOT be treated as SDK-managed and silently
+ * overwritten on re-init. The shared {@link mcpConfigMatches} stays
+ * strict for that reason; the legacy fallback lives here.
+ *
+ * The fallback is bounded: only the specific legacy generic shape
+ * (the new shape minus `type: "http"`) is accepted; arbitrary field
+ * omissions still report a mismatch.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function genericMcpConfigOrLegacyShapeMatches(
+  existingContent: string,
+  expectedGenericContent: string,
+): boolean {
+  if (mcpConfigMatches(existingContent, expectedGenericContent)) {
+    return true;
+  }
+
+  try {
+    const expectedParsed: unknown = JSON.parse(expectedGenericContent.trim());
+    const expectedLegacy = stripTypeFromGlasstraceServer(expectedParsed);
+    if (expectedLegacy === null) {
+      return false;
+    }
+    const existingParsed: unknown = JSON.parse(existingContent);
+    return (
+      JSON.stringify(canonicalize(existingParsed)) ===
+      JSON.stringify(canonicalize(expectedLegacy))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns a copy of `value` with `type: "http"` removed from
+ * `mcpServers.glasstrace`, or `null` when `value` is not the new
+ * Claude-compatible SDK shape. Used by
+ * {@link genericMcpConfigOrLegacyShapeMatches} to recognize legacy
+ * on-disk files written by SDK versions prior to DISC-1572.
+ *
+ * The helper is deliberately narrow: it only strips when `type` is
+ * exactly the string `"http"`, and only from the `glasstrace` server
+ * entry. Any structural mismatch (non-object root, missing
+ * `mcpServers`, missing `glasstrace`, or `type !== "http"`) yields
+ * `null`, leaving the strict canonical comparison's verdict in place.
+ */
+function stripTypeFromGlasstraceServer(value: unknown): unknown | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const root = value as Record<string, unknown>;
+  const servers = root["mcpServers"];
+  if (
+    servers === null ||
+    typeof servers !== "object" ||
+    Array.isArray(servers)
+  ) {
+    return null;
+  }
+  const serversObj = servers as Record<string, unknown>;
+  const server = serversObj["glasstrace"];
+  if (
+    server === null ||
+    typeof server !== "object" ||
+    Array.isArray(server)
+  ) {
+    return null;
+  }
+  const serverObj = server as Record<string, unknown>;
+  if (serverObj["type"] !== "http") {
+    return null;
+  }
+  const { type: _omittedType, ...serverWithoutType } = serverObj;
+  void _omittedType;
+  return {
+    ...root,
+    mcpServers: {
+      ...serversObj,
+      glasstrace: serverWithoutType,
+    },
+  };
 }
 
 function canonicalize(value: unknown): unknown {
@@ -532,6 +633,7 @@ function genericMcpConfigContent(endpoint: string, bearer: string): string {
     {
       mcpServers: {
         glasstrace: {
+          type: "http",
           url: endpoint,
           headers: {
             Authorization: `Bearer ${bearer}`,
@@ -606,7 +708,7 @@ export async function refreshGenericMcpConfigAtRuntime(
   }
 
   const expectedAnon = genericMcpConfigContent(MCP_ENDPOINT, anonKeyOnDisk);
-  if (!mcpConfigMatches(existing, expectedAnon)) {
+  if (!genericMcpConfigOrLegacyShapeMatches(existing, expectedAnon)) {
     return { action: "preserved" };
   }
 

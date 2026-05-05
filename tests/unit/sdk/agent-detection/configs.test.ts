@@ -243,6 +243,28 @@ describe("generateMcpConfig", () => {
         `Bearer ${ANON_KEY}`,
       );
     });
+
+    // DISC-1572: the generic shape must include `type: "http"` so
+    // `.glasstrace/mcp.json` is accepted by Claude Code's
+    // `--strict-mcp-config` validator. The full shape assertion below
+    // pins the field set so that future emitter changes either adopt
+    // the new shape or fail loudly in this test.
+    it("emits the Claude-compatible HTTP shape", () => {
+      const config = generateMcpConfig(
+        makeAgent("generic"),
+        ENDPOINT,
+        ANON_KEY,
+      );
+      expect(JSON.parse(config)).toEqual({
+        mcpServers: {
+          glasstrace: {
+            type: "http",
+            url: ENDPOINT,
+            headers: { Authorization: `Bearer ${ANON_KEY}` },
+          },
+        },
+      });
+    });
   });
 });
 

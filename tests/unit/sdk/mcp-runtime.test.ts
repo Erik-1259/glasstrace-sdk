@@ -598,4 +598,79 @@ describe("refreshGenericMcpConfigAtRuntime", () => {
     );
     expect(result.action).toBe("rewrote");
   });
+
+  // DISC-1572 backwards-compat: a `.glasstrace/mcp.json` written by an
+  // SDK version prior to the Claude-compatible shape (no `type: "http"`
+  // on the `glasstrace` server) must still be recognized as
+  // SDK-managed so the post-claim refresh upgrades it to the new shape.
+  it("treats legacy (no-`type`) generic shape on disk as SDK-managed", async () => {
+    writeAnonKey(tmpDir);
+    const dir = path.join(tmpDir, ".glasstrace");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const legacyContent = JSON.stringify(
+      {
+        mcpServers: {
+          glasstrace: {
+            url: MCP_ENDPOINT,
+            headers: { Authorization: `Bearer ${VALID_ANON_KEY}` },
+          },
+        },
+      },
+      null,
+      2,
+    );
+    fs.writeFileSync(path.join(dir, "mcp.json"), legacyContent, { mode: 0o600 });
+
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    // The legacy file is recognized as SDK-managed and rewritten to the
+    // new Claude-compatible shape with the effective dev key embedded.
+    expect(result.action).toBe("rewrote");
+    const after = fs.readFileSync(path.join(dir, "mcp.json"), "utf-8");
+    const parsed = JSON.parse(after) as {
+      mcpServers: { glasstrace: { type: string; url: string; headers: { Authorization: string } } };
+    };
+    expect(parsed.mcpServers.glasstrace.type).toBe("http");
+    expect(parsed.mcpServers.glasstrace.headers.Authorization).toBe(
+      `Bearer ${VALID_DEV_KEY}`,
+    );
+  });
+
+  // DISC-1572 negative case: the matcher's bounded fallback must not
+  // accept arbitrary missing fields. A user-modified file that drops
+  // any field other than `type` (or that swaps a value) must still be
+  // preserved.
+  it("preserves on-disk content when fields other than `type` differ", async () => {
+    writeAnonKey(tmpDir);
+    const dir = path.join(tmpDir, ".glasstrace");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const tampered = JSON.stringify(
+      {
+        mcpServers: {
+          glasstrace: {
+            type: "http",
+            url: MCP_ENDPOINT,
+            // headers omitted — user-modified, must NOT match the
+            // SDK-shaped expected content.
+          },
+        },
+      },
+      null,
+      2,
+    );
+    fs.writeFileSync(path.join(dir, "mcp.json"), tampered, { mode: 0o600 });
+
+    const result = await refreshGenericMcpConfigAtRuntime(
+      tmpDir,
+      { source: "env-local", key: VALID_DEV_KEY as never },
+      VALID_ANON_KEY as never,
+    );
+
+    expect(result.action).toBe("preserved");
+    expect(fs.readFileSync(path.join(dir, "mcp.json"), "utf-8")).toBe(tampered);
+  });
 });
