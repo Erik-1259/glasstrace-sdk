@@ -279,6 +279,11 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
         // Use getResolvedApiKey() for session ID instead of
         // capturing the mutable effectiveKey closure variable.
+        //
+        // Internal compatibility only — see `packages/sdk/README.md`
+        // "Browser-extension discovery". The runtime handler is not part
+        // of the supported discovery contract; the supported surface is
+        // the static file written by `glasstrace init`.
         discoveryHandler = createDiscoveryHandler(
           async () => resolvedAnonKey,
           () => sessionManager.getSessionId(getResolvedApiKey()),
@@ -303,8 +308,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
             if (currentGeneration !== registrationGeneration) return;
 
-            // Update the discovery handler to serve the resolved key
-            // Use getResolvedApiKey() for canonical key state
+            // Update the discovery handler to serve the resolved key.
+            // Use getResolvedApiKey() for canonical key state.
+            //
+            // Internal compatibility only — see `packages/sdk/README.md`
+            // "Browser-extension discovery". The runtime handler is not
+            // part of the supported discovery contract.
             discoveryHandler = createDiscoveryHandler(
               () => Promise.resolve(anonKey),
               () => sessionManager.getSessionId(getResolvedApiKey()),

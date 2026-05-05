@@ -250,8 +250,8 @@ const provider = new BasicTracerProvider({
 branded exporter the auto-attach path uses, so duplicate
 `registerGlasstrace()` calls remain idempotent. `registerGlasstrace()`
 is still required when wiring the processor manually — it handles the
-init handshake, anonymous-key resolution, session management, and
-discovery endpoint, none of which are owned by the span processor.
+init handshake, anonymous-key resolution, and session management, none
+of which are owned by the span processor.
 
 A future SDK release may extend the auto-attach detection to recognize
 additional Next 16 provider shapes; until that ships, the manual path
@@ -380,20 +380,21 @@ mapped frames.
 
 ## Browser-extension discovery
 
-`glasstrace init` writes a small static file at
-`public/.well-known/glasstrace.json` (or `static/.well-known/glasstrace.json`
-on SvelteKit) so the Glasstrace browser extension can discover your
-project's anonymous key without a runtime HTTP handler. The file
-contains only a schema version and the project's anonymous key — it
-is public metadata, not a secret, and should be committed to source
+The supported discovery contract is the static file
+`public/.well-known/glasstrace.json` (or
+`static/.well-known/glasstrace.json` on SvelteKit). The Glasstrace
+browser extension reads this file directly. `glasstrace init` writes
+it for you; you do not need to add any HTTP routing for discovery. The
+file contains only a schema version and the project's anonymous key —
+it is public metadata, not a secret, and should be committed to source
 control alongside the rest of your project.
 
-The SDK no longer requires `createDiscoveryHandler` to be wired into
-your server. If you previously registered the handler (for example,
-inside `middleware.ts` or `proxy.ts` on Next.js), you can remove the
-handler code and the extension will read the static file instead.
-
 ### Migration: removing the runtime discovery handler
+
+If you previously wired `createDiscoveryHandler` yourself (for example
+on `@glasstrace/sdk@<1.0.0`), the migration below shows how to remove
+it on upgrade. Users starting fresh on `@glasstrace/sdk@>=1.0.0` do
+not need this section.
 
 **Next.js 15 and earlier (`middleware.ts`):**
 
@@ -451,11 +452,15 @@ export function proxy(_req: Request) {
 
 If `proxy.ts` no longer does anything else, you can delete it entirely.
 
-`createDiscoveryHandler` was removed from the public API in `v1.0.0`.
-The runtime handler is installed automatically in anonymous + development
-mode — there is nothing to wire up yourself. Run `npx glasstrace init`
-after upgrading to generate the static file; the extension reads the
-file directly and no longer needs the runtime handler.
+**The supported discovery contract is `public/.well-known/glasstrace.json`.**
+`createDiscoveryHandler` was removed from the public API in `v1.0.0` and
+is no longer exported from `@glasstrace/sdk`. The SDK retains an
+internal runtime handler at `/__glasstrace/config` for backwards
+compatibility with older consumer integrations during local
+development. The internal handler is **not part of the supported
+discovery contract** — it is not documented for use, not covered by
+validation expectations, and may be removed in a future release
+without a deprecation cycle. Rely on the static file.
 
 ## Subpath exports
 

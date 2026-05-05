@@ -269,15 +269,20 @@
   - `createDiscoveryHandler` (value)
   - `ClaimState` (type)
 
-  Both are removed from the public API. The SDK continues to install the
-  handler automatically in anonymous + development mode — there is no
-  runtime capability loss. External consumers who still invoke
-  `createDiscoveryHandler` directly should run `npx glasstrace init` to
-  generate `public/.well-known/glasstrace.json` (or
-  `static/.well-known/glasstrace.json` on SvelteKit); the browser
-  extension reads that file directly and no longer needs the runtime
-  handler. See the **Migration: removing the runtime discovery handler**
-  section of `packages/sdk/README.md` for the full before/after.
+  Both are removed from the public API. The supported discovery contract
+  is the static file `public/.well-known/glasstrace.json` (or
+  `static/.well-known/glasstrace.json` on SvelteKit) written by
+  `npx glasstrace init`; the browser extension reads that file
+  directly. The SDK retains an internal runtime handler at
+  `/__glasstrace/config` for backwards compatibility with older
+  consumer integrations during local development. The internal handler
+  is **not part of the supported discovery contract** — it is not
+  documented for use, not covered by validation expectations, and may
+  be removed in a future release without a deprecation cycle. External
+  consumers who still invoke `createDiscoveryHandler` directly should
+  run `npx glasstrace init` and rely on the static file; see the
+  **Migration: removing the runtime discovery handler** section of
+  `packages/sdk/README.md` for the full before/after.
 
   A snapshot test at `tests/unit/sdk/public-barrel.test.ts` guards the
   narrowed root surface against accidental re-addition.

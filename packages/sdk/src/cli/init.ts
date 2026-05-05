@@ -724,7 +724,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
               discoveryResult.error !== undefined
                 ? `: ${discoveryResult.error}`
                 : ""
-            }. The Glasstrace browser extension will fall back to the runtime handler until the file is written.`,
+            }. The Glasstrace browser extension cannot discover this project until the file is written; rerun \`glasstrace init\` after fixing the underlying error.`,
           );
           break;
       }
