@@ -175,6 +175,138 @@ describe("error-nudge without node:fs", () => {
   });
 });
 
+describe("runtime-state module load without node:fs (DISC-377 §Item 1)", () => {
+  // Wave 13 13A regression guard. Wave 8 8D guarded the writer's
+  // sync `require("node:*")` call sites with the isSyncFsAvailable()
+  // probe, but the top-of-file `import { mkdirSync } from "node:fs"`
+  // and `import { join } from "node:path"` in runtime-state.ts still
+  // failed at module-evaluation time — before the probe could run —
+  // under bundlers that externalize node:* without shimming them
+  // (some browser bundlers, Vercel Edge, Cloudflare Workers, Deno
+  // without Node-compat). DISC-377 §Item 1 closed the residual gap
+  // by converting both imports to the cached-`require()` + try/catch
+  // pattern from heartbeat.ts:150-159. This test pins the contract:
+  // the module must load without throwing when bare-specifier
+  // resolution of `node:fs` and `node:path` fails. Mocking
+  // isSyncFsAvailable() alone is insufficient because the bug is at
+  // module-load time, before isSyncFsAvailable() could be called.
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doMock("node:fs", () => {
+      throw new Error("Module not found: node:fs");
+    });
+    vi.doMock("node:path", () => {
+      throw new Error("Module not found: node:path");
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("node:fs");
+    vi.doUnmock("node:path");
+  });
+
+  it("loads the runtime-state module without throwing", async () => {
+    await expect(
+      import("../../../packages/sdk/src/runtime-state.js"),
+    ).resolves.toBeDefined();
+  });
+
+  it("startRuntimeStateWriter is a silent no-op when node:fs is unavailable", async () => {
+    const consoleCapture = await import(
+      "../../../packages/sdk/src/console-capture.js"
+    );
+    const sdkLogSpy = vi
+      .spyOn(consoleCapture, "sdkLog")
+      .mockImplementation(() => {});
+
+    const lifecycle = await import(
+      "../../../packages/sdk/src/lifecycle.js"
+    );
+    lifecycle.resetLifecycleForTesting();
+    lifecycle.initLifecycle({ logger: vi.fn() });
+
+    const { startRuntimeStateWriter, _resetRuntimeStateForTesting } =
+      await import("../../../packages/sdk/src/runtime-state.js");
+    _resetRuntimeStateForTesting();
+
+    expect(() => {
+      startRuntimeStateWriter({
+        projectRoot: "/tmp/glasstrace-disc-377-item-1-noexist",
+        sdkVersion: "1.0.0",
+      });
+    }).not.toThrow();
+
+    // No "Failed to write runtime state" warning should surface — the
+    // isSyncFsAvailable() gate short-circuits before any listener is
+    // registered, mirroring the DISC-1555 silent-skip contract.
+    const failureWarnings = sdkLogSpy.mock.calls.filter((call) =>
+      String(call[1] ?? "").includes("Failed to write runtime state"),
+    );
+    expect(failureWarnings).toEqual([]);
+  });
+});
+
+describe("runtime-state partial-load resilience (node:fs ok, node:path fails)", () => {
+  // Wave 13 13A follow-up to Codex/Copilot review feedback. If
+  // `require("node:fs")` succeeds but `require("node:path")` throws,
+  // the shared try/catch must clear BOTH cached refs so the
+  // startRuntimeStateWriter() gate treats the runtime as non-Node.
+  // atomic-write's isSyncFsAvailable() only checks node:fs, so
+  // without an additional pathSync nullity check on the gate, a
+  // partial-compat runtime would slip past the gate and later NPE on
+  // `pathSync!.join(...)` inside writeStateNow(), surfacing repeated
+  // "Failed to write runtime state" warnings instead of the intended
+  // silent no-op.
+  beforeEach(() => {
+    vi.resetModules();
+    // node:fs resolves successfully (no doMock); node:path throws.
+    vi.doMock("node:path", () => {
+      throw new Error("Module not found: node:path");
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("node:path");
+  });
+
+  it("startRuntimeStateWriter is a silent no-op when node:path resolution fails", async () => {
+    const consoleCapture = await import(
+      "../../../packages/sdk/src/console-capture.js"
+    );
+    const sdkLogSpy = vi
+      .spyOn(consoleCapture, "sdkLog")
+      .mockImplementation(() => {});
+
+    const lifecycle = await import(
+      "../../../packages/sdk/src/lifecycle.js"
+    );
+    lifecycle.resetLifecycleForTesting();
+    lifecycle.initLifecycle({ logger: vi.fn() });
+
+    const { startRuntimeStateWriter, _resetRuntimeStateForTesting } =
+      await import("../../../packages/sdk/src/runtime-state.js");
+    _resetRuntimeStateForTesting();
+
+    expect(() => {
+      startRuntimeStateWriter({
+        projectRoot: "/tmp/glasstrace-disc-377-item-1-partial-noexist",
+        sdkVersion: "1.0.0",
+      });
+    }).not.toThrow();
+
+    // Drive a few lifecycle transitions that would normally invoke
+    // writeStateNow(). With the gate's pathSync-null check in place,
+    // no listener is registered and no warning surfaces.
+    lifecycle.setCoreState(lifecycle.CoreState.REGISTERING);
+    lifecycle.setCoreState(lifecycle.CoreState.ACTIVE);
+
+    const failureWarnings = sdkLogSpy.mock.calls.filter((call) =>
+      String(call[1] ?? "").includes("Failed to write runtime state"),
+    );
+    expect(failureWarnings).toEqual([]);
+  });
+});
+
 describe("heartbeat checkShutdownMarker without node:fs", () => {
   // Wave 10 10G audit (DISC-1563) regression guard. The other three
   // ESM-reachable sync `require("node:*")` sites in SDK source —

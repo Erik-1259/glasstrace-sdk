@@ -9,8 +9,6 @@
  * Task brief: SDK-026
  */
 
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
 import {
   getSdkState,
   onLifecycleEvent,
@@ -18,6 +16,34 @@ import {
 } from "./lifecycle.js";
 import { sdkLog } from "./console-capture.js";
 import { atomicWriteFileSync, isSyncFsAvailable } from "./atomic-write.js";
+
+// node:fs and node:path are loaded lazily via require() so the module
+// remains loadable in non-Node runtimes that do not shim Node builtins
+// (some browser bundlers, Vercel Edge, Cloudflare Workers, Deno without
+// Node-compat). Wave 8 8D guarded the runtime call sites with the
+// isSyncFsAvailable() probe, but the previous top-of-file ESM imports
+// still failed at module-evaluation time before the probe could run
+// (DISC-377 §Item 1). The require()s are wrapped in try/catch and the
+// cached references are consumed only inside the isSyncFsAvailable()
+// gated path, mirroring the precedent at heartbeat.ts:150-159.
+let fsSync: typeof import("node:fs") | null = null;
+let pathSync: typeof import("node:path") | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the surrounding try/catch (line 31): a non-Node runtime cannot resolve `node:fs` and the throw collapses to `fsSync = null`; downstream writes are skipped by the existing isSyncFsAvailable() gate, identical to the no-Node-fs branch (DISC-1555 precedent in heartbeat.ts:154; DISC-377 §Item 1 closes the residual top-of-file import gap).
+  fsSync = require("node:fs") as typeof import("node:fs");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, glasstrace/no-unguarded-node-require -- guarded by the same try/catch as the preceding `node:fs` require (line 31); throw collapses to `pathSync = null` and is gated by isSyncFsAvailable() (DISC-1555 precedent in heartbeat.ts:156; DISC-377 §Item 1).
+  pathSync = require("node:path") as typeof import("node:path");
+} catch {
+  // Non-Node runtime — null BOTH refs even on partial-load. If
+  // `node:fs` resolves but `node:path` throws, leaving fsSync
+  // populated would let the isSyncFsAvailable() probe return true and
+  // writeStateNow() would later NPE on `pathSync!.join(...)`. Clearing
+  // both keeps the silent-skip contract intact: any failure during
+  // loader init treats the runtime as non-Node and disables the
+  // writer entirely.
+  fsSync = null;
+  pathSync = null;
+}
 
 /** Schema for the runtime state file. */
 export interface RuntimeState {
@@ -126,7 +152,16 @@ export function startRuntimeStateWriter(options: {
   // try/catch on each lifecycle event. The cache is shared with
   // atomic-write, so the probe also primes the loader for downstream
   // CLI sites in the rare case they run in the same process.
-  if (!isSyncFsAvailable()) {
+  //
+  // Also verify the module-scope `fsSync` and `pathSync` cached refs
+  // populated correctly. atomic-write's `isSyncFsAvailable()` only
+  // checks `node:fs`; a partial-compat runtime where `node:fs`
+  // resolves but `node:path` does not (or where the two probes
+  // disagree for any other reason) would otherwise pass the gate and
+  // later NPE inside `writeStateNow()`. Treating any null ref as
+  // "non-Node" keeps the silent-skip contract intact across all
+  // partial-load shapes.
+  if (!isSyncFsAvailable() || fsSync === null || pathSync === null) {
     _started = true;
     return;
   }
@@ -228,11 +263,18 @@ function writeStateNow(): void {
       runtimeState.lastError = _lastError;
     }
 
-    const dir = join(_projectRoot, ".glasstrace");
-    const filePath = join(dir, "runtime-state.json");
+    // Non-null assertions are safe: every path that reaches
+    // writeStateNow() is downstream of the gate in
+    // startRuntimeStateWriter(), which short-circuits when
+    // isSyncFsAvailable() reports false OR when either cached ref is
+    // null. Listeners are only registered after the gate passes, so
+    // by the time writeStateNow() is invoked both refs are guaranteed
+    // populated.
+    const dir = pathSync!.join(_projectRoot, ".glasstrace");
+    const filePath = pathSync!.join(dir, "runtime-state.json");
 
     // Ensure directory exists (may not if uninit deleted it)
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fsSync!.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
     // Atomic write per SDK 2.0 §4.3: tmp + fsync(tmp) + rename +
     // fsync(parent). The sync variant is used because this writer
