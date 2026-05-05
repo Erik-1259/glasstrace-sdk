@@ -292,6 +292,32 @@ describe("generateInfoSection", () => {
       expect(info).toContain("get_session_timeline");
     });
 
+    // DISC-1536 SDK-side: the get_root_cause description rendered by
+    // `generateInfoSection()` (and injected into agent instruction files
+    // like CLAUDE.md / .cursorrules / codex.md by `glasstrace mcp add` and
+    // `glasstrace init`) must name the required `traceId` parameter and
+    // point the user's AI agent at a tool that supplies trace IDs. Without
+    // this, agents call get_root_cause with no arguments and the MCP
+    // server rejects the request. Asserts the required substrings without
+    // locking the exact wording so the description can evolve.
+    it("describes get_root_cause with required traceId and a trace-id source", () => {
+      const info = generateInfoSection(makeAgent("claude"), ENDPOINT);
+      const line = info
+        .split("\n")
+        .find((l) => l.includes("`get_root_cause`"));
+      expect(line, "expected a bullet describing get_root_cause").toBeDefined();
+      const rootCauseLine = line as string;
+      expect(rootCauseLine).toContain("traceId");
+      const namesTraceIdSource =
+        rootCauseLine.includes("get_latest_error") ||
+        rootCauseLine.includes("get_error_list") ||
+        rootCauseLine.includes("get_trace");
+      expect(
+        namesTraceIdSource,
+        "get_root_cause description must reference at least one of get_latest_error, get_error_list, or get_trace as a traceId source",
+      ).toBe(true);
+    });
+
     it("contains npx setup command", () => {
       const info = generateInfoSection(makeAgent("claude"), ENDPOINT);
       expect(info).toContain("npx glasstrace mcp add");
