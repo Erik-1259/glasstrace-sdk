@@ -1,5 +1,22 @@
 # @glasstrace/sdk
 
+## 1.3.6
+
+### Patch Changes
+
+- 4faf157: DISC-1536 SDK-side fix. Update the `get_root_cause` description rendered by `generateInfoSection()` and injected into agent instruction files (`CLAUDE.md`, `.cursorrules`, `codex.md`, etc.) so the user's AI coding agent learns that `get_root_cause` requires a `traceId` (sourced from `get_latest_error`, `get_error_list`, or `get_trace`). The injection runs from both `npx glasstrace mcp add` and `npx glasstrace init`. Previously the description omitted the requirement, so AI agents would call `get_root_cause` with no arguments and the MCP server would reject the request, costing the user tokens and reasoning cycles on a broken interaction. To pick up the corrected guidance, re-run `npx glasstrace mcp add` (or `npx glasstrace init`) in your project so the updated instructions are written into your agent's instruction file.
+- fd08b8b: DISC-377 Item 1 fix. Convert two unconditional `node:fs` / `node:path`
+  ESM imports in `runtime-state.ts` to a cached `require()` + try/catch
+  loader matching the precedent at `heartbeat.ts:150-159`, so the module
+  loads cleanly under non-Node runtimes (browser bundles, Vercel Edge,
+  Cloudflare Workers, Deno without Node-compat). Wave 8 8D guarded the
+  `require()` calls inside the writer body via the existing
+  `isSyncFsAvailable()` probe; Wave 13 closes the residual top-of-file
+  import gap that previously failed at module-evaluation time before the
+  probe could run. No public API change; trace-capture behavior under
+  Node is unchanged, and `startRuntimeStateWriter` retains its
+  synchronous `void` return contract.
+
 ## 1.3.5
 
 ### Patch Changes
