@@ -187,6 +187,7 @@ export function generateInfoSection(
     "",
     "Available tools:",
     "- `get_latest_error` - Get the most recent error trace from the current session",
+    "- `find_trace_candidates` - First-contact route/procedure/URL candidate selection when you have a route fragment, tRPC procedure, method, status, or rough recent activity window but not the exact trace ID. Returns candidate traces plus suggested `get_trace` / `get_root_cause` follow-up call arguments. Candidate discovery, not root-cause proof.",
     "- `get_error_list` - List recent errors with filtering and pagination",
     "- `get_trace` - Get a specific trace by ID or URL pattern",
     "- `get_root_cause` - Get the root cause analysis for a specific error trace (requires a `traceId` from `get_latest_error`, `get_error_list`, or `get_trace`)",
