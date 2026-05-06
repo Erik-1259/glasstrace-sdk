@@ -70,3 +70,17 @@ export {
 
 // --- Session ID derivation ---
 export { deriveSessionId } from "./session.js";
+
+// --- Side-effect evidence value enums (SDK-049 / SCHEMA-036) ---
+export {
+  SIDE_EFFECT_OPERATION_KINDS,
+  type SideEffectOperationKind,
+  SIDE_EFFECT_SEMANTIC_FIELD_KEYS,
+  type SideEffectSemanticFieldKey,
+  SIDE_EFFECT_OMISSION_REASONS,
+  type SideEffectOmissionReason,
+  SIDE_EFFECT_OPERATION_STATUSES,
+  type SideEffectOperationStatus,
+  SIDE_EFFECT_OPERATION_PHASES,
+  type SideEffectOperationPhase,
+} from "./side-effect.js";

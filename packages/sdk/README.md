@@ -293,6 +293,74 @@ body data. If your account enables the flag but a span never carries
 the internal attribute (no adapter set it), the public attribute is
 still absent. The default is "off, twice".
 
+## Capturing side-effect evidence
+
+When debugging a bug whose root cause is which side-effect operation
+ran with which non-sensitive semantic value — "the cancellation email
+used the wrong locale", "the wrong invite role was sent" — the agent
+needs to know template key, role, locale, timezone, status, and phase,
+but never the recipient, the rendered subject or body, the calendar
+link, or any token that flowed through the operation. The SDK can
+record allowlisted side-effect evidence on the active trace via
+`recordSideEffect()`, gated by the `sideEffectEvidence` capture-config
+flag.
+
+What the SDK captures: a compact, normalized operation label, the
+operation kind (`email`, `calendar_link`, `webhook`, `external_api`,
+`queue`, `after_callback`), an optional lifecycle status
+(`scheduled`, `started`, `succeeded`, `failed`, `unknown`), an
+optional execution phase (`request`, `post_response`, `background`,
+`unknown`), and a small set of allowlisted semantic fields:
+`templateKey`, `providerOperation`, `role`, `locale`, `timezone`,
+`status`, `phase`. Each value is bounded to compact tokens — IANA
+timezones, BCP-47 locales, identifier-shaped enum tokens. The
+per-trace operation budget is five.
+
+What the SDK does not capture: recipient email addresses, sender or
+recipient names, rendered email subjects or bodies, calendar links,
+invite links, any URL with a query string or fragment, any
+`Authorization`/`Cookie`/bearer-shaped value, any
+password/token/api_key key-value pair, any UUID, any Glasstrace API
+key, any free-form prose, and any structured payload. Values matching
+those shapes are silently dropped and replaced with an integer count
+under the matching omission attribute. The dropped value never
+appears on the span, in any log line, or in any export.
+
+Behavior-neutrality: `recordSideEffect()` is an observer.  It does
+not send, retry, duplicate, schedule, or delay any side effect. It
+never throws. If no recording span is active, the call is a silent
+no-op.
+
+Account opt-in: the capture is gated on the `sideEffectEvidence` flag
+in your account's capture configuration, which the SDK fetches at
+init time. The flag defaults to `false`, so no side-effect attribute
+is ever attached unless your account has explicitly enabled it.
+
+```ts
+import { recordSideEffect } from "@glasstrace/sdk";
+
+await mailer.send({ to: recipient, template: "EventCanceledEmail" });
+recordSideEffect({
+  kind: "email",
+  operation: "email.send",
+  status: "succeeded",
+  phase: "request",
+  fields: {
+    templateKey: "EventCanceledEmail",
+    role: "invitee",
+    locale: "en-US",
+    timezone: "Europe/Paris",
+  },
+});
+```
+
+The SDK guard protects only callers of `recordSideEffect()`; user
+code that bypasses the SDK and writes directly to the OTel span will
+still hit the wire as-is and is filtered by the glasstrace-product
+ingestion service before persistence. This is intentional
+defense-in-depth: the SDK is the first gate; the product receiver
+is the second.
+
 ## Source maps
 
 Glasstrace uploads server-side source maps at build time and resolves

@@ -13,6 +13,17 @@ export const CaptureConfigSchema = z.object({
   importGraph: z.boolean(),
   consoleErrors: z.boolean().optional().default(false),
   errorResponseBodies: z.boolean().optional().default(false),
+  /**
+   * Account opt-in for side-effect evidence emission (SDK-049).
+   *
+   * When `false` (default), `recordSideEffect()` is a silent no-op:
+   * no allowlist evaluation runs and no `glasstrace.side_effect.*`
+   * attribute reaches the wire. When `true`, allowlisted side-effect
+   * metadata is attached to the active OTel span subject to the
+   * client-side allowlist enforcement layered with the product's
+   * storage-time filter as defense-in-depth.
+   */
+  sideEffectEvidence: z.boolean().optional().default(false),
 });
 export type CaptureConfig = z.infer<typeof CaptureConfigSchema>;
 
