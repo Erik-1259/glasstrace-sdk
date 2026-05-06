@@ -307,11 +307,35 @@ describe("generateInfoSection", () => {
     it("contains tool descriptions", () => {
       const info = generateInfoSection(makeAgent("claude"), ENDPOINT);
       expect(info).toContain("get_latest_error");
+      expect(info).toContain("find_trace_candidates");
       expect(info).toContain("get_error_list");
       expect(info).toContain("get_trace");
       expect(info).toContain("get_root_cause");
       expect(info).toContain("get_test_suggestions");
       expect(info).toContain("get_session_timeline");
+    });
+
+    // SDK-048 Acceptance Gates 2 + 3: the SDK-rendered instruction file
+    // must (a) name `find_trace_candidates` as the first-contact discovery
+    // tool for route/procedure/URL fragments, and (b) frame candidate
+    // discovery as candidate selection rather than root-cause proof so
+    // agents cannot mistake a "no candidates" result for proof of absence.
+    // Asserts the load-bearing substrings without locking the exact wording.
+    it("describes find_trace_candidates as candidate selection, not root-cause proof", () => {
+      const info = generateInfoSection(makeAgent("claude"), ENDPOINT);
+      // Match the bullet that *describes* find_trace_candidates (its name
+      // token), not any bullet that merely mentions it as a follow-up.
+      const line = info
+        .split("\n")
+        .find((l) => /^- `find_trace_candidates`/.test(l));
+      expect(
+        line,
+        "expected a bullet describing find_trace_candidates",
+      ).toBeDefined();
+      const candidateLine = line as string;
+      expect(candidateLine).toContain("route");
+      expect(candidateLine).toMatch(/tRPC procedure|procedure/);
+      expect(candidateLine).toContain("Candidate discovery, not root-cause proof");
     });
 
     // DISC-1536 SDK-side: the get_root_cause description rendered by
@@ -324,9 +348,14 @@ describe("generateInfoSection", () => {
     // locking the exact wording so the description can evolve.
     it("describes get_root_cause with required traceId and a trace-id source", () => {
       const info = generateInfoSection(makeAgent("claude"), ENDPOINT);
+      // Match the bullet that *describes* get_root_cause (i.e. the bullet
+      // whose name token is `get_root_cause`), not any bullet that merely
+      // mentions it as a follow-up. Other tools' descriptions reference
+      // get_root_cause as a downstream call; the regex below pins on the
+      // leading `- \`get_root_cause\`` token to avoid that collision.
       const line = info
         .split("\n")
-        .find((l) => l.includes("`get_root_cause`"));
+        .find((l) => /^- `get_root_cause`/.test(l));
       expect(line, "expected a bullet describing get_root_cause").toBeDefined();
       const rootCauseLine = line as string;
       expect(rootCauseLine).toContain("traceId");
