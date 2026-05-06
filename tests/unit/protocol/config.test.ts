@@ -32,6 +32,47 @@ describe("CaptureConfigSchema", () => {
     }
   });
 
+  it("applies default false for optional sideEffectEvidence field", () => {
+    const result = CaptureConfigSchema.safeParse({
+      requestBodies: false,
+      queryParamValues: false,
+      envVarValues: false,
+      fullConsoleOutput: false,
+      importGraph: false,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.sideEffectEvidence).toBe(false);
+    }
+  });
+
+  it("accepts sideEffectEvidence: true when explicitly opted in", () => {
+    const result = CaptureConfigSchema.safeParse({
+      requestBodies: false,
+      queryParamValues: false,
+      envVarValues: false,
+      fullConsoleOutput: false,
+      importGraph: false,
+      sideEffectEvidence: true,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.sideEffectEvidence).toBe(true);
+    }
+  });
+
+  it("rejects non-boolean sideEffectEvidence", () => {
+    const result = CaptureConfigSchema.safeParse({
+      requestBodies: false,
+      queryParamValues: false,
+      envVarValues: false,
+      fullConsoleOutput: false,
+      importGraph: false,
+      sideEffectEvidence: "yes",
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("rejects missing required fields", () => {
     const result = CaptureConfigSchema.safeParse({
       requestBodies: false,

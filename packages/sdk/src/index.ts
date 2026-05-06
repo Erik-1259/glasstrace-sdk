@@ -189,3 +189,34 @@ export { captureCorrelationId } from "./correlation-id.js";
  */
 export type { CorrelationIdRequest } from "./correlation-id.js";
 
+/**
+ * Records allowlisted side-effect evidence (email, calendar_link,
+ * webhook, external_api, queue, after_callback) on the current
+ * active OTel span. Gated by the `sideEffectEvidence` capture-config
+ * flag (default off). Behavior is observational only: the function
+ * never executes, retries, or duplicates a side effect, and never
+ * throws.
+ *
+ * @see {@link RecordSideEffectInput}
+ */
+export { recordSideEffect } from "./side-effect/index.js";
+
+/**
+ * Input shape accepted by {@link recordSideEffect}.
+ */
+export type { RecordSideEffectInput } from "./side-effect/index.js";
+
+/**
+ * Re-exported value-enum types from `@glasstrace/protocol` so
+ * consumers building call sites for {@link recordSideEffect} can
+ * import the allowed operation kind / status / phase / semantic
+ * field key / omission reason directly from `@glasstrace/sdk`.
+ */
+export type {
+  SideEffectOperationKind,
+  SideEffectOperationStatus,
+  SideEffectOperationPhase,
+  SideEffectSemanticFieldKey,
+  SideEffectOmissionReason,
+} from "@glasstrace/protocol";
+

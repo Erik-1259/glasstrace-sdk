@@ -48,6 +48,45 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   ELEMENT_FINGERPRINT: "glasstrace.element.fingerprint",
   ELEMENT_CONFIDENCE: "glasstrace.element.confidence",
   TAB_ID: "glasstrace.tab.id",
+
+  // Side-effect evidence (SDK-049 / SCHEMA-036).
+  // Top-level operation attributes attached to the active span when a
+  // side-effect is recorded via `recordSideEffect()`. The wire-string
+  // set aligns verbatim with the product-side filter in
+  // `packages/ingestion/src/services/trace-writer.ts`.
+  SIDE_EFFECT_KIND: "glasstrace.side_effect.kind",
+  SIDE_EFFECT_OPERATION: "glasstrace.side_effect.operation",
+  SIDE_EFFECT_STATUS: "glasstrace.side_effect.status",
+  SIDE_EFFECT_PHASE: "glasstrace.side_effect.phase",
+
+  // Allowlisted semantic field attributes — one per allowlisted key.
+  // Wire keys are camelCase to match the SCHEMA-036 enum members
+  // exactly; the SDK constant names are SCREAMING_SNAKE per the rest
+  // of GLASSTRACE_ATTRIBUTE_NAMES.
+  SIDE_EFFECT_FIELD_TEMPLATE_KEY: "glasstrace.side_effect.field.templateKey",
+  SIDE_EFFECT_FIELD_PROVIDER_OPERATION:
+    "glasstrace.side_effect.field.providerOperation",
+  SIDE_EFFECT_FIELD_ROLE: "glasstrace.side_effect.field.role",
+  SIDE_EFFECT_FIELD_LOCALE: "glasstrace.side_effect.field.locale",
+  SIDE_EFFECT_FIELD_TIMEZONE: "glasstrace.side_effect.field.timezone",
+  SIDE_EFFECT_FIELD_STATUS: "glasstrace.side_effect.field.status",
+  SIDE_EFFECT_FIELD_PHASE: "glasstrace.side_effect.field.phase",
+
+  // Omission reason attributes — one per allowlisted reason. The
+  // attribute value carries an integer count; the rejected value is
+  // never echoed.
+  SIDE_EFFECT_OMITTED_PII: "glasstrace.side_effect.omitted.pii",
+  SIDE_EFFECT_OMITTED_SECRET: "glasstrace.side_effect.omitted.secret",
+  SIDE_EFFECT_OMITTED_RAW_PAYLOAD:
+    "glasstrace.side_effect.omitted.raw_payload",
+  SIDE_EFFECT_OMITTED_UNSUPPORTED_KEY:
+    "glasstrace.side_effect.omitted.unsupported_key",
+  SIDE_EFFECT_OMITTED_VALUE_TOO_LONG:
+    "glasstrace.side_effect.omitted.value_too_long",
+  SIDE_EFFECT_OMITTED_NOT_EMITTED:
+    "glasstrace.side_effect.omitted.not_emitted",
+  SIDE_EFFECT_OMITTED_CAPTURE_DISABLED:
+    "glasstrace.side_effect.omitted.capture_disabled",
 } as const;
 
 /** Default SDK capture config (conservative defaults). */
@@ -59,6 +98,7 @@ export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
   importGraph: false,
   consoleErrors: false,
   errorResponseBodies: false,
+  sideEffectEvidence: false,
 };
 
 // --- Source map upload limits ---
