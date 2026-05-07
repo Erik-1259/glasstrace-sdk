@@ -234,6 +234,65 @@ describe("maybeWarnStaleAgentInstructions", () => {
     expect(stderr.chunks).toHaveLength(0);
   });
 
+  // Codex review on PR #247: an orphaned/quoted start marker without a
+  // matching end is NOT a managed section and must not trigger a stale
+  // warning. Pins the FileState classifier's "complete pair" rule.
+  it("emits no warning for an orphaned start marker (no matching end)", async () => {
+    await writeFile(
+      join(testDir, "CLAUDE.md"),
+      [
+        "# Project intro",
+        "",
+        "Example marker (quoted, no real block follows):",
+        "    <!-- glasstrace:mcp:start v=1.0.0 -->",
+        "",
+        "Hand-written content with no end marker.",
+      ].join("\n"),
+    );
+
+    const stderr = makeStderr();
+    maybeWarnStaleAgentInstructions({
+      projectRoot: testDir,
+      sdkVersion: "1.4.0",
+      stderrWrite: stderr.write,
+    });
+
+    expect(stderr.chunks).toHaveLength(0);
+  });
+
+  // Codex review on PR #247: when multiple start markers appear before
+  // the first end marker (a quoted-example marker followed by the real
+  // managed block), classify on the MOST RECENT start preceding the
+  // end so the warning matches what the upgrade command will replace.
+  it("classifies on the LAST start marker preceding the end when multiple are present", async () => {
+    await writeFile(
+      join(testDir, "CLAUDE.md"),
+      [
+        "Example (quoted):",
+        "    <!-- glasstrace:mcp:start -->",
+        "",
+        "## Real block:",
+        "<!-- glasstrace:mcp:start v=1.0.0 -->",
+        "old",
+        "<!-- glasstrace:mcp:end -->",
+      ].join("\n"),
+    );
+
+    const stderr = makeStderr();
+    maybeWarnStaleAgentInstructions({
+      projectRoot: testDir,
+      sdkVersion: "1.4.0",
+      stderrWrite: stderr.write,
+    });
+
+    // Real block has stamp 1.0.0 < running 1.4.0 → stale → one warning.
+    // If we had anchored on the FIRST (legacy unstamped) marker, we
+    // would have classified as "no-stamp" and emitted no warning,
+    // leaving the actual stale block undetected at SDK init.
+    expect(stderr.chunks).toHaveLength(1);
+    expect(stderr.chunks[0]).toContain("CLAUDE.md");
+  });
+
   it("emits no warning when the file has no managed section", async () => {
     await writeFile(
       join(testDir, "CLAUDE.md"),

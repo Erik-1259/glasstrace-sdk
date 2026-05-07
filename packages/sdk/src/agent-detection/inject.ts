@@ -79,6 +79,17 @@ function isEndMarker(line: string): boolean {
 }
 
 /**
+ * Public alias for {@link isEndMarker}, used by the upgrade-notice
+ * module to confirm that a stamped start marker has a matching end
+ * before classifying the file as having a managed section. Exported
+ * only for cross-module reuse within `agent-detection/`; not part of
+ * the public SDK surface.
+ */
+export function isEndMarkerLine(line: string): boolean {
+  return isEndMarker(line);
+}
+
+/**
  * Determines whether an error is a filesystem permission or read-only error.
  * Covers EACCES (permission denied), EPERM (operation not permitted), and
  * EROFS (read-only filesystem) to handle containerized/mounted environments.
@@ -157,6 +168,14 @@ export async function writeMcpConfig(
  * only inspected by the upgrade-notice module via
  * {@link parseStartMarkerLine}; in-place replacement only needs the
  * line indices.
+ *
+ * When multiple start markers appear before the first end marker
+ * (e.g. a quoted example of the marker shape earlier in the file
+ * followed by the real managed block), the boundary anchors to the
+ * MOST RECENT start preceding the end. This matches the pre-SDK-050
+ * behaviour of `findMarkerBoundaries` and avoids the "swallow the
+ * user's example into the replacement" failure mode that anchoring
+ * to the FIRST start would produce.
  */
 function findMarkerBoundaries(
   lines: string[],
@@ -164,11 +183,11 @@ function findMarkerBoundaries(
   let startIdx = -1;
 
   for (let i = 0; i < lines.length; i++) {
-    if (startIdx === -1) {
-      if (parseStartMarkerLine(lines[i]) !== null) {
-        startIdx = i;
-      }
-    } else if (isEndMarker(lines[i])) {
+    if (parseStartMarkerLine(lines[i]) !== null) {
+      // Track the most recent start so a quoted/example marker earlier
+      // in the file does not capture the replacement window.
+      startIdx = i;
+    } else if (startIdx !== -1 && isEndMarker(lines[i])) {
       return { startIdx, endIdx: i };
     }
   }

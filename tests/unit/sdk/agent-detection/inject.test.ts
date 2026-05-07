@@ -623,6 +623,75 @@ describe("hasManagedSection", () => {
   });
 });
 
+// Codex review on PR #247: when a file contains an earlier "quoted
+// example" marker line followed by the real managed block, the boundary
+// must anchor to the MOST RECENT start preceding the end so the example
+// text outside the real block is preserved verbatim. This test pins the
+// behaviour at the inject-level by exercising the public
+// injectInfoSection contract.
+describe("findMarkerBoundaries — multiple start markers before first end", () => {
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = tmpDir();
+    await mkdir(testDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  it("anchors replacement to the LAST start marker preceding the end (preserves quoted example)", async () => {
+    const infoPath = join(testDir, "CLAUDE.md");
+    const existing = [
+      "# My Project",
+      "",
+      "Example marker line (do not interpret as a real block):",
+      "",
+      "    <!-- glasstrace:mcp:start -->",
+      "",
+      "## Real managed section below",
+      "",
+      "<!-- glasstrace:mcp:start v=1.0.0 -->",
+      "old real content",
+      "<!-- glasstrace:mcp:end -->",
+      "",
+      "## After the block",
+    ].join("\n");
+    await writeFile(infoPath, existing);
+
+    const stamped = [
+      "<!-- glasstrace:mcp:start v=1.4.0 -->",
+      "",
+      "## Glasstrace MCP Integration",
+      "Refreshed content",
+      "",
+      "<!-- glasstrace:mcp:end -->",
+      "",
+    ].join("\n");
+
+    const agent = makeAgent({ infoFilePath: infoPath });
+    await injectInfoSection(agent, stamped, testDir);
+
+    const written = await readFile(infoPath, "utf-8");
+    // The quoted example line is preserved verbatim.
+    expect(written).toContain(
+      "Example marker line (do not interpret as a real block):",
+    );
+    expect(written).toContain("    <!-- glasstrace:mcp:start -->");
+    // The real block was replaced in place.
+    expect(written).toContain("Refreshed content");
+    expect(written).not.toContain("old real content");
+    // After-block content untouched.
+    expect(written).toContain("## After the block");
+    // Exactly one end marker remains (the new one inside the
+    // refreshed block).
+    const endCount =
+      (written.match(/<!-- glasstrace:mcp:end -->/g) ?? []).length;
+    expect(endCount).toBe(1);
+  });
+});
+
 describe("updateGitignore", () => {
   let testDir: string;
 

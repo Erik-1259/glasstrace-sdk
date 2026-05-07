@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isAbsolute, relative } from "node:path";
 import { MCP_ENDPOINT } from "../mcp-runtime.js";
 import { detectAgents } from "../agent-detection/detect.js";
 import { generateInfoSection } from "../agent-detection/configs.js";
@@ -31,14 +32,20 @@ export interface UpgradeInstructionsResult {
   exitCode: number;
   /**
    * Files whose managed Glasstrace section was refreshed in place.
-   * Always project-relative so output stays portable across machines.
+   * Reported as paths relative to {@link UpgradeInstructionsOptions.projectRoot}
+   * so the CLI output stays portable across machines and developer
+   * homes; an absolute path is returned only when the detected file
+   * lives outside the resolved project root (e.g. Windsurf's global
+   * config under `$HOME/.codeium/`), where a relative form would be
+   * misleading.
    */
   refreshed: string[];
   /**
    * Files inspected that did not contain a managed section, and were
    * therefore left untouched. Reported so the user can verify the
    * command did not accidentally append a block to a hand-written
-   * instruction file.
+   * instruction file. Same path-shape rule as
+   * {@link UpgradeInstructionsResult.refreshed}.
    */
   skipped: string[];
   /**
@@ -71,6 +78,24 @@ export interface UpgradeInstructionsResult {
  * @param options - Project root to operate on. The CLI entry point
  *   resolves monorepo roots before calling this function.
  */
+/**
+ * Renders an absolute file path in a form suitable for CLI output:
+ * relative to `projectRoot` when the file lives inside the tree, or
+ * the original absolute path otherwise. Keeps output portable for
+ * normal in-tree files (`CLAUDE.md`, `.cursorrules`, `codex.md`) while
+ * preserving full paths for out-of-tree targets like Windsurf's
+ * global config (`$HOME/.codeium/windsurf/mcp_config.json`), where a
+ * relative form (e.g. `../../../../home/.../mcp_config.json`) would
+ * be harder to read than the absolute path.
+ */
+function formatPathForOutput(filePath: string, projectRoot: string): string {
+  const rel = relative(projectRoot, filePath);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    return filePath;
+  }
+  return rel;
+}
+
 export async function runUpgradeInstructions(
   options: UpgradeInstructionsOptions,
 ): Promise<UpgradeInstructionsResult> {
@@ -99,6 +124,11 @@ export async function runUpgradeInstructions(
       continue;
     }
 
+    const displayPath = formatPathForOutput(
+      agent.infoFilePath,
+      options.projectRoot,
+    );
+
     let containsSection: boolean;
     try {
       containsSection = await hasManagedSection(agent.infoFilePath);
@@ -106,7 +136,7 @@ export async function runUpgradeInstructions(
       // hasManagedSection swallows read errors and returns false, so
       // this branch is defensive against a future refactor.
       warnings.push(
-        `Could not inspect ${agent.infoFilePath}: ${err instanceof Error ? err.message : String(err)}`,
+        `Could not inspect ${displayPath}: ${err instanceof Error ? err.message : String(err)}`,
       );
       continue;
     }
@@ -116,7 +146,7 @@ export async function runUpgradeInstructions(
       // instruction file has no Glasstrace managed section. Refusing
       // to inject prevents `upgrade-instructions` from accidentally
       // adding a Glasstrace block to a project that opted out.
-      skipped.push(agent.infoFilePath);
+      skipped.push(displayPath);
       continue;
     }
 
@@ -130,10 +160,10 @@ export async function runUpgradeInstructions(
 
     try {
       await injectInfoSection(agent, content, options.projectRoot);
-      refreshed.push(agent.infoFilePath);
+      refreshed.push(displayPath);
     } catch (err) {
       errors.push(
-        `Failed to refresh ${agent.infoFilePath}: ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to refresh ${displayPath}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

@@ -89,7 +89,9 @@ describe("runUpgradeInstructions", () => {
     const result = await runUpgradeInstructions({ projectRoot: testDir });
 
     expect(result.exitCode).toBe(0);
-    expect(result.refreshed).toContain(join(testDir, "CLAUDE.md"));
+    // refreshed paths are project-relative so output is portable
+    // across machines (Codex feedback PR #247).
+    expect(result.refreshed).toContain("CLAUDE.md");
     expect(result.errors).toEqual([]);
 
     const written = await readFile(join(testDir, "CLAUDE.md"), "utf-8");
@@ -119,7 +121,7 @@ describe("runUpgradeInstructions", () => {
     const result = await runUpgradeInstructions({ projectRoot: testDir });
 
     expect(result.exitCode).toBe(0);
-    expect(result.refreshed).toContain(join(testDir, "CLAUDE.md"));
+    expect(result.refreshed).toContain("CLAUDE.md");
 
     const written = await readFile(join(testDir, "CLAUDE.md"), "utf-8");
     // Single managed section after upgrade — no duplicate appended.
@@ -138,7 +140,7 @@ describe("runUpgradeInstructions", () => {
     const result = await runUpgradeInstructions({ projectRoot: testDir });
 
     expect(result.exitCode).toBe(0);
-    expect(result.skipped).toContain(join(testDir, "CLAUDE.md"));
+    expect(result.skipped).toContain("CLAUDE.md");
     expect(result.refreshed).toEqual([]);
 
     // File content unchanged.
@@ -165,9 +167,7 @@ describe("runUpgradeInstructions", () => {
     const result = await runUpgradeInstructions({ projectRoot: testDir });
 
     expect(result.exitCode).toBe(0);
-    expect(result.refreshed.sort()).toEqual(
-      [join(testDir, "CLAUDE.md"), join(testDir, ".cursorrules")].sort(),
-    );
+    expect(result.refreshed.sort()).toEqual([".cursorrules", "CLAUDE.md"]);
 
     const claudeAfter = await readFile(join(testDir, "CLAUDE.md"), "utf-8");
     const cursorAfter = await readFile(join(testDir, ".cursorrules"), "utf-8");
@@ -192,8 +192,8 @@ describe("runUpgradeInstructions", () => {
     const result = await runUpgradeInstructions({ projectRoot: testDir });
 
     expect(result.exitCode).toBe(0);
-    expect(result.refreshed).toEqual([join(testDir, "CLAUDE.md")]);
-    expect(result.skipped).toEqual([join(testDir, ".cursorrules")]);
+    expect(result.refreshed).toEqual(["CLAUDE.md"]);
+    expect(result.skipped).toEqual([".cursorrules"]);
 
     const cursorAfter = await readFile(join(testDir, ".cursorrules"), "utf-8");
     expect(cursorAfter).toBe(cursorBody);

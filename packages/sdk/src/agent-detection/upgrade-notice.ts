@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseStartMarkerLine } from "./inject.js";
+import { isEndMarkerLine, parseStartMarkerLine } from "./inject.js";
 
 /**
  * SDK-050 / DISC-1592 stale-managed-section warning.
@@ -218,24 +218,47 @@ function inspectFile(filePath: string, runningSdkVersion: string): FileState {
   }
 
   const lines = content.split("\n");
+
+  // Walk the file looking for a COMPLETE marker pair (start followed
+  // by end). An orphaned/quoted start marker without a matching end
+  // is treated as no-section so a hand-edited or truncated file
+  // cannot trigger a false stale warning.
+  //
+  // When multiple start markers appear before the first end marker
+  // (e.g. an earlier quoted-example marker line followed by the real
+  // managed block), classify based on the MOST RECENT start preceding
+  // the end — same anchoring as `findMarkerBoundaries` in inject.ts,
+  // so detection here mirrors what the upgrade command will actually
+  // replace.
+  let lastStart: { stamp: string | null } | null = null;
+  let foundEnd = false;
   for (const line of lines) {
     const parsed = parseStartMarkerLine(line);
-    if (parsed === null) continue;
-
-    if (parsed.stamp === null) {
-      return "no-stamp";
+    if (parsed !== null) {
+      lastStart = parsed;
+      continue;
     }
-    const cmp = compareSemver(parsed.stamp, runningSdkVersion);
-    if (cmp === null) {
-      // Stamp present but unparseable (hand-edited, future format).
-      // SDK-050 future-format tolerance: skip the warning rather than
-      // crash. Upgrade still re-renders correctly via inject.ts.
-      return "unknown-stamp";
+    if (lastStart !== null && isEndMarkerLine(line)) {
+      foundEnd = true;
+      break;
     }
-    return cmp < 0 ? "stale" : "current";
   }
 
-  return "no-section";
+  if (lastStart === null || !foundEnd) {
+    return "no-section";
+  }
+
+  if (lastStart.stamp === null) {
+    return "no-stamp";
+  }
+  const cmp = compareSemver(lastStart.stamp, runningSdkVersion);
+  if (cmp === null) {
+    // Stamp present but unparseable (hand-edited, future format).
+    // SDK-050 future-format tolerance: skip the warning rather than
+    // crash. Upgrade still re-renders correctly via inject.ts.
+    return "unknown-stamp";
+  }
+  return cmp < 0 ? "stale" : "current";
 }
 
 /**
