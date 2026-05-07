@@ -8,6 +8,10 @@ import {
   removeDiscoveryFile,
   relativeDiscoveryPath,
 } from "./discovery-file.js";
+import {
+  isEndMarkerLine,
+  parseStartMarkerLine,
+} from "../agent-detection/inject.js";
 
 /**
  * Options for the uninit command.
@@ -465,8 +469,16 @@ export function removeRegisterGlasstrace(content: string): string {
 
 /**
  * Removes content between glasstrace marker comments from a file.
- * Supports both HTML markers (`<!-- glasstrace:mcp:start/end -->`) and
- * hash markers (`# glasstrace:mcp:start/end`).
+ * Supports both legacy unstamped markers (pre-SDK-050) and SDK-050+
+ * stamped markers (`<!-- glasstrace:mcp:start v=<sdkVersion> -->` /
+ * `# glasstrace:mcp:start v=<sdkVersion>`) for both HTML and hash
+ * conventions, by deferring marker recognition to the shared parser
+ * in `agent-detection/inject.ts`.
+ *
+ * Anchoring matches `findMarkerBoundaries` in inject.ts: when multiple
+ * start markers appear before the first end marker (e.g. a quoted
+ * example marker line followed by the real managed block), the
+ * removal window anchors to the MOST RECENT start preceding the end.
  *
  * @internal Exported for unit testing only.
  */
@@ -476,17 +488,11 @@ export function removeMarkerSection(content: string): { content: string; removed
   let endIdx = -1;
 
   for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (
-      trimmed === "<!-- glasstrace:mcp:start -->" ||
-      trimmed === "# glasstrace:mcp:start"
-    ) {
+    if (parseStartMarkerLine(lines[i]) !== null) {
+      // Track the most recent start so a quoted/example marker
+      // earlier in the file does not capture the removal window.
       startIdx = i;
-    } else if (
-      (trimmed === "<!-- glasstrace:mcp:end -->" ||
-        trimmed === "# glasstrace:mcp:end") &&
-      startIdx !== -1
-    ) {
+    } else if (isEndMarkerLine(lines[i]) && startIdx !== -1) {
       endIdx = i;
       break;
     }

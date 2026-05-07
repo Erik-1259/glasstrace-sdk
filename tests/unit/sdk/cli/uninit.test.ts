@@ -554,6 +554,74 @@ describe("removeMarkerSection", () => {
     expect(result.removed).toBe(true);
     expect(result.content).toBe("");
   });
+
+  // SDK-050 / DISC-1592 regression check: uninit must remove the
+  // version-stamped start marker form. A literal `=== "<!--
+  // glasstrace:mcp:start -->"` test would silently fail under
+  // SDK-050+ rendered files and leave the managed block untouched
+  // during uninit.
+  it("removes SDK-050+ stamped HTML marker section", () => {
+    const content = [
+      "# Project Info",
+      "",
+      "<!-- glasstrace:mcp:start v=1.5.0 -->",
+      "## Glasstrace MCP Integration",
+      "Some glasstrace content here.",
+      "<!-- glasstrace:mcp:end -->",
+      "",
+      "## After",
+    ].join("\n");
+
+    const result = removeMarkerSection(content);
+    expect(result.removed).toBe(true);
+    expect(result.content).toContain("# Project Info");
+    expect(result.content).toContain("## After");
+    expect(result.content).not.toContain("glasstrace:mcp");
+    expect(result.content).not.toContain("Glasstrace MCP Integration");
+  });
+
+  it("removes SDK-050+ stamped hash marker section", () => {
+    const content = [
+      "Some rules here.",
+      "",
+      "# glasstrace:mcp:start v=1.5.0",
+      "## Glasstrace MCP Integration",
+      "# glasstrace:mcp:end",
+    ].join("\n");
+
+    const result = removeMarkerSection(content);
+    expect(result.removed).toBe(true);
+    expect(result.content).toContain("Some rules here.");
+    expect(result.content).not.toContain("glasstrace:mcp");
+  });
+
+  it("anchors removal to the LAST start marker preceding the end (preserves quoted example)", () => {
+    const content = [
+      "# Project",
+      "",
+      "Example marker (quoted, do NOT remove):",
+      "    <!-- glasstrace:mcp:start -->",
+      "",
+      "## Real block:",
+      "<!-- glasstrace:mcp:start v=1.5.0 -->",
+      "Glasstrace content.",
+      "<!-- glasstrace:mcp:end -->",
+      "",
+      "## After",
+    ].join("\n");
+
+    const result = removeMarkerSection(content);
+    expect(result.removed).toBe(true);
+    // The quoted example line is preserved verbatim; only the real
+    // stamped block is removed.
+    expect(result.content).toContain(
+      "Example marker (quoted, do NOT remove):",
+    );
+    expect(result.content).toContain("    <!-- glasstrace:mcp:start -->");
+    expect(result.content).not.toContain("Glasstrace content.");
+    expect(result.content).not.toContain("v=1.5.0");
+    expect(result.content).toContain("## After");
+  });
 });
 
 // ---------------------------------------------------------------------------
