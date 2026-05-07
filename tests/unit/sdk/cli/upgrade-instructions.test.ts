@@ -99,14 +99,14 @@ describe("runUpgradeInstructions", () => {
     expect(written).toContain("v=0.0.0-test");
     expect(written).toContain("## Untouched section");
     expect(written).toContain("User-owned text here.");
-    // The decision paragraph (DISC-1585) is now in the rendered
+    // The decision paragraph (DISC-1593) is now in the rendered
     // managed section.
     expect(written).toContain(
       "runtime evidence would materially reduce uncertainty",
     );
   });
 
-  it("refreshes a legacy unstamped managed section in place (DISC-1586 backward-compat)", async () => {
+  it("refreshes a legacy unstamped managed section in place (DISC-1592 backward-compat)", async () => {
     const claudeBody = [
       "<!-- glasstrace:mcp:start -->",
       "Pre-SDK-050 content",

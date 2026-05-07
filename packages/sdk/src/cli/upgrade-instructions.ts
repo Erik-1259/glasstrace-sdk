@@ -54,12 +54,12 @@ export interface UpgradeInstructionsResult {
 
 /**
  * Refreshes the managed Glasstrace MCP section in every detected agent
- * instruction file in the project (DISC-1586 / SDK-050 §Required
+ * instruction file in the project (DISC-1592 / SDK-050 §Required
  * Semantics Item 2). Idempotent and safe to re-run; the helper only
  * touches files that already contain a marker pair, so a hand-written
  * `CLAUDE.md` without a Glasstrace block is left alone.
  *
- * Multi-file projects are handled in a single run (DISC-1586 §Multi-file
+ * Multi-file projects are handled in a single run (DISC-1592 §Multi-file
  * projects): the same `detectAgents()` call that scaffolds files at
  * `init` time enumerates every detected agent, and this function
  * refreshes every file with a managed section in one pass.

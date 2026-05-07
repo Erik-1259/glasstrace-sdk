@@ -144,7 +144,7 @@ export function generateMcpConfig(
  * that could be smuggled into the agent instruction file via a
  * malformed callsite.
  *
- * The stamp is the SDK semver string and nothing else (DISC-1586 / SDK-050
+ * The stamp is the SDK semver string and nothing else (DISC-1592 / SDK-050
  * Required Semantics Item 1: "the stamp encodes only the SDK semver
  * string ... it must not embed user-controlled or environment-derived
  * content"). Reject anything outside this charset at the render site
@@ -184,10 +184,10 @@ function hashMarkers(sdkVersion: string): MarkerPair {
  * are NEVER included in this output.
  *
  * The rendered block opens with a cost-aware cross-tool decision paragraph
- * (DISC-1585 / SDK-050) telling the user's AI agent **when** Glasstrace
+ * (DISC-1593 / SDK-050) telling the user's AI agent **when** Glasstrace
  * MCP is worth calling at all and **which** tool is the cheapest first
  * call for each symptom class. The start marker carries a `v=<sdkVersion>`
- * stamp (DISC-1586 / SDK-050) so a later `glasstrace upgrade-instructions`
+ * stamp (DISC-1592 / SDK-050) so a later `glasstrace upgrade-instructions`
  * run — and the SDK's stale-section warning at init — can detect that
  * the file was rendered by an older SDK and refresh the block.
  *
@@ -217,7 +217,7 @@ export function generateInfoSection(
     );
   }
 
-  // Cost-aware cross-tool decision paragraph (DISC-1585 / SDK-050
+  // Cost-aware cross-tool decision paragraph (DISC-1593 / SDK-050
   // Required Semantics §1). Load-bearing semantics:
   //   1. Frame Glasstrace MCP as conditionally worth calling.
   //   2. Name cheapest-orientation routing per symptom class.

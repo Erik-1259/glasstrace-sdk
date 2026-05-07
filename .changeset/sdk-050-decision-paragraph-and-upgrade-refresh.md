@@ -4,7 +4,9 @@
 
 feat(sdk): cost-aware cross-tool decision paragraph and version-stamped
 upgrade-refresh mechanism for the agent-instruction managed section
-(SDK-050; covers DISC-1585 and DISC-1586)
+(SDK-050; covers DISC-1593 and DISC-1592 — renumbered 2026-05-07 from
+DISC-1585 / DISC-1586 after the contract-drift audit (PR #964) claimed
+DISC-1586 / 1587 / 1588 in the same window)
 
 ## Summary
 
@@ -57,8 +59,9 @@ from this file (or from the SDK canary release notes that embed this file
 verbatim per SDK-050's release-artifact requirement).
 
 **Brief:** `docs/task-briefs/SDK-050.md`
-**Discoveries covered:** DISC-1585 (decision paragraph), DISC-1586
-(refresh-on-upgrade mechanism)
+**Discoveries covered:** DISC-1593 (decision paragraph; renumbered
+2026-05-07 from DISC-1585), DISC-1592 (refresh-on-upgrade mechanism;
+renumbered from DISC-1586)
 **Sibling brief (separate canary):** `docs/task-briefs/MCP-025.md` — uses a
 similar but distinct prompt at
 `docs/validation-prompts/MCP-025-server-verification.md` (will be authored
@@ -75,8 +78,8 @@ when MCP-025 is ready to ship; do not conflate the two prompts).
    version string (e.g. `0.0.0-canary-20260508120000`). Hand it to the
    validation agent in `glasstrace-validation`.
 4. Validation agent returns the report. The conductor reviews it against
-   SDK-050's Acceptance Gates. If green, conductor closes DISC-1585 and
-   DISC-1586 and marks SDK-050 IMPLEMENTED. Erik then cuts the stable
+   SDK-050's Acceptance Gates. If green, conductor closes DISC-1593 and
+   DISC-1592 and marks SDK-050 IMPLEMENTED. Erik then cuts the stable
    `@glasstrace/sdk` release.
 
 ## The prompt (copy from below verbatim)
@@ -328,7 +331,7 @@ DO NOT
 
 ## Acceptance criteria for closeout
 
-The conductor closes DISC-1585, DISC-1586, and SDK-050 only when the
+The conductor closes DISC-1593, DISC-1592, and SDK-050 only when the
 returned report shows ALL of the following:
 
 - **Pre-flight 1–4 all confirm green.** The decision paragraph is

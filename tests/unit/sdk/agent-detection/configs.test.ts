@@ -437,9 +437,9 @@ describe("generateInfoSection", () => {
   // SDK-050 Acceptance Gate 5: snapshot-style assertions on the rendered
   // info section for every target that emits content today (claude /
   // codex / cursor). Each must contain the cost-aware decision paragraph
-  // (DISC-1585), the cheapest-orientation routing references, the
+  // (DISC-1593), the cheapest-orientation routing references, the
   // absence-proof clause, and a parseable `v=<version>` stamp on the
-  // start marker (DISC-1586).
+  // start marker (DISC-1592).
   describe("SDK-050 decision paragraph + version stamp", () => {
     const TARGETS = [
       { name: "claude" as const, markerKind: "html" as const },
@@ -455,7 +455,7 @@ describe("generateInfoSection", () => {
             ENDPOINT,
             SDK_VERSION,
           );
-          // Decision paragraph (DISC-1585 Required Semantics §1) load-bearing
+          // Decision paragraph (DISC-1593 Required Semantics §1) load-bearing
           // claim: Glasstrace MCP is *conditionally* worth calling.
           expect(info).toContain(
             "runtime evidence would materially reduce uncertainty",
@@ -518,7 +518,7 @@ describe("generateInfoSection", () => {
           );
           if (target.markerKind === "html") {
             expect(info).toContain(`<!-- glasstrace:mcp:start v=${SDK_VERSION} -->`);
-            // The end marker remains unstamped (DISC-1586 Required
+            // The end marker remains unstamped (DISC-1592 Required
             // Semantics Item 1: "the marker end (...mcp:end) does not
             // need a stamp").
             expect(info).toContain("<!-- glasstrace:mcp:end -->");

@@ -79,10 +79,12 @@ describe("maybeWarnStaleAgentInstructions", () => {
     testDir = tmpDir();
     await mkdir(testDir, { recursive: true });
     delete process.env.GLASSTRACE_DISABLE_UPGRADE_NOTICE;
+    delete process.env.CI;
   });
 
   afterEach(async () => {
     delete process.env.GLASSTRACE_DISABLE_UPGRADE_NOTICE;
+    delete process.env.CI;
     _resetUpgradeNoticeForTesting();
     await rm(testDir, { recursive: true, force: true });
   });
@@ -111,6 +113,8 @@ describe("maybeWarnStaleAgentInstructions", () => {
     // Single newline at the end — single stderr line.
     expect(stderr.chunks[0].endsWith("\n")).toBe(true);
     expect((stderr.chunks[0].match(/\n/g) ?? []).length).toBe(1);
+    // Brand prefix is consistent with other SDK stderr messages.
+    expect(stderr.chunks[0].startsWith("[glasstrace] ")).toBe(true);
   });
 
   it("emits at most one warning per process boot (even with multiple init calls)", async () => {
@@ -303,7 +307,7 @@ describe("maybeWarnStaleAgentInstructions", () => {
   });
 
   it("warns when ANY of multiple agent instruction files is stale (multi-file projects)", async () => {
-    // DISC-1586 §Multi-file projects: the stale-warning at SDK init
+    // DISC-1592 §Multi-file projects: the stale-warning at SDK init
     // must fire if any detected file is stale, but only ONE line per
     // process. The warning text mentions every stale file.
     await writeFile(
@@ -381,6 +385,112 @@ describe("maybeWarnStaleAgentInstructions", () => {
       }),
     ).not.toThrow();
     expect(stderr.chunks).toHaveLength(0);
+  });
+
+  // SDK-050 Required Semantics §2 Item 3 (optional CI suppression):
+  // when stderr is not a TTY AND `CI=true`, skip the warning. The
+  // combination is the GitHub-Actions / many-CI convention for an
+  // automated build context where the stderr nag is just noise. An
+  // interactive developer run still sees the warning because either
+  // condition fails (TTY present, or CI unset).
+  it("suppresses the warning under non-TTY stderr + CI=true", async () => {
+    await writeFile(
+      join(testDir, "CLAUDE.md"),
+      [
+        "<!-- glasstrace:mcp:start v=1.0.0 -->",
+        "old content",
+        "<!-- glasstrace:mcp:end -->",
+      ].join("\n"),
+    );
+    process.env.CI = "true";
+
+    // Vitest workers run with stderr.isTTY === undefined (not a TTY),
+    // so the heuristic kicks in when CI=true is set in env.
+    expect(process.stderr.isTTY === true).toBe(false);
+
+    const stderr = makeStderr();
+    maybeWarnStaleAgentInstructions({
+      projectRoot: testDir,
+      sdkVersion: "1.4.0",
+      stderrWrite: stderr.write,
+    });
+
+    expect(stderr.chunks).toHaveLength(0);
+  });
+
+  it("does NOT suppress when CI is unset (interactive build)", async () => {
+    await writeFile(
+      join(testDir, "CLAUDE.md"),
+      [
+        "<!-- glasstrace:mcp:start v=1.0.0 -->",
+        "old content",
+        "<!-- glasstrace:mcp:end -->",
+      ].join("\n"),
+    );
+    delete process.env.CI;
+
+    const stderr = makeStderr();
+    maybeWarnStaleAgentInstructions({
+      projectRoot: testDir,
+      sdkVersion: "1.4.0",
+      stderrWrite: stderr.write,
+    });
+
+    expect(stderr.chunks).toHaveLength(1);
+  });
+
+  it("does NOT suppress when CI is a truthy-but-not-literal-true value", async () => {
+    await writeFile(
+      join(testDir, "CLAUDE.md"),
+      [
+        "<!-- glasstrace:mcp:start v=1.0.0 -->",
+        "old content",
+        "<!-- glasstrace:mcp:end -->",
+      ].join("\n"),
+    );
+    // Some CI vendors set CI=1 instead of CI=true. The brief named the
+    // literal `"true"` form; we accept only that to avoid suppressing
+    // the warning in environments where `CI` happens to be a path or
+    // similar non-CI marker.
+    for (const value of ["1", "TRUE", "True", "yes"]) {
+      _resetUpgradeNoticeForTesting();
+      process.env.CI = value;
+      const stderr = makeStderr();
+      maybeWarnStaleAgentInstructions({
+        projectRoot: testDir,
+        sdkVersion: "1.4.0",
+        stderrWrite: stderr.write,
+      });
+      expect(stderr.chunks, `value=${value}`).toHaveLength(1);
+    }
+  });
+
+  it("treats a pathologically large agent instruction file as absent (DoS guard)", async () => {
+    // The stale-stamp check runs synchronously at registerGlasstrace()
+    // time; an attacker (or accidental hand-edit) producing a 200 MB
+    // CLAUDE.md must not cause the SDK to block on a multi-second
+    // sync read. The guard caps inspection at 5 MB and treats anything
+    // larger as "absent" — no warning, no crash.
+    //
+    // We simulate this by writing a 6 MB file. The write itself is a
+    // few hundred ms; the SDK call must complete near-instantly
+    // afterwards (no readFileSync of the big file).
+    const bigBuf = Buffer.alloc(6 * 1024 * 1024, "x");
+    await writeFile(join(testDir, "CLAUDE.md"), bigBuf);
+
+    const stderr = makeStderr();
+    const start = Date.now();
+    maybeWarnStaleAgentInstructions({
+      projectRoot: testDir,
+      sdkVersion: "1.4.0",
+      stderrWrite: stderr.write,
+    });
+    const elapsed = Date.now() - start;
+
+    // Pathological file → no warning emitted, sync path returns
+    // quickly because we never read the 6 MB body.
+    expect(stderr.chunks).toHaveLength(0);
+    expect(elapsed).toBeLessThan(500);
   });
 
   it("does not write to a real stderr when the test seam is provided", () => {

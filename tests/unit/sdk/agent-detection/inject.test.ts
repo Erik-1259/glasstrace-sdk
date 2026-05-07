@@ -347,7 +347,7 @@ describe("injectInfoSection", () => {
     expect(written).toBe("# Existing\n");
   });
 
-  // SDK-050 Acceptance Gate 2 / DISC-1586 backward-compatibility
+  // SDK-050 Acceptance Gate 2 / DISC-1592 backward-compatibility
   // constraint: an upgrading user's first re-render MUST find the
   // existing legacy unstamped block and replace it in place rather
   // than appending a duplicate.
@@ -497,7 +497,7 @@ describe("injectInfoSection", () => {
   });
 });
 
-// SDK-050 Required Semantics Item 1 / DISC-1586: shared parser used
+// SDK-050 Required Semantics Item 1 / DISC-1592: shared parser used
 // by inject.ts (boundary detection) and upgrade-notice.ts (staleness
 // detection). Tested directly so the contract is pinned at one place.
 describe("parseStartMarkerLine", () => {

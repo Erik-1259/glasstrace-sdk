@@ -11,7 +11,7 @@ import type { DetectedAgent } from "./detect.js";
  *   - Stamped: `<!-- glasstrace:mcp:start v=1.4.0 -->`
  *
  * The optional `v=<semver>` capture group is the SDK-050 version stamp
- * (DISC-1586 Required Semantics Item 1). Recognising the legacy form is
+ * (DISC-1592 Required Semantics Item 1). Recognising the legacy form is
  * load-bearing for the SDK-050 backward-compatibility constraint: an
  * upgrading user's first re-render must replace the existing block in
  * place rather than appending a duplicate. Subsequent re-renders write
@@ -187,7 +187,7 @@ function findMarkerBoundaries(
  * The boundary detector recognises both legacy unstamped markers
  * (pre-SDK-050) and stamped markers, so an upgrading user's first
  * re-render replaces the existing block in place rather than
- * appending a duplicate (DISC-1586 / SDK-050 backward-compatibility
+ * appending a duplicate (DISC-1592 / SDK-050 backward-compatibility
  * constraint). Subsequent re-renders write the stamped form.
  *
  * Fails gracefully: logs a warning to stderr on read-only files instead

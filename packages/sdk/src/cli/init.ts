@@ -1343,7 +1343,7 @@ if (isDirectExecution) {
         process.exit(1);
       });
   } else if (subcommand === "upgrade-instructions") {
-    // SDK-050 / DISC-1586: refresh the managed Glasstrace MCP section
+    // SDK-050 / DISC-1592: refresh the managed Glasstrace MCP section
     // in every detected agent instruction file. Idempotent and safe
     // to re-run; only files that already contain a marker pair are
     // touched. Resolves the monorepo root the same way `init` and
@@ -1383,9 +1383,18 @@ if (isDirectExecution) {
             process.stderr.write(`  - ${file}\n`);
           }
         }
-        if (result.refreshed.length === 0 && result.errors.length === 0) {
+        // Only print the "no managed section anywhere" hint when nothing
+        // at all was inspected — refreshed empty AND skipped empty AND
+        // no errors. If files were skipped (detected but no managed
+        // section), the "Skipped:" block above already conveys that
+        // state; printing this hint alongside reads as contradictory.
+        if (
+          result.refreshed.length === 0 &&
+          result.skipped.length === 0 &&
+          result.errors.length === 0
+        ) {
           process.stderr.write(
-            "\nNo agent instruction files contained a Glasstrace managed section. " +
+            "\nNo agent instruction files detected with a Glasstrace managed section. " +
               "Run `npx glasstrace init` or `npx glasstrace mcp add` to install one.\n",
           );
         }

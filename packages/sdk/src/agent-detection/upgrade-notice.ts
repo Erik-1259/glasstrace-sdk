@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { parseStartMarkerLine } from "./inject.js";
 
 /**
- * SDK-050 / DISC-1586 stale-managed-section warning.
+ * SDK-050 / DISC-1592 stale-managed-section warning.
  *
  * Detects a project whose agent instruction file (CLAUDE.md /
  * .cursorrules / codex.md) was rendered by an older `@glasstrace/sdk`
@@ -62,7 +62,7 @@ const AGENT_INSTRUCTION_FILES = [
  * precedence — then extracts MAJOR / MINOR / PATCH and an optional
  * dot-separated prerelease tail. Returns null when the input is not
  * a valid semver, which the caller maps to "stamp present but
- * unknown" (DISC-1586 Required Semantics Item 1 future-format
+ * unknown" (DISC-1592 Required Semantics Item 1 future-format
  * tolerance).
  */
 interface ParsedSemver {
@@ -154,6 +154,30 @@ function isOptedOut(): boolean {
 }
 
 /**
+ * Optional heuristic suppression in non-interactive CI runs (per
+ * SDK-050 Required Semantics §2 Item 3). The brief allows — but does
+ * not require — suppressing the warning when stderr is not a TTY AND
+ * `CI=true` is set in the environment. The combination indicates an
+ * automated build (`next build` evaluating `instrumentation.ts`,
+ * GitHub Actions matrix runs, etc.) where the warning is noise; an
+ * interactive developer run still sees it because either condition
+ * fails (TTY present, or CI unset).
+ *
+ * Implementation notes:
+ *   - `process.stderr.isTTY` is `true | undefined`. Coerce to boolean
+ *     with `=== true` so non-TTY stderr (piped / redirected / CI) is
+ *     classified consistently.
+ *   - `CI=true` is the GitHub Actions / many-CI convention; we accept
+ *     only the literal `"true"` rather than any truthy value because
+ *     the brief named that exact form.
+ */
+function isQuietCiContext(): boolean {
+  const stderrIsTty = process.stderr.isTTY === true;
+  if (stderrIsTty) return false;
+  return process.env.CI === "true";
+}
+
+/**
  * Per-file inspection result. The caller aggregates these and emits
  * one warning if any file is `"stale"`.
  */
@@ -164,6 +188,16 @@ type FileState =
   | "current" // managed section exists with stamp >= running SDK
   | "stale" // managed section exists with stamp < running SDK
   | "unknown-stamp"; // stamp present but unparseable as semver
+
+/**
+ * Maximum file size (bytes) we will read at SDK init for stale-stamp
+ * detection. Realistic agent instruction files are well under 100 KB;
+ * 5 MB is generous headroom while bounding the worst-case sync read at
+ * `registerGlasstrace()` time. Pathologically large files are treated
+ * as `"absent"` — the warning cannot be decided locally, but the SDK
+ * will not block on a multi-second sync read either.
+ */
+const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
 
 /**
  * Synchronously inspects a single agent instruction file and reports
@@ -177,6 +211,7 @@ function inspectFile(filePath: string, runningSdkVersion: string): FileState {
   try {
     const stat = fs.statSync(filePath);
     if (!stat.isFile()) return "absent";
+    if (stat.size > MAX_AGENT_FILE_BYTES) return "absent";
     content = fs.readFileSync(filePath, "utf-8");
   } catch {
     return "absent";
@@ -259,6 +294,7 @@ export function maybeWarnStaleAgentInstructions(
     }
 
     if (isOptedOut()) return;
+    if (isQuietCiContext()) return;
 
     // Misbuilt SDK guard: an unparseable running version means we
     // cannot meaningfully decide staleness. Stay silent rather than
@@ -280,10 +316,12 @@ export function maybeWarnStaleAgentInstructions(
     // the opt-out env var. File names come from the hardcoded set —
     // never from the on-disk stamp value — so there is no path for
     // arbitrary user content (or terminal escape sequences from a
-    // hand-edited stamp) to reach stderr.
+    // hand-edited stamp) to reach stderr. Phrasing is grammatical
+    // for both 1-file and multi-file lists ("section in X" / "section
+    // in X, Y" both read cleanly).
     const fileList = staleFiles.join(", ");
     const message =
-      `[glasstrace] Agent instruction file (${fileList}) was rendered by an older ` +
+      `[glasstrace] Glasstrace managed MCP section in ${fileList} was rendered by an older ` +
       `@glasstrace/sdk; run \`npx glasstrace upgrade-instructions\` to refresh ` +
       `(silence with GLASSTRACE_DISABLE_UPGRADE_NOTICE=1).\n`;
 
