@@ -879,7 +879,13 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
           anyConfigWritten = true;
           anyConfigRewrittenWithBearer = true;
 
-          const infoContent = generateInfoSection(agent, MCP_ENDPOINT);
+          const sdkVersionForInject =
+            typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
+          const infoContent = generateInfoSection(
+            agent,
+            MCP_ENDPOINT,
+            sdkVersionForInject,
+          );
           if (infoContent !== "") {
             await injectInfoSection(agent, infoContent, projectRoot);
           }
@@ -1336,6 +1342,61 @@ if (isDirectExecution) {
         );
         process.exit(1);
       });
+  } else if (subcommand === "upgrade-instructions") {
+    // SDK-050 / DISC-1586: refresh the managed Glasstrace MCP section
+    // in every detected agent instruction file. Idempotent and safe
+    // to re-run; only files that already contain a marker pair are
+    // touched. Resolves the monorepo root the same way `init` and
+    // `status` do so the command works from a workspace root.
+    Promise.all([
+      import("./upgrade-instructions.js"),
+      import("./monorepo.js"),
+    ])
+      .then(([{ runUpgradeInstructions }, { resolveProjectRoot: resolve }]) => {
+        let projectRoot = process.cwd();
+        try {
+          projectRoot = resolve(projectRoot).projectRoot;
+        } catch {
+          // Fall back to cwd if monorepo resolution fails — the
+          // command still works at the raw cwd.
+        }
+        return runUpgradeInstructions({ projectRoot });
+      })
+      .then((result) => {
+        for (const err of result.errors) {
+          process.stderr.write(`Error: ${err}\n`);
+        }
+        for (const warn of result.warnings) {
+          process.stderr.write(`Warning: ${warn}\n`);
+        }
+        if (result.refreshed.length > 0) {
+          process.stderr.write("\nRefreshed agent instruction files:\n");
+          for (const file of result.refreshed) {
+            process.stderr.write(`  - ${file}\n`);
+          }
+        }
+        if (result.skipped.length > 0) {
+          process.stderr.write(
+            "\nSkipped (no Glasstrace managed section present):\n",
+          );
+          for (const file of result.skipped) {
+            process.stderr.write(`  - ${file}\n`);
+          }
+        }
+        if (result.refreshed.length === 0 && result.errors.length === 0) {
+          process.stderr.write(
+            "\nNo agent instruction files contained a Glasstrace managed section. " +
+              "Run `npx glasstrace init` or `npx glasstrace mcp add` to install one.\n",
+          );
+        }
+        process.exit(result.exitCode);
+      })
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        process.exit(1);
+      });
   } else if (subcommand === "status") {
     const remainingArgs = process.argv.slice(3);
     const json = remainingArgs.includes("--json");
@@ -1384,7 +1445,8 @@ if (isDirectExecution) {
         "  glasstrace init [--yes] [--coverage-map] [--force] [--validate]\n" +
         "  glasstrace uninit [--dry-run] [--force]\n" +
         "  glasstrace status [--json]\n" +
-        "  glasstrace mcp add [--force] [--dry-run]\n",
+        "  glasstrace mcp add [--force] [--dry-run]\n" +
+        "  glasstrace upgrade-instructions\n",
     );
     process.exit(1);
   }

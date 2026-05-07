@@ -12,6 +12,7 @@ export default defineConfig({
     "cli/mcp-add": "src/cli/mcp-add.ts",
     "cli/status": "src/cli/status.ts",
     "cli/validate": "src/cli/validate.ts",
+    "cli/upgrade-instructions": "src/cli/upgrade-instructions.ts",
     "adapters/drizzle": "src/adapters/drizzle.ts",
     "trpc/index": "src/trpc/index.ts",
   },

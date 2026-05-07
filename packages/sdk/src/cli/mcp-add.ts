@@ -2,6 +2,11 @@ import { execFile as execFileCb } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
+
+// Declare the tsup-injected SDK version literal. Replaced at build time
+// via `define` in tsup.config.ts. Falls back to "0.0.0-dev" when running
+// under vitest where no tsup build step has populated the constant.
+declare const __SDK_VERSION__: string;
 import {
   isAnonApiKey,
   identityFingerprint,
@@ -314,12 +319,15 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
   for (const agent of targetAgents) {
     const name = formatAgentName(agent.name);
 
+    const sdkVersion =
+      typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
+
     // Try CLI registration first (not applicable for generic)
     if (agent.name !== "generic") {
       const cliSuccess = await registerViaCli(agent, bearer);
       if (cliSuccess) {
         // Still inject info section if applicable
-        const infoContent = generateInfoSection(agent, MCP_ENDPOINT);
+        const infoContent = generateInfoSection(agent, MCP_ENDPOINT, sdkVersion);
         if (infoContent !== "") {
           await injectInfoSection(agent, infoContent, projectRoot);
         }
@@ -341,7 +349,7 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
 
         // Verify the config was written (writeMcpConfig swallows permission errors)
         if (fs.existsSync(agent.mcpConfigPath)) {
-          const infoContent = generateInfoSection(agent, MCP_ENDPOINT);
+          const infoContent = generateInfoSection(agent, MCP_ENDPOINT, sdkVersion);
           if (infoContent !== "") {
             await injectInfoSection(agent, infoContent, projectRoot);
           }

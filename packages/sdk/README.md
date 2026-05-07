@@ -98,6 +98,62 @@ total cap). HTTP 4xx/5xx and malformed responses are surfaced
 immediately. Set `GLASSTRACE_SKIP_INIT_VERIFY=1` to skip verification
 for offline installs.
 
+## Refreshing agent instruction guidance
+
+`glasstrace init` and `glasstrace mcp add` write a managed Glasstrace
+MCP section into your project's agent instruction file (CLAUDE.md /
+codex.md / .cursorrules). The section opens with a cost-aware
+cross-tool decision paragraph telling your AI agent **when** Glasstrace
+MCP is worth calling and **which** tool is the cheapest first call for
+each symptom class.
+
+The managed section's start marker carries an SDK version stamp, e.g.
+`<!-- glasstrace:mcp:start v=1.5.0 -->`. When you upgrade
+`@glasstrace/sdk`, run:
+
+```bash
+npx glasstrace upgrade-instructions
+```
+
+The command refreshes every detected agent instruction file in one
+run. Files outside the markers are untouched; files without a
+Glasstrace managed section are left alone. The command is idempotent
+— re-running produces byte-for-byte identical output.
+
+`npx glasstrace mcp add` performs the same managed-section refresh
+when run with `--force` (or against a project whose marker file has
+shifted credentials), so either command is a valid upgrade path.
+
+### Stale-section warning at SDK init
+
+When the running SDK detects that an agent instruction file's stamp
+is strictly older than the running version, it writes a single
+stderr line at `registerGlasstrace()` time pointing at the upgrade
+command. Constraints:
+
+- Stderr only, never stdout. Tracing behaviour is unaffected.
+- At most one warning per process boot, even when multiple
+  `registerGlasstrace()` calls happen (test runners, hot reload).
+- Node-only — no-op on Edge / browser runtimes. Never throws.
+- Does not mutate any file at runtime; the user opts in by running
+  the upgrade command.
+- Suppressed by setting one of:
+
+  ```bash
+  GLASSTRACE_DISABLE_UPGRADE_NOTICE=1
+  GLASSTRACE_DISABLE_UPGRADE_NOTICE=true
+  GLASSTRACE_DISABLE_UPGRADE_NOTICE=yes
+  ```
+
+  (case-insensitive). Any other value, including unset, leaves the
+  warning enabled.
+
+Legacy unstamped managed sections (written by `@glasstrace/sdk`
+versions before 1.5.0) trigger no warning — those projects receive
+the refreshed text on their next `mcp add` or
+`upgrade-instructions` run, and the upgrade replaces the legacy
+block in place rather than appending a duplicate.
+
 ## Server Action detection (Next.js)
 
 Next.js does not emit a dedicated OTel span for Server Actions. The SDK

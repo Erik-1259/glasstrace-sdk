@@ -400,6 +400,26 @@ Flags:
 - `--dry-run` -- Preview what would be configured without making changes
 - `--force` -- Reconfigure even if already set up (useful after key rotation)
 
+### Refreshing agent instruction guidance
+
+```bash
+npx glasstrace upgrade-instructions
+```
+
+Refreshes the managed Glasstrace MCP section in every detected agent
+instruction file (CLAUDE.md / codex.md / .cursorrules) so existing
+projects pick up updated decision-paragraph text and tool descriptions
+on SDK upgrade. Idempotent and safe to re-run; only files that already
+contain a Glasstrace marker pair are touched.
+
+The managed section's start marker carries an SDK version stamp
+(e.g. `<!-- glasstrace:mcp:start v=1.5.0 -->`). When the running SDK
+detects a strictly older stamp, it writes a single stderr line at
+`registerGlasstrace()` time pointing at this command. Suppress the
+notice with `GLASSTRACE_DISABLE_UPGRADE_NOTICE=1`. See the
+[`@glasstrace/sdk` README](packages/sdk/README.md#refreshing-agent-instruction-guidance)
+for the full set of constraints.
+
 ### Large Build Support
 
 For builds at or above 4.5MB, the SDK automatically uses presigned uploads
