@@ -607,11 +607,37 @@ describe("hasManagedSection", () => {
     expect(await hasManagedSection(filePath)).toBe(false);
   });
 
-  it("returns false for a missing file (best-effort, never throws)", async () => {
+  it("returns false for a genuinely missing file (ENOENT)", async () => {
     expect(
       await hasManagedSection(join(testDir, "does-not-exist.md")),
     ).toBe(false);
   });
+
+  // Codex review on PR #247: hasManagedSection() previously swallowed
+  // every read error and returned false, masking real permission
+  // problems as "no managed section present" in upgrade-instructions
+  // output. Permission errors must propagate so the caller can surface
+  // them to the user.
+  it.skipIf(process.getuid?.() === 0)(
+    "throws on EACCES (permission denied) so the caller can surface it",
+    async () => {
+      const filePath = join(testDir, "CLAUDE.md");
+      await writeFile(
+        filePath,
+        [
+          "<!-- glasstrace:mcp:start v=1.4.0 -->",
+          "content",
+          "<!-- glasstrace:mcp:end -->",
+        ].join("\n"),
+      );
+      await chmod(filePath, 0o000);
+      try {
+        await expect(hasManagedSection(filePath)).rejects.toThrow();
+      } finally {
+        await chmod(filePath, 0o644);
+      }
+    },
+  );
 
   it("returns false for an orphaned start marker without a matching end", async () => {
     const filePath = join(testDir, "CLAUDE.md");

@@ -218,6 +218,23 @@ describe("runUpgradeInstructions", () => {
     expect(afterSecond).toBe(afterFirst);
   });
 
+  // Codex review on PR #247 (P2): a permission error during managed-
+  // section detection must surface as a warning rather than a silent
+  // "skipped". hasManagedSection() now propagates non-ENOENT errors
+  // (covered by `inject.test.ts > hasManagedSection > throws on
+  // EACCES`), and the CLI's try/catch here pushes them to
+  // result.warnings.
+  //
+  // We do NOT exercise the warning path through this integration
+  // surface today: `detectAgents()` calls `access(filePath, R_OK)`
+  // before reporting an `infoFilePath`, so a chmod-0o000 file is
+  // already filtered out as "info file does not exist" upstream and
+  // hasManagedSection() is never reached. The propagation contract
+  // is the load-bearing claim — the unit test in inject.test.ts
+  // pins it; the integration warning is defensive against a future
+  // detect.ts that becomes more lenient about R_OK or against TOCTOU
+  // (file readable at detect time, unreadable at refresh time).
+
   it("returns no refreshed entries when no agents are detected", async () => {
     // Only `.git/` and `package.json` — no agent markers at all.
     await mkdir(join(testDir, ".git"), { recursive: true });

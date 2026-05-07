@@ -306,14 +306,22 @@ export async function injectInfoSection(
  * upgrade-instructions CLI to decide which detected agent files
  * actually have a managed section to refresh.
  *
- * Best-effort: returns false on any read error rather than throwing.
+ * Returns `false` for the genuine "file does not exist" case
+ * (`ENOENT`). Any other read error — permission denied (`EACCES`),
+ * not-permitted (`EPERM`), read-only (`EROFS`), I/O error, etc. — is
+ * re-thrown so the caller can surface it to the user. Swallowing
+ * those would let `upgrade-instructions` report an inaccessible file
+ * as "skipped (no managed section present)" and silently mask a real
+ * permission problem (Codex review on PR #247).
  */
 export async function hasManagedSection(filePath: string): Promise<boolean> {
   let content: string;
   try {
     content = await readFile(filePath, "utf-8");
-  } catch {
-    return false;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return false;
+    throw err;
   }
   return findMarkerBoundaries(content.split("\n")) !== null;
 }
