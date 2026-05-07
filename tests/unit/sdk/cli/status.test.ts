@@ -282,6 +282,44 @@ describe("runStatus", () => {
       const result = runStatus({ projectRoot: dir });
       expect(result.agents).toEqual([]);
     });
+
+    // SDK-050 / DISC-1592 regression check: status must recognise the
+    // version-stamped start marker form. A literal `.includes("<!--
+    // glasstrace:mcp:start -->")` test would silently fail under
+    // SDK-050+ rendered files and report "no agents configured" even
+    // when MCP is fully wired.
+    it("detects SDK-050+ stamped HTML markers in CLAUDE.md", () => {
+      const dir = createTmpDir();
+      fs.writeFileSync(
+        path.join(dir, "CLAUDE.md"),
+        "# Project\n\n<!-- glasstrace:mcp:start v=1.5.0 -->\nGlasstrace info\n<!-- glasstrace:mcp:end -->\n",
+      );
+
+      const result = runStatus({ projectRoot: dir });
+      expect(result.agents).toEqual(["CLAUDE.md"]);
+    });
+
+    it("detects SDK-050+ stamped hash markers in .cursorrules", () => {
+      const dir = createTmpDir();
+      fs.writeFileSync(
+        path.join(dir, ".cursorrules"),
+        "# Project\n\n# glasstrace:mcp:start v=1.5.0\nGlasstrace info\n# glasstrace:mcp:end\n",
+      );
+
+      const result = runStatus({ projectRoot: dir });
+      expect(result.agents).toEqual([".cursorrules"]);
+    });
+
+    it("detects canary-stamped markers", () => {
+      const dir = createTmpDir();
+      fs.writeFileSync(
+        path.join(dir, "CLAUDE.md"),
+        "<!-- glasstrace:mcp:start v=0.0.0-canary-20260508120000 -->\ninfo\n<!-- glasstrace:mcp:end -->\n",
+      );
+
+      const result = runStatus({ projectRoot: dir });
+      expect(result.agents).toEqual(["CLAUDE.md"]);
+    });
   });
 
   describe("edge cases", () => {

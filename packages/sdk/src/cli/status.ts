@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { NEXT_CONFIG_NAMES } from "./constants.js";
+import {
+  isEndMarkerLine,
+  parseStartMarkerLine,
+} from "../agent-detection/inject.js";
 
 /**
  * JSON-based MCP config files that init may create.
@@ -200,13 +204,21 @@ function checkAgents(root: string): string[] {
   for (const name of AGENT_INFO_FILES) {
     try {
       const content = fs.readFileSync(path.join(root, name), "utf-8");
-      const hasHtmlMarkers =
-        content.includes("<!-- glasstrace:mcp:start -->") &&
-        content.includes("<!-- glasstrace:mcp:end -->");
-      const hasHashMarkers =
-        content.includes("# glasstrace:mcp:start") &&
-        content.includes("# glasstrace:mcp:end");
-      if (hasHtmlMarkers || hasHashMarkers) {
+      // Use the shared marker parser so SDK-050 stamped markers
+      // (`<!-- glasstrace:mcp:start v=1.5.0 -->` /
+      // `# glasstrace:mcp:start v=1.5.0`) are recognized alongside
+      // legacy unstamped markers. A literal `.includes(...)` check
+      // for the unstamped form would silently regress this status
+      // check the moment a project re-renders its instruction file
+      // under SDK-050+.
+      let hasStart = false;
+      let hasEnd = false;
+      for (const line of content.split("\n")) {
+        if (parseStartMarkerLine(line) !== null) hasStart = true;
+        else if (isEndMarkerLine(line)) hasEnd = true;
+        if (hasStart && hasEnd) break;
+      }
+      if (hasStart && hasEnd) {
         found.push(name);
       }
     } catch {

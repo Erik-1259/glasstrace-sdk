@@ -17,6 +17,7 @@ import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, Au
 import { setCoexistenceState } from "./signal-handler.js";
 import { startRuntimeStateWriter, _resetRuntimeStateForTesting } from "./runtime-state.js";
 import { isProxyTracerProvider, isProxyTracer } from "./proxy-detection.js";
+import { maybeWarnStaleAgentInstructions, _resetUpgradeNoticeForTesting } from "./agent-detection/upgrade-notice.js";
 
 /** Mask an API key for safe event emission — shows prefix + last 4 chars. */
 function maskKey(key: string): string {
@@ -89,6 +90,17 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     }
 
     setCoreState(CoreState.REGISTERING);
+
+    // SDK-050 / DISC-1592: emit a one-time stderr warning if the project's
+    // agent instruction file (CLAUDE.md / codex.md / .cursorrules) carries
+    // a managed-section stamp older than the running SDK version. The
+    // helper is best-effort, never throws, never mutates files, and
+    // respects the GLASSTRACE_DISABLE_UPGRADE_NOTICE opt-out. Placed after
+    // the Node-runtime guard above so it cannot fire in non-Node contexts.
+    maybeWarnStaleAgentInstructions({
+      projectRoot: process.cwd(),
+      sdkVersion: __SDK_VERSION__,
+    });
 
     // Start runtime state writer — writes lifecycle state to
     // .glasstrace/runtime-state.json for CLI status reporting (SDK-026).
@@ -515,6 +527,7 @@ export function _resetRegistrationForTesting(): void {
   uninstallConsoleCapture();
   resetOtelConfigForTesting(); // also resets coexistenceState via signal-handler
   _resetRuntimeStateForTesting();
+  _resetUpgradeNoticeForTesting();
   _sessionManager = null;
   resetLifecycleForTesting();
 }

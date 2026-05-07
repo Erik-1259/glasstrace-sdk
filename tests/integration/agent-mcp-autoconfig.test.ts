@@ -118,7 +118,9 @@ describe("Agent MCP auto-configuration integration tests", () => {
       path.join(tmpDir, "CLAUDE.md"),
       "utf-8",
     );
-    expect(claudeMd).toContain("<!-- glasstrace:mcp:start -->");
+    // SDK-050: start marker now carries a `v=<sdkVersion>` stamp.
+    // The end marker remains unstamped.
+    expect(claudeMd).toMatch(/<!-- glasstrace:mcp:start v=\S+ -->/);
     expect(claudeMd).toContain("<!-- glasstrace:mcp:end -->");
     expect(claudeMd).toContain("Glasstrace MCP Integration");
     expect(claudeMd).not.toContain("gt_anon_");
@@ -233,8 +235,12 @@ describe("Agent MCP auto-configuration integration tests", () => {
       path.join(tmpDir, "CLAUDE.md"),
       "utf-8",
     );
+    // SDK-050: start marker now carries a `v=<sdkVersion>` stamp.
+    // Match either the legacy unstamped form (defence-in-depth) or
+    // the new stamped form when counting; both should resolve to a
+    // single marker after a clean install.
     const startMarkerCount = (
-      claudeMd2.match(/<!-- glasstrace:mcp:start -->/g) || []
+      claudeMd2.match(/<!-- glasstrace:mcp:start(?: v=\S+)? -->/g) || []
     ).length;
     const endMarkerCount = (
       claudeMd2.match(/<!-- glasstrace:mcp:end -->/g) || []
