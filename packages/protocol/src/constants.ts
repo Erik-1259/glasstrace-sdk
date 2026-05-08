@@ -23,6 +23,27 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   ERROR_CODE: "glasstrace.error.code",
   ERROR_CATEGORY: "glasstrace.error.category",
   ERROR_FIELD: "glasstrace.error.field",
+
+  // Error evidence v1 (SDK-041 / DISC-1535).
+  // Additive to the existing `glasstrace.error.*` family. Bounded
+  // stacktrace input for the product-side StackSummary parser
+  // (SCHEMA-033); plus framework-fallback markers so the original
+  // request path is preserved when Next.js (or another framework)
+  // rewrites the route to a fallback like `/_error` or `/_not-found`;
+  // plus a source-provenance enum so product can tell which surface
+  // emitted each error fact (`exception.message` event vs span attr
+  // vs response body vs framework runtime).
+  //
+  // Wire keys remain in `glasstrace.error.*` for namespace consistency
+  // with the Tier-1 `error.message` / `error.code` / `error.category`
+  // attributes already in this registry.
+  ERROR_STACK: "glasstrace.error.stack",
+  ERROR_STACK_TRUNCATED: "glasstrace.error.stack.truncated",
+  ERROR_STACK_REDACTED: "glasstrace.error.stack.redacted",
+  ERROR_SOURCE: "glasstrace.error.source",
+  ERROR_FRAMEWORK_KIND: "glasstrace.error.framework.kind",
+  ERROR_ORIGINAL_PATH: "glasstrace.error.original_path",
+  ERROR_FALLBACK_ROUTE: "glasstrace.error.fallback_route",
   ORM_PROVIDER: "glasstrace.orm.provider",
   ORM_MODEL: "glasstrace.orm.model",
   ORM_OPERATION: "glasstrace.orm.operation",

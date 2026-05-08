@@ -4,7 +4,7 @@ import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
 import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import type { CaptureConfig } from "@glasstrace/protocol";
-import { GlasstraceExporter, API_KEY_PENDING, extractLeadingPath } from "../../../packages/sdk/src/enriching-exporter.js";
+import { GlasstraceExporter, API_KEY_PENDING, extractLeadingPath, extractPathOnly } from "../../../packages/sdk/src/enriching-exporter.js";
 import { SessionManager } from "../../../packages/sdk/src/session.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 import * as consoleCapture from "../../../packages/sdk/src/console-capture.js";
@@ -66,14 +66,19 @@ function createMockSpan(overrides?: {
 
 /**
  * Creates a mock exception event matching OTel's recordException() output.
+ *
+ * SDK-041 added support for `exception.stacktrace` on the same event;
+ * passing a `stacktrace` populates that attribute alongside type/message.
  */
 function createExceptionEvent(
   type?: string,
   message?: string,
+  stacktrace?: string,
 ): { time: [number, number]; name: string; attributes: Record<string, string> } {
   const attributes: Record<string, string> = {};
   if (type) attributes["exception.type"] = type;
   if (message) attributes["exception.message"] = message;
+  if (stacktrace) attributes["exception.stacktrace"] = stacktrace;
   return {
     time: [1700000000, 50_000_000],
     name: "exception",
@@ -1668,7 +1673,11 @@ describe("GlasstraceExporter", () => {
       expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("internal");
     });
 
-    it("prefers span attributes over event attributes for error details", () => {
+    it("prefers the OTel exception EVENT over span attributes when both are present (SDK-041)", () => {
+      // SDK-041 / DISC-1535 inverted precedence: the exception event
+      // (recordException()) is the canonical OTel surface and wins over
+      // `exception.*` span attributes when both are populated. Pre-1.6
+      // SDKs preferred span attrs; this test pins the new contract.
       const { exporter, delegate } = createExporter();
       const span = createMockSpan({
         status: { code: SpanStatusCode.UNSET },
@@ -1684,9 +1693,12 @@ describe("GlasstraceExporter", () => {
       exporter.export([span], vi.fn());
 
       const enriched = delegate.exportedSpans[0][0];
-      expect(enriched.attributes[ATTR.ERROR_MESSAGE]).toBe("validation failed");
-      expect(enriched.attributes[ATTR.ERROR_CODE]).toBe("ZodError");
-      expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("validation");
+      // Event values win.
+      expect(enriched.attributes[ATTR.ERROR_MESSAGE]).toBe("different error message");
+      expect(enriched.attributes[ATTR.ERROR_CODE]).toBe("TypeError");
+      expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("internal");
+      // Source provenance reflects the canonical surface.
+      expect(enriched.attributes[ATTR.ERROR_SOURCE]).toBe("otel_exception");
     });
 
     it("does NOT trigger inference when status is explicitly OK", () => {
@@ -2820,6 +2832,306 @@ describe("GlasstraceExporter", () => {
     it("trims surrounding whitespace before parsing", () => {
       expect(extractLeadingPath("  /login  ")).toBe("/login");
       expect(extractLeadingPath("  POST /login  ")).toBe("/login");
+    });
+  });
+
+  // SDK-041 / DISC-1535 — extractPathOnly helper used by the
+  // framework-fallback handler to recover the original requested
+  // path from `http.url` / `url.full` / `http.target` when a
+  // framework rewrites `http.route` to a fallback.
+  describe("extractPathOnly (SDK-041 helper)", () => {
+    it("extracts pathname from absolute http URLs", () => {
+      expect(
+        extractPathOnly("http://localhost:3000/api/storage/x?foo=bar"),
+      ).toBe("/api/storage/x");
+      expect(extractPathOnly("https://app/users/123")).toBe("/users/123");
+    });
+
+    it("strips query and fragment from bare paths", () => {
+      expect(extractPathOnly("/api/x?q=y")).toBe("/api/x");
+      expect(extractPathOnly("/api/x#anchor")).toBe("/api/x");
+      expect(extractPathOnly("/api/x?q=y#z")).toBe("/api/x");
+    });
+
+    it("returns bare paths unchanged when no query/fragment", () => {
+      expect(extractPathOnly("/api/users/123")).toBe("/api/users/123");
+      expect(extractPathOnly("/")).toBe("/");
+    });
+
+    it("returns undefined for empty / whitespace / undefined input", () => {
+      expect(extractPathOnly(undefined)).toBeUndefined();
+      expect(extractPathOnly("")).toBeUndefined();
+      expect(extractPathOnly("   ")).toBeUndefined();
+    });
+
+    it("returns undefined for non-path schemes that don't resolve to a /-path", () => {
+      // `mailto:user@example.com` has an empty pathname after the URL
+      // parser splits it, so the helper rejects it.
+      expect(extractPathOnly("mailto:user@example.com")).toBeUndefined();
+      expect(extractPathOnly("data:text/plain,hello")).toBeUndefined();
+    });
+
+    it("rejects bare relative strings without a leading slash (Copilot review)", () => {
+      // Pre-fix, `extractPathOnly("api/users")` would resolve against
+      // the sentinel base `http://_/` and return `/api/users`,
+      // silently coercing a non-path input into a fake path. Tightened
+      // to require either a recognized scheme or a leading `/`.
+      expect(extractPathOnly("api/users")).toBeUndefined();
+      expect(extractPathOnly("foo")).toBeUndefined();
+      expect(extractPathOnly("foo bar baz")).toBeUndefined();
+    });
+
+    it("handles URLs with trailing slash and root paths", () => {
+      expect(extractPathOnly("http://app/")).toBe("/");
+      expect(extractPathOnly("http://app")).toBe("/");
+    });
+  });
+
+  // SDK-041 / DISC-1535 — Wave 14 error evidence v1.
+  // Verifies the new `glasstrace.error.*` attributes the exporter
+  // emits: bounded stack with sanitization + truncation metadata,
+  // source provenance enum, and framework-fallback markers.
+  describe("SDK-041 error evidence v1", () => {
+    function exportErrorSpanWithStack(opts: {
+      stackOnEvent?: string;
+      stackOnAttr?: string;
+      messageOnEvent?: string;
+      typeOnEvent?: string;
+      route?: string;
+      url?: string;
+      statusCode?: number;
+    }): Record<string, string | number | boolean> {
+      const { exporter, delegate } = createExporter();
+      const events = [];
+      if (opts.stackOnEvent || opts.messageOnEvent || opts.typeOnEvent) {
+        events.push(
+          createExceptionEvent(
+            opts.typeOnEvent,
+            opts.messageOnEvent,
+            opts.stackOnEvent,
+          ),
+        );
+      }
+      const attributes: Record<string, string | number | boolean> = {
+        "http.method": "GET",
+        "http.route": opts.route ?? "/api/storage",
+        "http.status_code": opts.statusCode ?? 500,
+      };
+      if (opts.stackOnAttr) {
+        attributes["exception.stacktrace"] = opts.stackOnAttr;
+      }
+      if (opts.url) {
+        attributes["http.url"] = opts.url;
+      }
+      const span = createMockSpan({
+        attributes,
+        status: { code: SpanStatusCode.ERROR },
+        events,
+      });
+      exporter.export([span], () => {});
+      return delegate.exportedSpans[0][0].attributes as Record<string, string | number | boolean>;
+    }
+
+    it("emits glasstrace.error.stack from an exception event with truncated/redacted=false on a clean short stack", () => {
+      const stack =
+        "Error: S3 client not initialized\n" +
+        "    at handler (./src/api/storage/[...key].ts:18:11)";
+      const out = exportErrorSpanWithStack({
+        messageOnEvent: "S3 client not initialized",
+        typeOnEvent: "Error",
+        stackOnEvent: stack,
+      });
+      expect(out[ATTR.ERROR_STACK]).toBe(stack);
+      expect(out[ATTR.ERROR_STACK_TRUNCATED]).toBe(false);
+      expect(out[ATTR.ERROR_STACK_REDACTED]).toBe(false);
+      // The event-source path produces ERROR_SOURCE = "otel_exception".
+      expect(out[ATTR.ERROR_SOURCE]).toBe("otel_exception");
+    });
+
+    it("emits glasstrace.error.stack from a span attribute when no event is present", () => {
+      const stack =
+        "Error: validation failed\n" +
+        "    at validate (./src/lib/zod-helpers.ts:42:5)";
+      const out = exportErrorSpanWithStack({
+        stackOnAttr: stack,
+        statusCode: 400,
+      });
+      expect(out[ATTR.ERROR_STACK]).toBe(stack);
+      expect(out[ATTR.ERROR_SOURCE]).toBe("otel_event");
+    });
+
+    it("redacts absolute paths in stack and sets glasstrace.error.stack.redacted=true", () => {
+      const stack =
+        "Error\n" +
+        "    at handler (/Users/erik/proj/src/api/handler.ts:5:1)";
+      const out = exportErrorSpanWithStack({
+        stackOnEvent: stack,
+        messageOnEvent: "boom",
+      });
+      const captured = String(out[ATTR.ERROR_STACK]);
+      expect(captured).toContain("<path>/src/api/handler.ts:5:1");
+      expect(captured).not.toContain("/Users/erik/proj");
+      expect(out[ATTR.ERROR_STACK_REDACTED]).toBe(true);
+      expect(out[ATTR.ERROR_STACK_TRUNCATED]).toBe(false);
+    });
+
+    it("redacts a Bearer token in stack content", () => {
+      const stack =
+        "Error: 401\n" +
+        "    Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature\n" +
+        "    at fetch (./src/api.ts:1:1)";
+      const out = exportErrorSpanWithStack({
+        stackOnEvent: stack,
+        messageOnEvent: "401",
+      });
+      const captured = String(out[ATTR.ERROR_STACK]);
+      expect(captured).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+      expect(captured).toContain("[REDACTED]");
+      expect(out[ATTR.ERROR_STACK_REDACTED]).toBe(true);
+    });
+
+    it("truncates oversized stacks and sets glasstrace.error.stack.truncated=true", () => {
+      const oneFrame = "    at fn (./src/file.ts:1:1)\n";
+      const huge = "Error\n" + oneFrame.repeat(500);
+      const out = exportErrorSpanWithStack({
+        stackOnEvent: huge,
+        messageOnEvent: "huge",
+      });
+      const captured = String(out[ATTR.ERROR_STACK]);
+      expect(out[ATTR.ERROR_STACK_TRUNCATED]).toBe(true);
+      expect(captured.endsWith("...[stack truncated]")).toBe(true);
+    });
+
+    it("does not emit glasstrace.error.stack when no stacktrace source is present", () => {
+      const out = exportErrorSpanWithStack({
+        messageOnEvent: "boom",
+        typeOnEvent: "Error",
+      });
+      expect(out[ATTR.ERROR_STACK]).toBeUndefined();
+      expect(out[ATTR.ERROR_STACK_TRUNCATED]).toBeUndefined();
+      expect(out[ATTR.ERROR_STACK_REDACTED]).toBeUndefined();
+      // Provenance still set because message/type came from the event.
+      expect(out[ATTR.ERROR_SOURCE]).toBe("otel_exception");
+    });
+
+    it("does not emit any error attributes for a healthy span (status OK, no exception)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        attributes: {
+          "http.method": "GET",
+          "http.route": "/api/users",
+          "http.status_code": 200,
+        },
+        status: { code: SpanStatusCode.OK },
+      });
+      exporter.export([span], () => {});
+      const out = delegate.exportedSpans[0][0].attributes as Record<string, unknown>;
+      expect(out[ATTR.ERROR_STACK]).toBeUndefined();
+      expect(out[ATTR.ERROR_SOURCE]).toBeUndefined();
+      expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBeUndefined();
+      expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBeUndefined();
+      expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBeUndefined();
+    });
+
+    describe("framework fallback detection", () => {
+      it("emits original_path + fallback_route + framework.kind=fallback for /_error with a different http.url", () => {
+        const out = exportErrorSpanWithStack({
+          route: "/_error",
+          url: "http://localhost:3000/api/storage/missing/avatar.png?retry=1",
+          statusCode: 500,
+        });
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBe("/_error");
+        expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBe(
+          "/api/storage/missing/avatar.png",
+        );
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBe("fallback");
+        expect(out[ATTR.ERROR_SOURCE]).toBe("framework_fallback");
+        // glasstrace.route stays as-is (the framework's view) so
+        // existing consumers keep working; product reads original_path
+        // first per the AESC contract.
+        expect(out[ATTR.ROUTE]).toBe("/_error");
+      });
+
+      it("emits the same trio for /_not-found", () => {
+        const out = exportErrorSpanWithStack({
+          route: "/_not-found",
+          url: "http://app/blog/post-that-doesnt-exist",
+          statusCode: 404,
+        });
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBe("/_not-found");
+        expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBe(
+          "/blog/post-that-doesnt-exist",
+        );
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBe("fallback");
+      });
+
+      it("does NOT mark fallback when route is /_error and url is missing (cannot recover original path)", () => {
+        const out = exportErrorSpanWithStack({
+          route: "/_error",
+          statusCode: 500,
+        });
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBeUndefined();
+        expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBeUndefined();
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBeUndefined();
+      });
+
+      it("does NOT mark fallback when route is /_error and the url's path equals route (a real visit to /_error)", () => {
+        const out = exportErrorSpanWithStack({
+          route: "/_error",
+          url: "http://localhost:3000/_error",
+          statusCode: 500,
+        });
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBeUndefined();
+        expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBeUndefined();
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBeUndefined();
+      });
+
+      it("does NOT mark fallback when url adds only a trailing slash to route (Codex P2 review)", () => {
+        // Frameworks/proxies inconsistently round-trip trailing slashes
+        // between http.route and http.url. Without normalization,
+        // a literal-string `originalPath !== route` compare would
+        // produce a false-positive fallback marker on a real visit
+        // to the literal `/_error/` page.
+        const out = exportErrorSpanWithStack({
+          route: "/_error",
+          url: "http://localhost:3000/_error/",
+          statusCode: 500,
+        });
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBeUndefined();
+        expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBeUndefined();
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBeUndefined();
+      });
+
+      it("does NOT mark fallback when route is a normal app route", () => {
+        const out = exportErrorSpanWithStack({
+          route: "/api/users/123",
+          url: "http://localhost:3000/api/users/123",
+          statusCode: 500,
+        });
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBeUndefined();
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBeUndefined();
+      });
+
+      it("preserves an upstream OTel exception source when also detecting a framework fallback (otel_exception wins)", () => {
+        // Unusual but possible: framework detects a fallback AND OTel
+        // emitted a real exception event. Provenance should remain
+        // the more-specific OTel source, not the broader framework
+        // marker.
+        const out = exportErrorSpanWithStack({
+          route: "/_error",
+          url: "http://localhost:3000/api/x",
+          stackOnEvent: "Error\n    at fn (./src/file.ts:1:1)",
+          messageOnEvent: "boom",
+          typeOnEvent: "Error",
+          statusCode: 500,
+        });
+        expect(out[ATTR.ERROR_SOURCE]).toBe("otel_exception");
+        // Framework attrs still set independently — provenance is the
+        // narrower fact, the markers are still useful.
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBe("fallback");
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBe("/_error");
+        expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBe("/api/x");
+      });
     });
   });
 

@@ -349,6 +349,114 @@ body data. If your account enables the flag but a span never carries
 the internal attribute (no adapter set it), the public attribute is
 still absent. The default is "off, twice".
 
+## Capturing error evidence
+
+For server-side errors, the SDK promotes a curated set of OTel
+attributes into the `glasstrace.error.*` family so product
+consumers can render bounded, sanitized error evidence without
+having to parse raw stack traces or framework HTML themselves.
+
+### Bounded stack capture
+
+When an OTel `recordException()` event (or a span attribute carrying
+`exception.stacktrace`) is observed on a failed span, the SDK
+emits the stack as `glasstrace.error.stack` with two sibling
+booleans:
+
+| Attribute | Meaning |
+|---|---|
+| `glasstrace.error.stack` | The bounded stack string (sanitized, then truncated). Treat this as input for product-side `StackSummary` parsing, not as a final agent-facing artifact. |
+| `glasstrace.error.stack.truncated` | `true` if the original exceeded the byte budget and `...[stack truncated]` was appended. |
+| `glasstrace.error.stack.redacted` | `true` if at least one sanitization rule modified the stack content (path normalization, URL query stripping, or credential redaction). |
+
+Sanitization runs **before** truncation so credentials straddling
+the truncation boundary are still removed from the visible portion.
+The sanitizer:
+
+- **Normalizes absolute paths.** A frame like
+  `at handler (/Users/erik/proj/src/api/handler.ts:5:1)` becomes
+  `at handler (<path>/src/api/handler.ts:5:1)`. The keep-from
+  marker set is `node_modules`, `.next`, `.glasstrace`, `src`,
+  `dist`, `build`, `lib`, `app`, `pages` (priority order). When no
+  marker matches, the path collapses to its basename so
+  `/var/private/secret/data.js` becomes `<path>/data.js`.
+- **Strips URL query strings and fragments.**
+  `https://api.example.com/users?token=secret` becomes
+  `https://api.example.com/users`.
+- **Redacts credentials** using the same pattern set as
+  response-body capture: `Bearer …`, JWT-shaped tokens,
+  Glasstrace API key prefixes (`gt_dev_*` / `gt_anon_*`), AWS
+  access keys (`AKIA…` / `ASIA…`), and `apikey`/`secret`/
+  `password`/`token` key-value pairs.
+
+The byte budget is 8192 UTF-8 bytes. Truncation respects codepoint
+boundaries so multi-byte characters are never split mid-sequence.
+
+### Source provenance
+
+When the exporter emits any of the new
+`glasstrace.error.{message,code,stack,original_path,fallback_route}`
+attributes, it also sets `glasstrace.error.source` to name the
+surface that supplied the facts:
+
+| Value | Source |
+|---|---|
+| `otel_exception` | OTel `recordException()` event (event name `"exception"`). |
+| `otel_event` | An OTel-shape `exception.*` attribute set on the span itself instead of on an event. |
+| `glasstrace_attribute` | A `glasstrace.error.*` attribute set explicitly by an adapter or user code. |
+| `framework_runtime` | Reserved for a future framework-runtime probe. |
+| `framework_fallback` | The framework rewrote the route to a fallback (e.g., `/_error`); see below. |
+| `response_body` | Reserved for cases where the response body is the only error-bearing surface. |
+
+Product consumers use the source to decide how to render
+evidence (an `otel_exception` source can show the raw type and
+message; `framework_fallback` is a softer signal that benefits
+from the original-path context).
+
+### Framework fallback markers
+
+When a request reaches a framework fallback route — Next.js
+`/_error`, `/_not-found`, `/_404`, `/_500` — the SDK preserves
+the originally requested path so product consumers don't lose the
+URL the user actually hit. Three additional attributes land on
+the span:
+
+| Attribute | Example |
+|---|---|
+| `glasstrace.error.original_path` | `/api/storage/missing/avatar.png` (path-only; no query, no fragment) |
+| `glasstrace.error.fallback_route` | `/_error` |
+| `glasstrace.error.framework.kind` | `"fallback"` |
+
+The existing `glasstrace.route` attribute continues to carry
+whatever the framework instrumentation reported (typically the
+fallback route itself), so existing consumers are unaffected.
+Product-side projection should prefer `glasstrace.error.original_path`
+when present and fall back to `glasstrace.route` otherwise. The
+markers fire only when the SDK observed a different requested URL
+than the route — a real visit to `/_error` (an app could have a
+real such page) is not flagged.
+
+### What the SDK does NOT do
+
+For agent-facing protection, several things are explicitly *not*
+emitted from the SDK side:
+
+- **No raw `exception.stacktrace`.** The string is always
+  sanitized before promotion to `glasstrace.error.stack`, and the
+  source-attribute path that bypassed enrichment never appears in
+  agent-facing MCP output (product ingestion projects only the
+  `glasstrace.*` family).
+- **No fabricated stack frames** when `exception.stacktrace` was
+  not observed. Missing stack evidence stays missing; the
+  `glasstrace.error.stack*` attributes are simply absent.
+- **No compile-diagnostic capture** in this version. If the SDK
+  cannot observe a Next.js compile error in the running mode, no
+  diagnostic is fabricated from the route name or status code.
+  Compile-diagnostic capture is a future feature gated on a
+  separate account capture-policy class.
+- **No structured application logs.** Application logs are
+  outside the trace-evidence contract.
+
 ## Capturing side-effect evidence
 
 When debugging a bug whose root cause is which side-effect operation
