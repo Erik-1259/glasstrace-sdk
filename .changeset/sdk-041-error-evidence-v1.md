@@ -105,7 +105,10 @@ Agent Evidence Engine SDK Attribute Contract §5.5.
 All new wire keys are additive. Existing consumers keep working:
 
 - `glasstrace.error.message` / `code` / `category` / `field` /
-  `response_body` are unchanged.
+  `response_body` continue to be emitted in the same situations as
+  before; the *value* that wins on a span where both an exception
+  event AND `exception.*` span attributes are populated has flipped
+  (see "Behavior change" below).
 - `glasstrace.route` continues to carry whatever the framework
   reports.
 - Spans without an exception event or fallback route emit no new
@@ -114,6 +117,28 @@ All new wire keys are additive. Existing consumers keep working:
 - Older SDK traces that lack the new fields are accepted by
   product ingestion as missing-evidence (the MCP-019 packet
   already disclaims absent stack / framework / log evidence).
+
+### Behavior change — exception event now wins over span attributes
+
+Pre-1.6 SDKs preferred `attrs["exception.message"]` /
+`attrs["exception.type"]` over the `recordException()` event when
+both surfaces were populated on the same span. The OTel canonical
+surface for exceptions is the event; preferring span attributes
+mislabeled provenance and silently downgraded the higher-
+confidence source.
+
+This release inverts the precedence so the exception event wins.
+Span attributes are the fallback used only when no event is
+present, matching the new `glasstrace.error.stack` read order and
+the `glasstrace.error.source` precedence rule
+(`otel_exception > otel_event`).
+
+**Who is affected:** projects whose instrumentation populates BOTH
+the exception event AND `exception.*` span attributes with
+*different* values. Most instrumentations choose one surface; this
+combination is rare. Projects on a single surface are unaffected
+because the alternative stays absent and the existing code path
+keeps firing.
 
 ## Tests
 

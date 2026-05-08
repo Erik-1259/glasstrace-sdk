@@ -1673,7 +1673,11 @@ describe("GlasstraceExporter", () => {
       expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("internal");
     });
 
-    it("prefers span attributes over event attributes for error details", () => {
+    it("prefers the OTel exception EVENT over span attributes when both are present (SDK-041)", () => {
+      // SDK-041 / DISC-1535 inverted precedence: the exception event
+      // (recordException()) is the canonical OTel surface and wins over
+      // `exception.*` span attributes when both are populated. Pre-1.6
+      // SDKs preferred span attrs; this test pins the new contract.
       const { exporter, delegate } = createExporter();
       const span = createMockSpan({
         status: { code: SpanStatusCode.UNSET },
@@ -1689,9 +1693,12 @@ describe("GlasstraceExporter", () => {
       exporter.export([span], vi.fn());
 
       const enriched = delegate.exportedSpans[0][0];
-      expect(enriched.attributes[ATTR.ERROR_MESSAGE]).toBe("validation failed");
-      expect(enriched.attributes[ATTR.ERROR_CODE]).toBe("ZodError");
-      expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("validation");
+      // Event values win.
+      expect(enriched.attributes[ATTR.ERROR_MESSAGE]).toBe("different error message");
+      expect(enriched.attributes[ATTR.ERROR_CODE]).toBe("TypeError");
+      expect(enriched.attributes[ATTR.ERROR_CATEGORY]).toBe("internal");
+      // Source provenance reflects the canonical surface.
+      expect(enriched.attributes[ATTR.ERROR_SOURCE]).toBe("otel_exception");
     });
 
     it("does NOT trigger inference when status is explicitly OK", () => {
@@ -2864,6 +2871,16 @@ describe("GlasstraceExporter", () => {
       expect(extractPathOnly("data:text/plain,hello")).toBeUndefined();
     });
 
+    it("rejects bare relative strings without a leading slash (Copilot review)", () => {
+      // Pre-fix, `extractPathOnly("api/users")` would resolve against
+      // the sentinel base `http://_/` and return `/api/users`,
+      // silently coercing a non-path input into a fake path. Tightened
+      // to require either a recognized scheme or a leading `/`.
+      expect(extractPathOnly("api/users")).toBeUndefined();
+      expect(extractPathOnly("foo")).toBeUndefined();
+      expect(extractPathOnly("foo bar baz")).toBeUndefined();
+    });
+
     it("handles URLs with trailing slash and root paths", () => {
       expect(extractPathOnly("http://app/")).toBe("/");
       expect(extractPathOnly("http://app")).toBe("/");
@@ -3062,6 +3079,22 @@ describe("GlasstraceExporter", () => {
         const out = exportErrorSpanWithStack({
           route: "/_error",
           url: "http://localhost:3000/_error",
+          statusCode: 500,
+        });
+        expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBeUndefined();
+        expect(out[ATTR.ERROR_ORIGINAL_PATH]).toBeUndefined();
+        expect(out[ATTR.ERROR_FRAMEWORK_KIND]).toBeUndefined();
+      });
+
+      it("does NOT mark fallback when url adds only a trailing slash to route (Codex P2 review)", () => {
+        // Frameworks/proxies inconsistently round-trip trailing slashes
+        // between http.route and http.url. Without normalization,
+        // a literal-string `originalPath !== route` compare would
+        // produce a false-positive fallback marker on a real visit
+        // to the literal `/_error/` page.
+        const out = exportErrorSpanWithStack({
+          route: "/_error",
+          url: "http://localhost:3000/_error/",
           statusCode: 500,
         });
         expect(out[ATTR.ERROR_FALLBACK_ROUTE]).toBeUndefined();

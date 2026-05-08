@@ -24,12 +24,18 @@
  * supplied each error fact. Values:
  *
  * - `otel_exception` — facts came from an OTel exception event
- *   (recordException() / span event with `name === "exception"`).
- * - `otel_event` — facts came from a non-exception span event that
- *   carried `exception.message` / `exception.type` attributes
- *   directly. Distinct from `otel_exception` so product can tell
- *   whether the exception path was taken or whether facts were
- *   piggybacked on another event class.
+ *   (`recordException()` / span event with `name === "exception"`).
+ *   This is the canonical OTel surface for exceptions and the
+ *   highest-confidence source.
+ * - `otel_event` — facts came from `exception.*` attributes set
+ *   directly on the span (not on an event). Some real-world
+ *   instrumentations populate `attrs["exception.message"]` /
+ *   `attrs["exception.type"]` / `attrs["exception.stacktrace"]`
+ *   without using `recordException()`; those facts are still
+ *   OTel-shape, just on the non-canonical surface. Distinct from
+ *   `otel_exception` so product can tell which surface was used
+ *   — the canonical event path is more authoritative when both
+ *   are present.
  * - `glasstrace_attribute` — facts came from a `glasstrace.error.*`
  *   span attribute set explicitly by an adapter or user code (e.g.,
  *   the tRPC handler wrapper populating `glasstrace.error.message`).

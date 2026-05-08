@@ -234,14 +234,19 @@ export class GlasstraceExporter implements SpanExporter {
         extra[ATTR.ROUTE] = route;
       }
 
+      // Capture the raw HTTP URL once; multiple downstream blocks
+      // depend on it (tRPC procedure extraction, SDK-041 framework
+      // fallback original-path detection). Variable name reflects
+      // its general HTTP-URL role rather than any single use site.
+      const rawUrlAttr = attrs["http.url"] ?? attrs["url.full"] ?? attrs["http.target"];
+      const rawHttpUrl = typeof rawUrlAttr === "string" ? rawUrlAttr : undefined;
+
       // glasstrace.trpc.procedure
       // Extract tRPC procedure name from URL path (DISC-1215).
       // Pattern: /api/trpc/{procedure} where procedure is a single path segment
       // that may contain dots (polls.modify) or commas (batched: proc1,proc2).
-      const rawUrl = attrs["http.url"] ?? attrs["url.full"] ?? attrs["http.target"];
-      const trpcUrl = typeof rawUrl === "string" ? rawUrl : undefined;
-      if (trpcUrl) {
-        const trpcMatch = trpcUrl.match(/\/api\/trpc\/([^/?#]+)/);
+      if (rawHttpUrl) {
+        const trpcMatch = rawHttpUrl.match(/\/api\/trpc\/([^/?#]+)/);
         if (trpcMatch) {
           let procedure: string;
           try {
@@ -386,31 +391,45 @@ export class GlasstraceExporter implements SpanExporter {
 
       // SDK-041 / DISC-1535: track which surface produced the error
       // facts so product consumers can tell `otel_exception` (event)
-      // from `otel_event` (span attr) from `framework_fallback`
-      // (route-rewrite). Set on any error-bearing span the exporter
-      // enriches; falls through to undefined when no error attrs land.
+      // from `otel_event` (`exception.*` set as span attributes) from
+      // `framework_fallback` (route-rewrite). Set on any span where
+      // we emit at least one of the new `glasstrace.error.*`
+      // attributes; falls through to undefined when no error attrs
+      // land.
+      //
+      // Precedence: `otel_exception > otel_event > framework_fallback`.
+      // The exception event is the canonical OTel surface for
+      // exceptions (it's what `recordException()` emits); attributes
+      // are a non-canonical alternative some instrumentations use.
+      // When both are present, the event wins so downstream evidence
+      // ranking treats the canonical surface as the more authoritative
+      // source.
       let errorSource: string | undefined;
 
-      const errorMessage = attrs["exception.message"];
-      if (typeof errorMessage === "string") {
-        extra[ATTR.ERROR_MESSAGE] = errorMessage;
-        errorSource = "otel_event";
-      } else if (eventDetails.message) {
+      // Prefer the exception event; fall back to span attributes
+      // (this inverts SDK <= 1.5.x precedence, which preferred span
+      // attrs — that ordering mislabeled provenance and lost the
+      // canonical-OTel-surface signal).
+      const attrMessage = attrs["exception.message"];
+      if (eventDetails.message) {
         extra[ATTR.ERROR_MESSAGE] = eventDetails.message;
         errorSource = "otel_exception";
+      } else if (typeof attrMessage === "string") {
+        extra[ATTR.ERROR_MESSAGE] = attrMessage;
+        errorSource = "otel_event";
       }
 
       // Guard against non-string attribute values (OTel attributes can be
       // string | number | boolean | Array) to prevent toLowerCase() throws.
-      const errorType = attrs["exception.type"];
-      if (typeof errorType === "string") {
-        extra[ATTR.ERROR_CODE] = errorType;
-        extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(errorType);
-        errorSource = errorSource ?? "otel_event";
-      } else if (eventDetails.type) {
+      const attrType = attrs["exception.type"];
+      if (eventDetails.type) {
         extra[ATTR.ERROR_CODE] = eventDetails.type;
         extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(eventDetails.type);
         errorSource = errorSource ?? "otel_exception";
+      } else if (typeof attrType === "string") {
+        extra[ATTR.ERROR_CODE] = attrType;
+        extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(attrType);
+        errorSource = errorSource ?? "otel_event";
       }
 
       // glasstrace.error.stack + glasstrace.error.stack.{truncated,redacted}
@@ -420,12 +439,13 @@ export class GlasstraceExporter implements SpanExporter {
       // metadata attributes carry truncated/redacted booleans so
       // product can disclaim partial evidence to agents.
       //
-      // Read precedence mirrors error.message: OTel exception event
-      // (set by recordException()) is the primary source; an
-      // `exception.stacktrace` span attribute is the fallback for
-      // instrumentations that bypass the event mechanism. Same
-      // statusNotExplicitlyOK gate as message/type so a recovered
-      // span doesn't get labeled with a handled exception's stack.
+      // Read precedence mirrors the new event-first error.message
+      // ordering: the OTel exception event (set by `recordException()`)
+      // is the canonical primary source; an `exception.stacktrace`
+      // span attribute is the fallback for instrumentations that
+      // bypass the event mechanism. Same statusNotExplicitlyOK gate
+      // as message/type so a recovered span doesn't get labeled with
+      // a handled exception's stack.
       if (statusNotExplicitlyOK) {
         const rawStack = eventDetails.stacktrace
           ?? (typeof attrs["exception.stacktrace"] === "string"
@@ -470,10 +490,17 @@ export class GlasstraceExporter implements SpanExporter {
         route === "/_not-found" ||
         route === "/_404" ||
         route === "/_500";
-      if (routeIsFallback && trpcUrl) {
-        const originalPath = extractPathOnly(trpcUrl);
-        if (originalPath && originalPath !== route) {
-          extra[ATTR.ERROR_ORIGINAL_PATH] = originalPath;
+      if (routeIsFallback && rawHttpUrl) {
+        const originalPath = extractPathOnly(rawHttpUrl);
+        // Normalize trailing slashes on both sides before the
+        // differ check so frameworks/proxies that round-trip a
+        // trailing slash on `http.url` (e.g., `/_error/`) don't
+        // produce a false-positive fallback marker on a real visit
+        // to the literal fallback page (Codex P2 review on PR #251).
+        const normOriginal = stripTrailingSlash(originalPath);
+        const normRoute = stripTrailingSlash(route);
+        if (normOriginal && normOriginal !== normRoute) {
+          extra[ATTR.ERROR_ORIGINAL_PATH] = normOriginal;
           extra[ATTR.ERROR_FALLBACK_ROUTE] = route;
           extra[ATTR.ERROR_FRAMEWORK_KIND] = "fallback";
           // Promote to framework_fallback only when no upstream OTel
@@ -489,10 +516,14 @@ export class GlasstraceExporter implements SpanExporter {
       }
 
       if (this.verbose && (extra[ATTR.ERROR_MESSAGE] || extra[ATTR.ERROR_CODE])) {
-        const msgSource = typeof errorMessage === "string" ? "attrs"
-          : eventDetails.message ? "event" : "none";
-        const typeSource = typeof errorType === "string" ? "attrs"
-          : eventDetails.type ? "event" : "none";
+        // Source label reflects which surface won under the new
+        // event-first precedence (SDK-041 / DISC-1535).
+        const msgSource = eventDetails.message ? "event"
+          : typeof attrMessage === "string" ? "attrs"
+          : "none";
+        const typeSource = eventDetails.type ? "event"
+          : typeof attrType === "string" ? "attrs"
+          : "none";
         sdkLog("info",
           `[glasstrace] enrichSpan "${name}": error.message source=${msgSource}, ` +
           `error.code source=${typeSource}`,
@@ -789,6 +820,25 @@ export function extractLeadingPath(raw: string | undefined): string | undefined 
 }
 
 /**
+ * Strips a trailing `/` from a path so two paths that differ only in
+ * trailing-slash form compare equal. Used by the SDK-041 framework-
+ * fallback differ check; frameworks/proxies inconsistently round-trip
+ * trailing slashes between `http.route` and `http.url`, and a
+ * literal-string compare without normalization would produce
+ * false-positive fallback markers on real visits to a literal
+ * `/_error` page (Codex P2 review on PR #251).
+ *
+ * Returns the original input for `undefined` and for the root path
+ * `"/"` (where stripping the slash would lose the path entirely);
+ * otherwise returns the input with any single trailing slash removed.
+ */
+function stripTrailingSlash(path: string | undefined): string | undefined {
+  if (!path) return path;
+  if (path === "/") return path;
+  return path.endsWith("/") ? path.slice(0, -1) : path;
+}
+
+/**
  * Extracts the path component (no query, no fragment) from a URL or
  * a bare path. Used by the SDK-041 framework-fallback handler to
  * compute `glasstrace.error.original_path` from the upstream
@@ -816,21 +866,31 @@ export function extractPathOnly(raw: string | undefined): string | undefined {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return undefined;
 
-  // Try URL parsing first. URL.parse / new URL handle abs URLs,
-  // and protocol-relative URLs require a base. We use a sentinel
-  // base only to extract the pathname.
-  try {
-    const parsed = new URL(trimmed, "http://_/");
-    if (parsed.pathname && parsed.pathname.startsWith("/")) {
-      return parsed.pathname;
+  // URL parser handles absolute URLs (`http://...`, `https://...`)
+  // and protocol-relative URLs (`//host/path`); both forms have a
+  // recognizable scheme prefix. Only invoke the parser for those
+  // forms — invoking it on arbitrary relative strings like
+  // `"api/users"` resolves them against the sentinel base
+  // (`http://_/api/users`) and silently coerces a non-path input
+  // into a fake path, which would falsely emit
+  // `glasstrace.error.original_path` for unparseable upstream
+  // values (Copilot review on PR #251).
+  const isAbsoluteUrl = /^https?:\/\//i.test(trimmed);
+  const isProtocolRelative = trimmed.startsWith("//");
+  if (isAbsoluteUrl || isProtocolRelative) {
+    try {
+      const parsed = new URL(trimmed, "http://_/");
+      if (parsed.pathname && parsed.pathname.startsWith("/")) {
+        return parsed.pathname;
+      }
+    } catch {
+      // Fall through to bare-path fast path below.
     }
-  } catch {
-    // Fall through to manual handling for inputs the URL parser
-    // refuses (e.g. malformed). The bare-path fast-path below
-    // catches the common cases.
   }
 
-  // Bare-path fast path: strip query/fragment if present.
+  // Bare-path fast path: strip query/fragment if present. Requires
+  // a leading `/` so we don't accept `"api/users"` as if it were a
+  // path.
   if (trimmed.startsWith("/")) {
     const queryIdx = trimmed.indexOf("?");
     const fragIdx = trimmed.indexOf("#");

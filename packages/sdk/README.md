@@ -394,9 +394,10 @@ boundaries so multi-byte characters are never split mid-sequence.
 
 ### Source provenance
 
-Every error-bearing span the exporter enriches carries a
-`glasstrace.error.source` attribute naming where the facts came
-from:
+When the exporter emits any of the new
+`glasstrace.error.{message,code,stack,original_path,fallback_route}`
+attributes, it also sets `glasstrace.error.source` to name the
+surface that supplied the facts:
 
 | Value | Source |
 |---|---|
