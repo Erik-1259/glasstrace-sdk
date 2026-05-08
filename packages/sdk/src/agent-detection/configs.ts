@@ -240,7 +240,7 @@ export function generateInfoSection(
     "- `get_error_list` - List recent errors with filtering and pagination",
     "- `get_trace` - Get a specific trace by ID or URL pattern",
     "- `get_root_cause` - Get the root cause analysis for a specific error trace (requires a `traceId` from `get_latest_error`, `get_error_list`, or `get_trace`)",
-    "- `get_test_suggestions` - Get test suggestions based on recent errors",
+    "- `get_test_suggestions` - Get test suggestions for a specific error trace (requires a `traceId` from `get_latest_error`, `get_error_list`, or `get_trace`)",
     "- `get_session_timeline` - Get the timeline of all traces in the current session",
     "",
     "To refresh this managed section after a `@glasstrace/sdk` upgrade, run: `npx glasstrace upgrade-instructions`. To reconfigure MCP credentials, run: `npx glasstrace mcp add`.",

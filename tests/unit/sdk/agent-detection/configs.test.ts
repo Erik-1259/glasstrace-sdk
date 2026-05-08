@@ -373,6 +373,31 @@ describe("generateInfoSection", () => {
       ).toBe(true);
     });
 
+    // DISC-1571: get_test_suggestions has the same defect class as
+    // DISC-1536's get_root_cause — its rendered description omits the
+    // required `traceId` parameter, while the MCP server's
+    // GetTestSuggestionsParamsSchema (wire-mcp.ts) requires it. Without
+    // the requirement named in the description, agents call
+    // get_test_suggestions with no arguments and the MCP server rejects
+    // the request. Mirrors the get_root_cause assertion above.
+    it("describes get_test_suggestions with required traceId and a trace-id source", () => {
+      const info = generateInfoSection(makeAgent("claude"), ENDPOINT, SDK_VERSION);
+      const line = info
+        .split("\n")
+        .find((l) => /^- `get_test_suggestions`/.test(l));
+      expect(line, "expected a bullet describing get_test_suggestions").toBeDefined();
+      const testSuggestionsLine = line as string;
+      expect(testSuggestionsLine).toContain("traceId");
+      const namesTraceIdSource =
+        testSuggestionsLine.includes("get_latest_error") ||
+        testSuggestionsLine.includes("get_error_list") ||
+        testSuggestionsLine.includes("get_trace");
+      expect(
+        namesTraceIdSource,
+        "get_test_suggestions description must reference at least one of get_latest_error, get_error_list, or get_trace as a traceId source",
+      ).toBe(true);
+    });
+
     it("contains npx setup command", () => {
       const info = generateInfoSection(makeAgent("claude"), ENDPOINT, SDK_VERSION);
       expect(info).toContain("npx glasstrace mcp add");
