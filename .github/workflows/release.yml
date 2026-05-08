@@ -97,6 +97,23 @@ jobs:
 
       - run: npm ci
 
+      # Snapshot version FIRST in canary mode so tsup's
+      # `define: { __SDK_VERSION__: pkg.version }` substitution at build
+      # time bakes the canary version into the dist bundle. Running
+      # snapshot AFTER build (the prior order) caused the published
+      # canary to ship `dist/` built from the pre-snapshot stable, so
+      # the bundled `__SDK_VERSION__` literal lied about which version
+      # the artifact was tagged as on npm — directly observed in the
+      # SDK-050 canary `0.0.0-canary-20260507174112` whose CLI bundles
+      # contained `"1.4.0"` (DISC-1602).
+      #
+      # For stable, the gate `if: canary` skips this step and the
+      # version that landed via the merged Version Packages PR flows
+      # through the build correctly.
+      - name: Snapshot version
+        if: ${{ inputs.mode == 'canary' }}
+        run: npx changeset version --snapshot canary
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -105,14 +122,6 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      # Canary: snapshot version + publish with @canary tag. The guard
-      # against empty changesets runs earlier (right after checkout) so
-      # we don't spend CI time on install/typecheck/test/build that
-      # will be discarded.
-      - name: Snapshot version
-        if: ${{ inputs.mode == 'canary' }}
-        run: npx changeset version --snapshot canary
 
       - name: Publish canary
         if: ${{ inputs.mode == 'canary' }}

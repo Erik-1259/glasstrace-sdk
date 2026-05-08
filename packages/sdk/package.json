@@ -49,9 +49,10 @@
   },
   "scripts": {
     "build": "tsup",
-    "postbuild": "npm run check:edge-bundle && npm run verify:subpath",
+    "postbuild": "npm run check:edge-bundle && npm run verify:subpath && npm run check:sdk-version-stamp",
     "check:edge-bundle": "node scripts/check-edge-bundle.mjs",
     "verify:subpath": "node scripts/verify-subpath-resolution.mjs",
+    "check:sdk-version-stamp": "node scripts/check-sdk-version-stamp.mjs",
     "preuninstall": "node -e \"process.stderr.write('\\n[@glasstrace/sdk] Package removal warning:\\n  Before \\'npm uninstall @glasstrace/sdk\\' runs, Glasstrace recommends running \\'npx @glasstrace/sdk uninit\\' first to cleanly remove instrumentation files, MCP configuration, and the .glasstrace/ state directory. Without uninit, your next build may fail because instrumentation.ts and next.config still reference the removed package.\\n  See: https://glasstrace.dev/docs/cli#uninit\\n\\n')\""
   },
   "peerDependencies": {
