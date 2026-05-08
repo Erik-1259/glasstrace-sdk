@@ -27,7 +27,10 @@ import {
   BasicTracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
+  SamplingDecision,
   type ReadableSpan,
+  type Sampler,
+  type SamplingResult,
 } from "@opentelemetry/sdk-trace-base";
 import { trace, SpanStatusCode, SpanKind } from "@opentelemetry/api";
 import {
@@ -378,6 +381,95 @@ describe("tracedRequestMiddleware — no leaked probe spans", () => {
     for (const span of finished) {
       expect(span.name).toBe("auth");
     }
+  });
+});
+
+describe("tracedRequestMiddleware — sampler-drop discriminator (regression)", () => {
+  // Pin that the SDK-not-registered fast path uses
+  // `spanContext().traceId === INVALID_TRACE_ID` (the noop-tracer
+  // sentinel), NOT `isRecording() === false`. A real provider whose
+  // sampler decides NOT_RECORD also returns isRecording=false, but
+  // produces a valid trace ID — that case must take the normal
+  // enrichment path, not fire `middleware:skipped_uninstalled`.
+  // Without this guard the wrapper would emit spurious lifecycle
+  // events for every sampled-out request in production deployments
+  // that use head-sampling configurations.
+
+  it("does not emit middleware:skipped_uninstalled when a real provider's sampler drops the span", async () => {
+    // Replace the parent describe's provider with one whose sampler
+    // returns NOT_RECORD for every shouldSample call.
+    await provider.shutdown();
+    const dropSampler: Sampler = {
+      shouldSample: (): SamplingResult => ({
+        decision: SamplingDecision.NOT_RECORD,
+      }),
+      toString: () => "DropSampler",
+    };
+    const dropProvider = new BasicTracerProvider({
+      sampler: dropSampler,
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    trace.setGlobalTracerProvider(dropProvider);
+
+    const lifecycleModule = await import(
+      "../../../../packages/sdk/src/lifecycle.js"
+    );
+    lifecycleModule.resetLifecycleForTesting();
+    lifecycleModule.initLifecycle({ logger: () => {} });
+
+    let skippedEmitted = false;
+    const listener = (): void => {
+      skippedEmitted = true;
+    };
+    lifecycleModule.onLifecycleEvent(
+      "middleware:skipped_uninstalled",
+      listener,
+    );
+
+    try {
+      const wrapped = tracedRequestMiddleware(
+        { name: "drop-test" },
+        async () => "ok",
+      );
+      await wrapped({ nextUrl: { pathname: "/x" } });
+      expect(skippedEmitted).toBe(false);
+    } finally {
+      lifecycleModule.offLifecycleEvent(
+        "middleware:skipped_uninstalled",
+        listener,
+      );
+      await dropProvider.shutdown();
+    }
+  });
+
+  // Regression for Codex P1 on PR #264 (2026-05-08): an earlier
+  // version of the defensive try/catch wrapped the entire
+  // `tracer.startActiveSpan(...)` call, which intercepted the
+  // callback's intentional rethrow of handler errors and ran the
+  // handler a SECOND time in the catch fallback. The fix added a
+  // `callbackInvoked` flag so the fallback only fires when
+  // `startActiveSpan` itself failed BEFORE the callback ran.
+  //
+  // This test pins the no-double-invocation invariant: a handler
+  // that throws synchronously must run exactly once, and the error
+  // must propagate.
+  it("does not double-invoke the handler when it throws synchronously", () => {
+    let invocations = 0;
+    const wrapped = tracedRequestMiddleware(
+      { name: "throwing" },
+      (): unknown => {
+        invocations++;
+        throw new Error("user-handler-sync-throw");
+      },
+    );
+
+    expect(() =>
+      wrapped({ nextUrl: { pathname: "/x" } }),
+    ).toThrow("user-handler-sync-throw");
+
+    // Critical: handler ran ONCE. If the outer try/catch were too
+    // broad, this would be 2.
+    expect(invocations).toBe(1);
   });
 });
 

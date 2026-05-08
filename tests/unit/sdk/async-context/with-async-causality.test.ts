@@ -295,3 +295,36 @@ describe("withAsyncCausality — validation", () => {
     ).toThrow(TypeError);
   });
 });
+
+describe("withAsyncCausality — span activation (regression)", () => {
+  // Pin that fn() runs with the async-causality span as the active
+  // OTel context, so child spans created inside fn() are parented
+  // under it. Without `context.with(trace.setSpan(...), fn)`, child
+  // spans become orphan roots — the bug Copilot caught on PR #262.
+
+  it("activates the async-causality span so child spans created inside fn() are parented under it", async () => {
+    const childTracer = trace.getTracer("test-child");
+
+    const continuation = withAsyncCausality(
+      { name: "outer-async" },
+      async () => {
+        const child = childTracer.startSpan("child-during-fn");
+        child.end();
+      },
+    );
+    await continuation();
+
+    // Use the `getSpan` helper so the assertion fails loudly if
+    // multiple spans with the same name slip through (Copilot review
+    // 2026-05-08 — `find()` would silently take the first match).
+    const finished = exporter.getFinishedSpans();
+    const outer = getSpan(finished, "outer-async");
+    const child = getSpan(finished, "child-during-fn");
+    expect(child.parentSpanContext?.spanId).toBe(
+      outer.spanContext().spanId,
+    );
+    expect(child.spanContext().traceId).toBe(
+      outer.spanContext().traceId,
+    );
+  });
+});
