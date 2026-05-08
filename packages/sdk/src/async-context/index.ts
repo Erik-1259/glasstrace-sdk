@@ -16,8 +16,8 @@
  *     "follows from" relationship.
  *   - A `glasstrace.causal.post_response_async` attribute carrying
  *     the captured trace ID (32-char hex). Used by the product-side
- *     trace-summary transform (per `docs/discoveries/DISC-1539.md:55-58`)
- *     to reconstruct ownership without resolving the Link. Two
+ *     trace-summary transform (per DISC-1539's product handoff) to
+ *     reconstruct ownership without resolving the Link. Two
  *     companion booleans
  *     (`glasstrace.causal.affects_http_status` and
  *     `glasstrace.causal.affects_http_duration`) document that the
@@ -52,6 +52,7 @@
 
 import {
   trace,
+  context,
   SpanStatusCode,
   type AttributeValue,
   type SpanContext,
@@ -293,7 +294,19 @@ export function withAsyncCausality<T>(
     }
 
     try {
-      const value = await fn();
+      // Activate the span as the current OTel context during fn()
+      // execution so any nested spans (auto-instrumented OR manual)
+      // are parented under this span. Without `context.with`, the
+      // started span exists but is not in the active context, so
+      // child spans become orphan roots (Copilot review 2026-05-08).
+      // We use `context.with` rather than `tracer.startActiveSpan`
+      // so the existing setup (Link/attribute application above)
+      // can run pre-activation; the existing setup is small but
+      // not trivial to reorder.
+      const value = await context.with(
+        trace.setSpan(context.active(), span),
+        fn,
+      );
       return value;
     } catch (error) {
       recordSpanError(span, error);
@@ -306,16 +319,22 @@ export function withAsyncCausality<T>(
 
 /**
  * Type guard for OTel noop spans. Mirrors the same check in
- * `../middleware/index.ts`. The OTel public `isRecording()` API is
- * `false` for `NonRecordingSpan` (the noop tracer's span class) and
- * `true` for real SDK-emitted spans, so this avoids opening a
- * probe span on every call when a real provider is registered.
+ * `../middleware/index.ts`. The OTel API's noop tracer
+ * (`@opentelemetry/api`'s `NonRecordingSpan`) returns the all-zeros
+ * sentinel trace ID `00000000000000000000000000000000` from
+ * `Span.spanContext().traceId`. Real SDK-emitted spans — including
+ * spans that a sampler chose to DROP (which legitimately return
+ * `isRecording() === false`) — return a valid 32-char hex trace ID
+ * because the SDK assigns a trace ID before sampler invocation for
+ * propagation purposes. Using the SpanContext discriminator keeps
+ * the SDK-not-registered fast path from misfiring under normal head
+ * sampling configurations (Copilot review 2026-05-08).
  */
 function isNoopSpan(
   span: ReturnType<ReturnType<typeof trace.getTracer>["startSpan"]>,
 ): boolean {
   try {
-    return span.isRecording() === false;
+    return span.spanContext().traceId === INVALID_TRACE_ID;
   } catch {
     return false;
   }

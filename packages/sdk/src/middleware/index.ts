@@ -176,9 +176,9 @@ export interface TracedRequestMiddlewareOptions {
  *      discarded — only the path is used).
  *   3. `undefined` — when neither field exists or both fail to
  *      parse, the wrapper omits the causal attribute rather than
- *      emitting a guessed value. Per the product brief at
- *      `docs/task-briefs/SDK-046.md:69-70`: "missing or unknown
- *      evidence is preferable to guessed evidence".
+ *      emitting a guessed value, per the SDK-046 product brief's
+ *      "missing or unknown evidence is preferable to guessed
+ *      evidence" rule (DISC-1537 / DISC-1539 product handoff).
  *
  * This function never throws.
  */
@@ -216,13 +216,26 @@ function extractRequestPath(req: unknown): string | undefined {
 }
 
 /**
- * Type guard for OTel spans created by the noop tracer. The OTel API
- * exposes a public `isRecording()` method on every span; noop spans
- * (instances of `NonRecordingSpan`) return `false` from this method,
- * while real SDK-emitted spans return `true`. This is the canonical
- * way to detect the no-provider state without poking at private API
- * surface — used widely in OTel instrumentation libraries (e.g.,
- * `@opentelemetry/instrumentation`'s `_diag` skip checks).
+ * Sentinel trace ID returned by the OTel API's noop tracer
+ * (`@opentelemetry/api`'s `NonRecordingSpan`). Per the OTel
+ * specification's noop semantics, the noop SpanContext exposes
+ * `traceId === "00000000000000000000000000000000"`. Used by
+ * {@link isNoopSpan} below to discriminate "no provider registered"
+ * from "real provider whose sampler dropped this span" — the latter
+ * also returns `isRecording() === false` but produces a valid
+ * 32-char hex trace ID because the SDK assigns one before sampler
+ * invocation for propagation purposes.
+ */
+const INVALID_TRACE_ID = "00000000000000000000000000000000";
+
+/**
+ * Type guard for OTel spans created by the noop tracer. The OTel
+ * API's noop SpanContext returns the all-zeros sentinel for
+ * `traceId`; real SDK-emitted spans always have a valid 32-char hex
+ * trace ID (even when a sampler decided to DROP the span). Using
+ * the SpanContext discriminator keeps the SDK-not-registered fast
+ * path from misfiring under normal head sampling configurations
+ * (Copilot review 2026-05-08).
  *
  * Returning `true` here means the caller should NOT proceed with
  * span enrichment; the noop tracer would discard everything anyway.
@@ -231,11 +244,11 @@ function isNoopSpan(
   span: ReturnType<ReturnType<typeof trace.getTracer>["startSpan"]>,
 ): boolean {
   try {
-    return span.isRecording() === false;
+    return span.spanContext().traceId === INVALID_TRACE_ID;
   } catch {
     // Defensive: treat "could not determine" as not-noop so we
     // continue down the enrichment path. The noop tracer itself
-    // never throws from `isRecording()`.
+    // never throws from `spanContext()`.
     return false;
   }
 }
