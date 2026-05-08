@@ -34,7 +34,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "glasstrace": "dist/cli/init.js"
+    "glasstrace": "dist/cli/init.cjs"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
