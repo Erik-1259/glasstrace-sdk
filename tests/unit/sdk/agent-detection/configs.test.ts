@@ -373,6 +373,35 @@ describe("generateInfoSection", () => {
       ).toBe(true);
     });
 
+    // DISC-1571: the get_test_suggestions description rendered by
+    // `generateInfoSection()` (and injected into agent instruction
+    // files like CLAUDE.md / .cursorrules / codex.md by `glasstrace
+    // mcp add` and `glasstrace init`) must name the required `traceId`
+    // parameter and point the user's AI agent at a tool that supplies
+    // trace IDs. Without this, agents call get_test_suggestions with
+    // no arguments and the MCP server's GetTestSuggestionsParamsSchema
+    // (wire-mcp.ts) rejects the request. Same defect class as
+    // DISC-1536's get_root_cause assertion above; asserts the required
+    // substrings without locking the exact wording so the description
+    // can evolve.
+    it("describes get_test_suggestions with required traceId and a trace-id source", () => {
+      const info = generateInfoSection(makeAgent("claude"), ENDPOINT, SDK_VERSION);
+      const line = info
+        .split("\n")
+        .find((l) => /^- `get_test_suggestions`/.test(l));
+      expect(line, "expected a bullet describing get_test_suggestions").toBeDefined();
+      const testSuggestionsLine = line as string;
+      expect(testSuggestionsLine).toContain("traceId");
+      const namesTraceIdSource =
+        testSuggestionsLine.includes("get_latest_error") ||
+        testSuggestionsLine.includes("get_error_list") ||
+        testSuggestionsLine.includes("get_trace");
+      expect(
+        namesTraceIdSource,
+        "get_test_suggestions description must reference at least one of get_latest_error, get_error_list, or get_trace as a traceId source",
+      ).toBe(true);
+    });
+
     it("contains npx setup command", () => {
       const info = generateInfoSection(makeAgent("claude"), ENDPOINT, SDK_VERSION);
       expect(info).toContain("npx glasstrace mcp add");
