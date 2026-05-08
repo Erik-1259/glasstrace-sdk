@@ -31,6 +31,18 @@
       "require": "./dist/trpc/index.cjs",
       "default": "./dist/trpc/index.js"
     },
+    "./middleware": {
+      "types": "./dist/middleware/index.d.ts",
+      "import": "./dist/middleware/index.js",
+      "require": "./dist/middleware/index.cjs",
+      "default": "./dist/middleware/index.js"
+    },
+    "./async-context": {
+      "types": "./dist/async-context/index.d.ts",
+      "import": "./dist/async-context/index.js",
+      "require": "./dist/async-context/index.cjs",
+      "default": "./dist/async-context/index.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

@@ -124,6 +124,78 @@ import { drizzle } from "drizzle-orm/node-postgres";
 const db = drizzle(pool, { logger: new GlasstraceDrizzleLogger() });
 ```
 
+### Middleware-Ownership Tracing
+
+Wrap a Next.js `middleware.ts` (or any Web Fetch-shaped middleware
+function) so the resulting span is tagged with the originating
+request's path. The product-side trace summary uses the
+`glasstrace.causal.middleware_for_request` attribute to link the
+middleware span back to the owning HTTP request trace, even when the
+middleware runs in the Edge Runtime where AsyncLocalStorage parents
+are not available.
+
+```typescript
+// middleware.ts
+import { tracedRequestMiddleware } from "@glasstrace/sdk/middleware";
+import { NextResponse, type NextRequest } from "next/server";
+
+export const middleware = tracedRequestMiddleware(
+  { name: "auth-middleware" },
+  async (req: NextRequest) => {
+    if (!req.cookies.get("session")) {
+      return NextResponse.redirect(new URL("/login", req.url));
+    }
+    return NextResponse.next();
+  },
+);
+
+export const config = { matcher: ["/dashboard/:path*"] };
+```
+
+The wrapper is included in the SDK's edge bundle. It uses only the
+OpenTelemetry API and emits the originating path as a span attribute
+— no `node:async_hooks`, no `process` reads — so the same import
+works in both Node and Edge runtimes.
+
+### Post-Response Async Tracing
+
+Wrap callbacks scheduled via Next.js `after()`, queue dispatchers, or
+webhook fire-and-forget so the resulting async span carries a causal
+link back to the originating request trace.
+
+```typescript
+// app/api/orders/route.ts
+import { withAsyncCausality } from "@glasstrace/sdk/async-context";
+import { after } from "next/server";
+
+export async function POST(req: Request) {
+  const result = await processRequest(req);
+  after(
+    withAsyncCausality(
+      { name: "send-confirmation-email" },
+      async () => sendEmail(result.userId),
+    ),
+  );
+  return Response.json({ ok: true });
+}
+```
+
+The wrapper captures the active OpenTelemetry `SpanContext` at call
+time, then emits a span when the continuation runs that carries:
+
+- An OpenTelemetry `Link` to the originating trace (visible in
+  standard OTel-aware UIs as a "follows from" relationship), and
+- The `glasstrace.causal.post_response_async` attribute carrying the
+  originating trace ID, plus
+  `glasstrace.causal.affects_http_status = false` and
+  `glasstrace.causal.affects_http_duration = false` documenting that
+  the async work does NOT participate in the root request's outcome.
+
+When the wrapper is invoked outside any active request span (for
+example, captured at module top-level), the callback still runs but
+no causal evidence is emitted — missing evidence is preferable to
+guessed evidence.
+
 ## Coexistence with Other OTel Tools
 
 Glasstrace coexists with any tool that owns the OpenTelemetry

@@ -103,6 +103,24 @@ const SUBPATHS = [
       "— see src/trpc/index.ts",
     requiredRuntime: ["tracedMiddleware"],
   },
+  {
+    specifier: "@glasstrace/sdk/middleware",
+    distHint: "dist/middleware/index.{js,cjs}",
+    expectedExports:
+      "the runtime export `tracedRequestMiddleware` plus type-only " +
+      "exports (TracedRequestMiddlewareOptions, RequestMiddlewareFunction) " +
+      "erased at runtime — see src/middleware/index.ts",
+    requiredRuntime: ["tracedRequestMiddleware"],
+  },
+  {
+    specifier: "@glasstrace/sdk/async-context",
+    distHint: "dist/async-context/index.{js,cjs}",
+    expectedExports:
+      "the runtime export `withAsyncCausality` plus the type-only " +
+      "export `WithAsyncCausalityOptions` erased at runtime — see " +
+      "src/async-context/index.ts",
+    requiredRuntime: ["withAsyncCausality"],
+  },
 ];
 const LOG_PREFIX = "[verify-subpath]";
 

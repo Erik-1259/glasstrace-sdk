@@ -17,6 +17,10 @@
 
 import { EventEmitter } from "node:events";
 import { getCoexistenceState } from "./signal-handler.js";
+import {
+  _registerLifecycleEmitForBridge,
+  _clearLifecycleEmitForBridge,
+} from "./optional-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // State Enums
@@ -213,6 +217,41 @@ export interface SdkLifecycleEvents {
   "health:init_failed": { error: string };
   "health:heartbeat_tick": Record<string, never>;
   "health:config_refreshed": Record<string, never>;
+
+  /**
+   * `tracedRequestMiddleware` from `@glasstrace/sdk/middleware` was
+   * invoked but the SDK is not registered (early-init race or
+   * `OtelState.UNCONFIGURED`). The wrapped middleware still runs;
+   * the span landed on the OTel API's noop tracer and was discarded
+   * (DISC-1537 / SDK-046).
+   *
+   * Emitted at most once per process by the wrapper to avoid log
+   * floods on a hot request path; a single signal is sufficient to
+   * surface the misconfiguration.
+   *
+   * **PII-safety:** payload is empty by construction.
+   */
+  "middleware:skipped_uninstalled": Record<string, never>;
+  /**
+   * `withAsyncCausality` from `@glasstrace/sdk/async-context` was
+   * invoked outside an active request span (no captured
+   * `SpanContext` at call time). The continuation still runs; the
+   * resulting span has no `glasstrace.causal.post_response_async`
+   * link (DISC-1539 / SDK-046).
+   *
+   * Emitted at most once per process. **PII-safety:** payload is
+   * empty by construction.
+   */
+  "async:no_originating_context": Record<string, never>;
+  /**
+   * `withAsyncCausality` continuation fired but the SDK is not
+   * registered. The continuation still runs; the span landed on the
+   * noop tracer (DISC-1539 / SDK-046).
+   *
+   * Emitted at most once per process. **PII-safety:** payload is
+   * empty by construction.
+   */
+  "async:skipped_uninstalled": Record<string, never>;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +288,17 @@ export function initLifecycle(options: {
   }
   _logger = options.logger;
   _initialized = true;
+
+  // Register the lifecycle-emit bridge so edge-safe wrappers
+  // (`./middleware/index.ts`, `./async-context/index.ts`) can emit
+  // lifecycle events without a static import on this Node-only
+  // module. See `./optional-lifecycle.ts` for the contract.
+  _registerLifecycleEmitForBridge((event, payload) => {
+    emitLifecycleEvent(
+      event as keyof SdkLifecycleEvents,
+      payload as SdkLifecycleEvents[keyof SdkLifecycleEvents],
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -899,4 +949,5 @@ export function resetLifecycleForTesting(): void {
   }
   _beforeExitHandler = null;
   _beforeExitRegistered = false;
+  _clearLifecycleEmitForBridge();
 }

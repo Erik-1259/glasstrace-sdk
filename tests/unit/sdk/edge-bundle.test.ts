@@ -92,10 +92,21 @@ describeIfBuilt("edge-entry bundle (SDK-028)", () => {
     // The post-recon pruned list (see /tmp/recon-SDK-028.md for the
     // per-symbol evidence). Keep this alphabetized so a diff to either
     // `src/edge-entry.ts` or this test reviews cleanly.
+    //
+    // SDK-046 / DISC-1537 + DISC-1539 added two additional edge-safe
+    // exports — `tracedRequestMiddleware` from `./middleware/index.ts`
+    // and `withAsyncCausality` from `./async-context/index.ts`. Both
+    // closures import only `@opentelemetry/api`,
+    // `@glasstrace/protocol`, and the edge-safe lifecycle bridge at
+    // `./optional-lifecycle.ts`; the F003 gate at
+    // `packages/sdk/scripts/check-edge-bundle.mjs` enforces the
+    // absence of `node:*` and `process` references on every build.
     const expected = [
       "SdkError",
       "captureCorrelationId",
       "GlasstraceSpanProcessor",
+      "tracedRequestMiddleware",
+      "withAsyncCausality",
     ].sort();
 
     const mod = (await import(pathToFileURL(edgeEntry).href)) as Record<

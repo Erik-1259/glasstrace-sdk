@@ -70,6 +70,41 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   ELEMENT_CONFIDENCE: "glasstrace.element.confidence",
   TAB_ID: "glasstrace.tab.id",
 
+  // Causal evidence (SDK-046 / DISC-1537 + DISC-1539).
+  //
+  // The SDK emits `glasstrace.causal.*` attributes on spans that
+  // carry instrumentation-time evidence about a span's relationship
+  // to its owning request trace. Two families are defined here:
+  //
+  //   - `MIDDLEWARE_FOR_REQUEST` — middleware-ownership marker. Set
+  //     on a middleware-only span by `tracedRequestMiddleware()` from
+  //     `@glasstrace/sdk/middleware`. Carries the originating
+  //     request's normalized path so the product-side trace-summary
+  //     transform can link the middleware span to the owning HTTP
+  //     request trace even when the middleware runs in an edge
+  //     runtime that does not propagate AsyncLocalStorage parents.
+  //
+  //   - `POST_RESPONSE_ASYNC` — post-response async marker. Set on a
+  //     span emitted from inside `withAsyncCausality()` from
+  //     `@glasstrace/sdk/async-context`. Carries the originating
+  //     request's trace ID (32-character hex) captured at the call
+  //     site so async work scheduled via Next.js `after()`, queues,
+  //     or webhooks can be linked back to its originating request.
+  //     Companion booleans `CAUSAL_AFFECTS_HTTP_STATUS` /
+  //     `CAUSAL_AFFECTS_HTTP_DURATION` document whether the async
+  //     work participates in the root request's outcome (default
+  //     `false` — non-outcome async work).
+  //
+  // Wire keys live under the `glasstrace.causal.*` namespace so they
+  // are namespace-distinct from `glasstrace.error.*`,
+  // `glasstrace.http.*`, `glasstrace.trpc.*`, and the side-effect
+  // family below. Adding these constants is a `@glasstrace/protocol`
+  // minor bump; existing entries are untouched.
+  CAUSAL_MIDDLEWARE_FOR_REQUEST: "glasstrace.causal.middleware_for_request",
+  CAUSAL_POST_RESPONSE_ASYNC: "glasstrace.causal.post_response_async",
+  CAUSAL_AFFECTS_HTTP_STATUS: "glasstrace.causal.affects_http_status",
+  CAUSAL_AFFECTS_HTTP_DURATION: "glasstrace.causal.affects_http_duration",
+
   // Side-effect evidence (SDK-049 / SCHEMA-036).
   // Top-level operation attributes attached to the active span when a
   // side-effect is recorded via `recordSideEffect()`. The wire-string

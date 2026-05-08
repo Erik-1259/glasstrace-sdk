@@ -15,6 +15,8 @@ export default defineConfig({
     "cli/upgrade-instructions": "src/cli/upgrade-instructions.ts",
     "adapters/drizzle": "src/adapters/drizzle.ts",
     "trpc/index": "src/trpc/index.ts",
+    "middleware/index": "src/middleware/index.ts",
+    "async-context/index": "src/async-context/index.ts",
   },
   format: ["esm", "cjs"],
   tsconfig: "tsconfig.build.json",
