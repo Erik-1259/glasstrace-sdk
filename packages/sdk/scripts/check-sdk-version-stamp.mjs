@@ -24,9 +24,12 @@
  *
  * What this script does
  * ---------------------
- * 1. Reads `package.json` next to this script (resolved via
- *    `process.cwd()` at script invocation — `npm run` already cd's
- *    into the package dir).
+ * 1. Reads `package.json` in the package dir, which is resolved as
+ *    the parent of this `scripts/` directory using `import.meta.url`.
+ *    That makes the script invariant to `process.cwd()` — it works
+ *    correctly whether called via `npm run check:sdk-version-stamp`
+ *    (cwd = `packages/sdk/`) or `node packages/sdk/scripts/...` from
+ *    the repo root, or any other tooling path.
  * 2. For each CJS CLI bundle that imports `__SDK_VERSION__` (the bin
  *    is `dist/cli/init.js`; the related CLIs all reference the same
  *    constant), reads the file and asserts the literal current
@@ -47,10 +50,22 @@
  */
 
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import process from "node:process";
 
-const PACKAGE_DIR = process.cwd();
+// Resolve the package dir from this script's own location rather than
+// `process.cwd()`. Two reasons:
+//
+//   1. `package.json` and `dist/` are siblings of `scripts/`, so deriving
+//      from `import.meta.url` is the structural truth.
+//   2. `process.cwd()` happens to be `packages/sdk/` when `npm run`
+//      invokes this via the postbuild script (npm cd's into the package
+//      first), but a future tooling path (turborepo command, IDE task,
+//      `node packages/sdk/scripts/check-sdk-version-stamp.mjs` from repo
+//      root) would break the cwd assumption silently. Same pattern as
+//      `verify-subpath-resolution.mjs`.
+const PACKAGE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_JSON_PATH = resolve(PACKAGE_DIR, "package.json");
 
 let pkgVersion;
