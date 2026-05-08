@@ -257,6 +257,14 @@ function isNoopSpan(
  * Wrap a Next.js / generic-fetch request-middleware function in an
  * OTel span tagged with `glasstrace.causal.middleware_for_request`.
  *
+ * **Privacy:** the value of
+ * `glasstrace.causal.middleware_for_request` is the raw URL
+ * pathname. Pathnames can carry user-controlled data (IDs, emails,
+ * opaque keys). The SDK does NOT redact this attribute. Callers MUST
+ * NOT place secrets, tokens, or other sensitive data in URL paths;
+ * the same general HTTP best practice that keeps secrets out of
+ * server logs keeps them out of Glasstrace trace evidence.
+ *
  * Each call to the returned function:
  *
  *   1. Detects the SDK's registration state. When the OTel API is
@@ -329,7 +337,15 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
   // a method, so `this` is undefined.
   const wrapped = ((req: Parameters<H>[0], ...rest: unknown[]): unknown => {
     const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(options.name, (span) => {
+    // Defensive wrap around `tracer.startActiveSpan` itself.
+    // OTel's noop tracer never throws; a real provider could
+    // (e.g., a misbehaving custom processor in coexistence). If the
+    // tracer call throws, instrumentation must not break the user's
+    // middleware — fall back to direct invocation. The noop case is
+    // already handled inside the callback via `isNoopSpan`; this
+    // try/catch handles the "tracer object itself failed" case.
+    try {
+      return tracer.startActiveSpan(options.name, (span) => {
       // SDK-not-registered fast path. Detecting via the public
       // `isRecording()` method on the started span is the canonical
       // OTel-API-only probe — the noop tracer's `NonRecordingSpan`
@@ -397,6 +413,12 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
       endSpanSafely(span);
       return result;
     });
+    } catch {
+      // `tracer.startActiveSpan` itself threw. Drop instrumentation
+      // for this invocation and run the user's handler directly.
+      // Failing instrumentation must never break a user request hook.
+      return (handler as (...args: unknown[]) => unknown)(req, ...rest);
+    }
   }) as H;
 
   return wrapped;

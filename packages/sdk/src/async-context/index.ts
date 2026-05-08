@@ -251,13 +251,24 @@ export function withAsyncCausality<T>(
     // captured context would put two unrelated runtime executions in
     // the same trace tree. Causality is communicated via the Link +
     // attribute pair instead.
-    const span = tracer.startSpan(options.name, {
-      root: true,
-      links:
-        capturedContext !== undefined
-          ? [{ context: capturedContext }]
-          : undefined,
-    });
+    //
+    // Defensive wrap around `tracer.startSpan` itself. OTel's noop
+    // tracer never throws; a real provider's startSpan could throw
+    // under a misbehaving custom processor in coexistence. If the
+    // tracer call throws, instrumentation must not break the user's
+    // continuation — fall back to running fn() directly.
+    let span: ReturnType<typeof tracer.startSpan>;
+    try {
+      span = tracer.startSpan(options.name, {
+        root: true,
+        links:
+          capturedContext !== undefined
+            ? [{ context: capturedContext }]
+            : undefined,
+      });
+    } catch {
+      return Promise.resolve(fn());
+    }
 
     // SDK-not-registered fast path. The public `isRecording()` probe
     // returns `false` on noop spans without producing an exported

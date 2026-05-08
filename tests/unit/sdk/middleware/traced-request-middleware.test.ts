@@ -381,6 +381,63 @@ describe("tracedRequestMiddleware — no leaked probe spans", () => {
   });
 });
 
+describe("tracedRequestMiddleware — sampler-drop discriminator (regression)", () => {
+  // Pin that the SDK-not-registered fast path uses
+  // `spanContext().traceId === INVALID_TRACE_ID` (the noop-tracer
+  // sentinel), NOT `isRecording() === false`. A real provider whose
+  // sampler decides NOT_RECORD also returns isRecording=false, but
+  // produces a valid trace ID — that case must take the normal
+  // enrichment path, not fire `middleware:skipped_uninstalled`.
+  // Without this guard the wrapper would emit spurious lifecycle
+  // events for every sampled-out request in production deployments
+  // that use head-sampling configurations.
+
+  it("does not emit middleware:skipped_uninstalled when a real provider's sampler drops the span", async () => {
+    // Replace the parent describe's provider with one whose sampler
+    // returns NOT_RECORD for every shouldSample call.
+    await provider.shutdown();
+    const dropSampler = {
+      shouldSample: () => ({ decision: 0 /* SamplingDecision.NOT_RECORD */ }),
+      toString: () => "DropSampler",
+    };
+    const dropProvider = new BasicTracerProvider({
+      sampler: dropSampler as never,
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    trace.setGlobalTracerProvider(dropProvider);
+
+    const lifecycleModule = await import(
+      "../../../../packages/sdk/src/lifecycle.js"
+    );
+    lifecycleModule.resetLifecycleForTesting();
+    lifecycleModule.initLifecycle({ logger: () => {} });
+
+    let skippedEmitted = false;
+    const listener = (): void => {
+      skippedEmitted = true;
+    };
+    lifecycleModule.onLifecycleEvent(
+      "middleware:skipped_uninstalled",
+      listener,
+    );
+
+    try {
+      const wrapped = tracedRequestMiddleware(
+        { name: "drop-test" },
+        async () => "ok",
+      );
+      await wrapped({ nextUrl: { pathname: "/x" } });
+      expect(skippedEmitted).toBe(false);
+    } finally {
+      lifecycleModule.offLifecycleEvent(
+        "middleware:skipped_uninstalled",
+        listener,
+      );
+      await dropProvider.shutdown();
+    }
+  });
+});
+
 describe("tracedRequestMiddleware — handler types", () => {
   it("preserves the handler's call signature in TypeScript via the H generic", () => {
     // Compile-time only — if this typechecks, the H bound preserves
