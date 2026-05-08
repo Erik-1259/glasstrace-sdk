@@ -1,4 +1,4 @@
-<!-- version: 1 -->
+<!-- version: 2 -->
 # SDK Export-Path Circuit Breaker — Design Memo (Wave 15C)
 
 **Status:** DRAFT — gating dependency for Wave 15C-impl
@@ -26,11 +26,11 @@ contract. It is internal SDK documentation, not a public-facing doc.
                  ▼                                               │
         ┌──────────────┐                                         │
         │   CLOSED     │   ◄── default; export proceeds          │
-        │ (export OK)  │       failures counted in window        │
+        │ (export OK)  │       consecutive-failure counter       │
         └──────┬───────┘                                         │
                │                                                 │
-               │  N consecutive failures                         │
-               │  (or threshold within window)                   │
+               │  N consecutive failures (Decision 2)            │
+               │                                                 │
                ▼                                                 │
         ┌──────────────┐                                         │
         │    OPEN      │   ◄── exports suppressed (drop)         │
@@ -104,7 +104,7 @@ This reservation is non-overlapping with Wave 15B's reservations:
 | HTTP 401 / 403 (auth) | **YES** | Primary triggering case from DISC-1568. Persistently invalid credentials never recover without rotation. |
 | HTTP 5xx | **YES** | Server errors are typically transient; circuit's half-open recovery is the right shape. |
 | Network errors (ECONNREFUSED, EAI_AGAIN, ETIMEDOUT, abort) | **YES** | Same shape as 5xx — transient infrastructure failures; recovery via half-open. |
-| HTTP 429 (rate limit) | **NO — out of scope** | Routes through the existing `init-client.ts:88-89` `rateLimitBackoff` path at the **init layer**. The export layer does not currently see 429 as a discrete condition (the OTLP exporter surfaces 429 as a generic non-zero `ExportResult`). 15C-impl will treat 429 the same as a generic export failure (it counts toward the threshold) but emit a distinct `failureCategory: "rate_limit"` field on the lifecycle event so future work can split if observability shows it matters. |
+| HTTP 429 (rate limit) | **YES — counted as generic export failure** | The init-layer `rateLimitBackoff` (`init-client.ts:88-89`) is the **primary** rate-limit mitigation and remains the canonical handler for 429 received during initial registration. At the export layer, however, the OTLP exporter surfaces 429 as a generic non-zero `ExportResult` without exposing the underlying status code natively, so the circuit cannot cheaply distinguish 429 from 5xx. 15C-impl treats every non-success `ExportResult` (including 429-derived ones) identically — it counts toward the threshold and emits `failureCategory: "rate_limit"` on the lifecycle event when the underlying status is recoverable. If future observability shows export-layer 429 warrants its own handling, file a follow-up DISC and split the path; until then, unification keeps the circuit's failure-classification logic small and the lifecycle event's `failureCategory` field carries the disambiguation. |
 | HTTP 4xx other (400, 404, 413, 414, 422) | **YES** | These are usually permanent (malformed payload, route gone) — circuit prevents repeat attempts that will never succeed. The doubled-timer half-open recovery is the same shape and adds no new failure mode. |
 | HTTP 2xx / 3xx | NO | Success path; resets failure counter to zero. |
 
