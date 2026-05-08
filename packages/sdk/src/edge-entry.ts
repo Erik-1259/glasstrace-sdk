@@ -53,11 +53,25 @@ import { SdkError } from "./errors.js";
 import { GlasstraceSpanProcessor } from "./span-processor.js";
 import { captureCorrelationId } from "./correlation-id.js";
 import type { CorrelationIdRequest } from "./correlation-id.js";
+import { tracedRequestMiddleware } from "./middleware/index.js";
+import type {
+  TracedRequestMiddlewareOptions,
+  RequestMiddlewareFunction,
+} from "./middleware/index.js";
+import { withAsyncCausality } from "./async-context/index.js";
+import type { WithAsyncCausalityOptions } from "./async-context/index.js";
 
 export {
   SdkError,
   GlasstraceSpanProcessor,
   captureCorrelationId,
+  tracedRequestMiddleware,
+  withAsyncCausality,
 };
 
-export type { CorrelationIdRequest };
+export type {
+  CorrelationIdRequest,
+  TracedRequestMiddlewareOptions,
+  RequestMiddlewareFunction,
+  WithAsyncCausalityOptions,
+};

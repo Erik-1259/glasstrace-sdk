@@ -220,3 +220,27 @@ export type {
   SideEffectOmissionReason,
 } from "@glasstrace/protocol";
 
+/**
+ * Public option shape for {@link import("./middleware/index.js").tracedRequestMiddleware}
+ * (subpath: `@glasstrace/sdk/middleware`). Re-exported here so
+ * call-site type annotations work without an extra import line.
+ *
+ * The wrapper itself ships under the subpath
+ * (`@glasstrace/sdk/middleware`) for tree-shakeability and to keep
+ * it edge-bundle-safe; the type re-export below is type-only and
+ * has no runtime cost.
+ */
+export type {
+  TracedRequestMiddlewareOptions,
+  RequestMiddlewareFunction,
+} from "./middleware/index.js";
+
+/**
+ * Public option shape for {@link import("./async-context/index.js").withAsyncCausality}
+ * (subpath: `@glasstrace/sdk/async-context`). Re-exported here so
+ * call-site type annotations work without an extra import line.
+ */
+export type {
+  WithAsyncCausalityOptions,
+} from "./async-context/index.js";
+
