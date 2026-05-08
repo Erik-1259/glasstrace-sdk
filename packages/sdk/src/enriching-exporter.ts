@@ -13,6 +13,7 @@ import {
   isHttpErrorStatus,
   prepareErrorResponseBody,
 } from "./error-response-body.js";
+import { prepareStack } from "./error-stack.js";
 import { getBuildHash } from "./build-info.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
@@ -381,13 +382,22 @@ export class GlasstraceExporter implements SpanExporter {
       // recovered OK spans with error metadata from handled exceptions.
       const eventDetails = statusNotExplicitlyOK
         ? getExceptionEventDetails(span)
-        : { type: undefined, message: undefined };
+        : { type: undefined, message: undefined, stacktrace: undefined };
+
+      // SDK-041 / DISC-1535: track which surface produced the error
+      // facts so product consumers can tell `otel_exception` (event)
+      // from `otel_event` (span attr) from `framework_fallback`
+      // (route-rewrite). Set on any error-bearing span the exporter
+      // enriches; falls through to undefined when no error attrs land.
+      let errorSource: string | undefined;
 
       const errorMessage = attrs["exception.message"];
       if (typeof errorMessage === "string") {
         extra[ATTR.ERROR_MESSAGE] = errorMessage;
+        errorSource = "otel_event";
       } else if (eventDetails.message) {
         extra[ATTR.ERROR_MESSAGE] = eventDetails.message;
+        errorSource = "otel_exception";
       }
 
       // Guard against non-string attribute values (OTel attributes can be
@@ -396,9 +406,86 @@ export class GlasstraceExporter implements SpanExporter {
       if (typeof errorType === "string") {
         extra[ATTR.ERROR_CODE] = errorType;
         extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(errorType);
+        errorSource = errorSource ?? "otel_event";
       } else if (eventDetails.type) {
         extra[ATTR.ERROR_CODE] = eventDetails.type;
         extra[ATTR.ERROR_CATEGORY] = deriveErrorCategory(eventDetails.type);
+        errorSource = errorSource ?? "otel_exception";
+      }
+
+      // glasstrace.error.stack + glasstrace.error.stack.{truncated,redacted}
+      // SDK-041 / DISC-1535. Bounded `exception.stacktrace` capture,
+      // sanitized for absolute paths + URL query/fragment + credential
+      // patterns, then truncated to a UTF-8 byte budget. Sibling
+      // metadata attributes carry truncated/redacted booleans so
+      // product can disclaim partial evidence to agents.
+      //
+      // Read precedence mirrors error.message: OTel exception event
+      // (set by recordException()) is the primary source; an
+      // `exception.stacktrace` span attribute is the fallback for
+      // instrumentations that bypass the event mechanism. Same
+      // statusNotExplicitlyOK gate as message/type so a recovered
+      // span doesn't get labeled with a handled exception's stack.
+      if (statusNotExplicitlyOK) {
+        const rawStack = eventDetails.stacktrace
+          ?? (typeof attrs["exception.stacktrace"] === "string"
+                ? (attrs["exception.stacktrace"] as string)
+                : undefined);
+        if (rawStack) {
+          const prepared = prepareStack(rawStack);
+          if (prepared !== null) {
+            extra[ATTR.ERROR_STACK] = prepared.stack;
+            extra[ATTR.ERROR_STACK_TRUNCATED] = prepared.truncated;
+            extra[ATTR.ERROR_STACK_REDACTED] = prepared.redacted;
+            // Stack source mirrors the message/type source so a span
+            // with both facts gets a consistent provenance label.
+            errorSource = errorSource
+              ?? (eventDetails.stacktrace ? "otel_exception" : "otel_event");
+          }
+        }
+      }
+
+      // glasstrace.error.framework.kind + glasstrace.error.original_path + glasstrace.error.fallback_route
+      // SDK-041 / DISC-1535 / AESC §5.5. When a request reaches a
+      // framework fallback route (Next.js `/_error`, `/_not-found`,
+      // etc.), the framework rewrites `http.route` to the fallback,
+      // which loses the originally requested path. We preserve both:
+      //
+      //   - `glasstrace.route` continues to carry whatever the
+      //     framework set (so existing consumers keep working).
+      //   - `glasstrace.error.fallback_route` carries the fallback
+      //     path explicitly.
+      //   - `glasstrace.error.original_path` carries the concrete
+      //     requested path, parsed from `http.url` / `url.full` /
+      //     `http.target` (whichever the upstream instrumentation
+      //     populated). Path-only — no query, no fragment.
+      //
+      // We only mark a fallback when both (a) the route looks like a
+      // known fallback AND (b) we have an original path that
+      // differs. Otherwise we'd label an actual visit to `/_error`
+      // (an app might have a real `/_error` page) as a framework
+      // fallback by accident.
+      const routeIsFallback =
+        route === "/_error" ||
+        route === "/_not-found" ||
+        route === "/_404" ||
+        route === "/_500";
+      if (routeIsFallback && trpcUrl) {
+        const originalPath = extractPathOnly(trpcUrl);
+        if (originalPath && originalPath !== route) {
+          extra[ATTR.ERROR_ORIGINAL_PATH] = originalPath;
+          extra[ATTR.ERROR_FALLBACK_ROUTE] = route;
+          extra[ATTR.ERROR_FRAMEWORK_KIND] = "fallback";
+          // Promote to framework_fallback only when no upstream OTel
+          // source has already claimed provenance — otherwise we'd
+          // overwrite a more specific `otel_exception` label with a
+          // less specific framework one.
+          errorSource = errorSource ?? "framework_fallback";
+        }
+      }
+
+      if (errorSource !== undefined) {
+        extra[ATTR.ERROR_SOURCE] = errorSource;
       }
 
       if (this.verbose && (extra[ATTR.ERROR_MESSAGE] || extra[ATTR.ERROR_CODE])) {
@@ -652,16 +739,19 @@ function hasExceptionEvent(span: ReadableSpan): boolean {
 function getExceptionEventDetails(span: ReadableSpan): {
   type: string | undefined;
   message: string | undefined;
+  stacktrace: string | undefined;
 } {
   const event = span.events?.find((e) => e.name === "exception");
   if (!event?.attributes) {
-    return { type: undefined, message: undefined };
+    return { type: undefined, message: undefined, stacktrace: undefined };
   }
   const type = event.attributes["exception.type"];
   const message = event.attributes["exception.message"];
+  const stacktrace = event.attributes["exception.stacktrace"];
   return {
     type: typeof type === "string" ? type : undefined,
     message: typeof message === "string" ? message : undefined,
+    stacktrace: typeof stacktrace === "string" ? stacktrace : undefined,
   };
 }
 
@@ -693,6 +783,61 @@ export function extractLeadingPath(raw: string | undefined): string | undefined 
     if (token.startsWith("/")) {
       return token;
     }
+  }
+
+  return undefined;
+}
+
+/**
+ * Extracts the path component (no query, no fragment) from a URL or
+ * a bare path. Used by the SDK-041 framework-fallback handler to
+ * compute `glasstrace.error.original_path` from the upstream
+ * `http.url` / `url.full` / `http.target` value when a request gets
+ * rewritten to a fallback route like `/_error`.
+ *
+ * Accepts:
+ *
+ *   - Absolute URLs: `http://host:3000/api/storage/x?foo=bar` → `/api/storage/x`
+ *   - Protocol-relative URLs: `//host/api/x?q=y` → `/api/x`
+ *   - Bare paths with query/fragment: `/api/x?q=y#z` → `/api/x`
+ *   - Bare paths: `/api/x` → `/api/x`
+ *
+ * Returns `undefined` for empty / whitespace-only input or values
+ * that do not contain a recognizable path component (e.g.
+ * `mailto:...`, `data:...`, or arbitrary non-URL strings). Callers
+ * use the undefined return as a truthy guard.
+ *
+ * Rejects values that don't ultimately resolve to a `/`-prefixed
+ * path so the framework-fallback handler doesn't accidentally
+ * promote a non-path URL into `glasstrace.error.original_path`.
+ */
+export function extractPathOnly(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+
+  // Try URL parsing first. URL.parse / new URL handle abs URLs,
+  // and protocol-relative URLs require a base. We use a sentinel
+  // base only to extract the pathname.
+  try {
+    const parsed = new URL(trimmed, "http://_/");
+    if (parsed.pathname && parsed.pathname.startsWith("/")) {
+      return parsed.pathname;
+    }
+  } catch {
+    // Fall through to manual handling for inputs the URL parser
+    // refuses (e.g. malformed). The bare-path fast-path below
+    // catches the common cases.
+  }
+
+  // Bare-path fast path: strip query/fragment if present.
+  if (trimmed.startsWith("/")) {
+    const queryIdx = trimmed.indexOf("?");
+    const fragIdx = trimmed.indexOf("#");
+    let cut = trimmed.length;
+    if (queryIdx >= 0) cut = Math.min(cut, queryIdx);
+    if (fragIdx >= 0) cut = Math.min(cut, fragIdx);
+    return trimmed.slice(0, cut);
   }
 
   return undefined;

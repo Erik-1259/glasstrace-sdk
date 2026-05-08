@@ -84,3 +84,11 @@ export {
   SIDE_EFFECT_OPERATION_PHASES,
   type SideEffectOperationPhase,
 } from "./side-effect.js";
+
+// --- Error evidence value enums (SDK-041 / DISC-1535) ---
+export {
+  ERROR_SOURCE_VALUES,
+  type ErrorSource,
+  ERROR_FRAMEWORK_KIND_VALUES,
+  type ErrorFrameworkKind,
+} from "./error-evidence.js";
