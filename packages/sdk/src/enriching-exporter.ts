@@ -15,6 +15,15 @@ import {
 } from "./error-response-body.js";
 import { prepareStack } from "./error-stack.js";
 import { getBuildHash } from "./build-info.js";
+import {
+  getExportCircuitBreaker,
+  type ExportCircuitBreaker,
+} from "./export-circuit-breaker.js";
+import {
+  emitLifecycleEvent,
+  pushDegradationSource,
+  clearDegradationSource,
+} from "./lifecycle.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -77,6 +86,15 @@ export class GlasstraceExporter implements SpanExporter {
   private pendingBatches: PendingBatch[] = [];
   private pendingSpanCount = 0;
   private overflowLogged = false;
+  /**
+   * Lazily-bound reference to the export-path circuit breaker
+   * (DISC-1568 / Wave 15C). Resolved on first export so this
+   * constructor stays side-effect-free. The breaker is a module-
+   * singleton — every `GlasstraceExporter` instance shares the same
+   * one so a rotation event observed in `init-client.ts` reaches
+   * every active exporter.
+   */
+  private circuitBreaker: ExportCircuitBreaker | null = null;
 
   constructor(options: GlasstraceExporterOptions) {
     this.getApiKey = options.getApiKey;
@@ -92,6 +110,46 @@ export class GlasstraceExporter implements SpanExporter {
     (this as unknown as Record<symbol, boolean>)[Symbol.for("glasstrace.exporter")] = true;
   }
 
+  /**
+   * Returns the export-path circuit breaker, lazily wiring it on
+   * first call. The breaker is a module-singleton so all exporter
+   * instances share state — a credential rotation observed once
+   * resets the breaker for every active exporter, and a single
+   * outage at the OTLP endpoint trips a single breaker rather than
+   * one per exporter copy.
+   *
+   * The wiring binds:
+   * - the lifecycle event sink to the SDK's lifecycle bus
+   *   (`emitLifecycleEvent`) so the `otel:circuit_*` events surface
+   *   to runtime-state, the CLI bridge, and any user-installed
+   *   subscribers.
+   * - the dropped-span counter to {@link recordSpansDropped} so OPEN-
+   *   state drops show up in the existing health surface.
+   * - the FSM hooks to {@link pushDegradationSource} /
+   *   {@link clearDegradationSource} keyed on `"export-circuit"`,
+   *   which routes the OPEN/CLOSED transitions through the
+   *   centralised `recomputeCoreFromDegradationSources()` helper.
+   *   That helper guards `ACTIVE ↔ ACTIVE_DEGRADED` so a circuit
+   *   recovery never clobbers an unrelated `OtelState.COEXISTENCE_FAILED`
+   *   degradation source.
+   */
+  private getCircuitBreaker(): ExportCircuitBreaker {
+    if (this.circuitBreaker !== null) return this.circuitBreaker;
+    this.circuitBreaker = getExportCircuitBreaker({
+      events: {
+        emitOpened: (payload) => emitLifecycleEvent("otel:circuit_opened", payload),
+        emitHalfOpen: (payload) => emitLifecycleEvent("otel:circuit_half_open", payload),
+        emitClosed: (payload) => emitLifecycleEvent("otel:circuit_closed", payload),
+      },
+      recordDropped: (count) => recordSpansDropped(count),
+      fsm: {
+        onCircuitOpened: () => pushDegradationSource("export-circuit"),
+        onCircuitClosed: () => clearDegradationSource("export-circuit"),
+      },
+    });
+    return this.circuitBreaker;
+  }
+
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     const currentKey = this.getApiKey();
     if (currentKey === API_KEY_PENDING) {
@@ -101,13 +159,43 @@ export class GlasstraceExporter implements SpanExporter {
       return;
     }
 
+    // Circuit-breaker gate (DISC-1568 / Wave 15C). When OPEN, drop
+    // the batch entirely: increment the dropped-spans health counter
+    // and call back with `{ code: 0 }` so the BSP retries nothing
+    // (the OPEN window itself is the backoff). The decision to drop
+    // (rather than buffer) is documented in the design memo §Decision 4
+    // — buffering during OPEN created the permanent-export-disabled
+    // failure mode the original PR #26 had to revert.
+    const breaker = this.getCircuitBreaker();
+    if (!breaker.shouldExport()) {
+      breaker.onSpansDropped(spans.length);
+      resultCallback({ code: 0 });
+      return;
+    }
+
     // Key is available — enrich and export
     const enrichedSpans = spans.map((span) => this.enrichSpan(span));
     const exporter = this.ensureDelegate();
     if (exporter) {
+      // Snapshot the breaker's generation counter so a credential
+      // rotation that fires while this batch is in flight can be
+      // detected on the result callback (memo §Decision 7 edge case).
+      // The probe-during-rotation race must NOT push a stale failure
+      // into the post-rotation breaker.
+      const generationAtIssue = breaker.getGeneration();
       exporter.export(enrichedSpans, (result) => {
         if (result.code !== 0) {
           sdkLog("warn", `[glasstrace] Span export failed: ${result.error?.message ?? "unknown error"}`);
+        }
+        // Discard the result if the breaker rotated mid-flight.
+        if (breaker.getGeneration() !== generationAtIssue) {
+          resultCallback(result);
+          return;
+        }
+        if (result.code === 0) {
+          breaker.recordSuccess();
+        } else {
+          breaker.recordFailure({ error: result.error });
         }
         resultCallback(result);
       });
@@ -693,6 +781,11 @@ export class GlasstraceExporter implements SpanExporter {
    * Flushes all buffered spans through the delegate exporter.
    * Enriches spans at flush time (not buffer time) so that session IDs
    * are computed with the resolved API key instead of the "pending" sentinel.
+   *
+   * Honors the circuit breaker symmetrically with {@link export}: if the
+   * breaker is OPEN at flush time, every buffered batch is dropped via
+   * `recordSpansDropped` and its callback completed with `{ code: 0 }`,
+   * preserving the bounded-memory contract during outages.
    */
   private flushPending(): void {
     if (this.pendingBatches.length === 0) return;
@@ -711,16 +804,35 @@ export class GlasstraceExporter implements SpanExporter {
       return;
     }
 
+    const breaker = this.getCircuitBreaker();
     const batches = this.pendingBatches;
     this.pendingBatches = [];
     this.pendingSpanCount = 0;
 
     for (const batch of batches) {
+      // Circuit-breaker gate: honor OPEN state on flush too (buffered
+      // batches that survive a key-pending → key-resolved transition
+      // arrive here and would otherwise bypass the gate).
+      if (!breaker.shouldExport()) {
+        breaker.onSpansDropped(batch.spans.length);
+        batch.resultCallback({ code: 0 });
+        continue;
+      }
       // Enrich at flush time with the now-resolved key
       const enriched = batch.spans.map((span) => this.enrichSpan(span));
+      const generationAtIssue = breaker.getGeneration();
       exporter.export(enriched, (result) => {
         if (result.code !== 0) {
           sdkLog("warn", `[glasstrace] Span export failed: ${result.error?.message ?? "unknown error"}`);
+        }
+        if (breaker.getGeneration() !== generationAtIssue) {
+          batch.resultCallback(result);
+          return;
+        }
+        if (result.code === 0) {
+          breaker.recordSuccess();
+        } else {
+          breaker.recordFailure({ error: result.error });
         }
         batch.resultCallback(result);
       });

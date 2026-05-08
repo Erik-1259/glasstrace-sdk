@@ -9,6 +9,11 @@ import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
 import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger } from "./lifecycle.js";
 import {
+  peekExportCircuitBreaker,
+  _resetExportCircuitBreakerForTesting,
+} from "./export-circuit-breaker.js";
+import { hashApiKey } from "./api-key-hash.js";
+import {
   emitNudgeMessage,
   emitGuidanceMessage,
   tryAutoAttachGlasstraceProcessor,
@@ -29,12 +34,38 @@ const additionalExporters: GlasstraceExporter[] = [];
 let injectedProcessor: SpanProcessor | null = null;
 
 /**
+ * SHA-256-derived stable identifier of the most recently resolved
+ * API key. Used to detect credential rotation (DISC-1568 / Wave 15C)
+ * so the export-path circuit breaker can reset to CLOSED on rotation.
+ */
+let resolvedApiKeyHash: string = "";
+
+/**
  * Sets the resolved API key for OTel export authentication.
  * Called once the anonymous key or dev key is available.
+ *
+ * On rotation (the new key's SHA-256 differs from the previously-
+ * stored hash) this notifies the export-path circuit breaker so any
+ * outage tied to the old credentials is cleared. The breaker is
+ * peeked, not constructed — if no exporter has yet observed a batch
+ * the breaker is absent and the rotation has nothing to clear.
+ *
  * @param key - The resolved API key (anonymous or developer).
  */
 export function setResolvedApiKey(key: string): void {
+  const newHash = hashApiKey(key);
+  // Skip rotation handling when this is the first key resolution
+  // (there's nothing to "rotate from") OR when the key is unchanged.
+  // The first-resolution check uses the stored hash being empty so
+  // the same setResolvedApiKey() call does not erroneously trip a
+  // rotation-reset on the very first key arrival from the registration
+  // path.
+  const isRotation = resolvedApiKeyHash !== "" && resolvedApiKeyHash !== newHash;
   resolvedApiKey = key;
+  resolvedApiKeyHash = newHash;
+  if (isRotation) {
+    peekExportCircuitBreaker()?.resetForKeyRotation();
+  }
 }
 
 /**
@@ -71,9 +102,15 @@ export function registerExporterForKeyNotification(exporter: GlasstraceExporter)
  */
 export function resetOtelConfigForTesting(): void {
   resolvedApiKey = API_KEY_PENDING;
+  resolvedApiKeyHash = "";
   activeExporter = null;
   injectedProcessor = null;
   additionalExporters.length = 0;
+  // The export circuit breaker is conceptually part of the OTel
+  // export pipeline owned by this module, so its singleton is reset
+  // here too. Test files that reset the OTel config get a fresh
+  // breaker without having to import the breaker reset directly.
+  _resetExportCircuitBreakerForTesting();
   // Signal and beforeExit handler cleanup is handled by resetLifecycleForTesting()
   // via the shutdown coordinator.
   // Reset coexistence state here as well so that test suites that call

@@ -8,6 +8,7 @@ import { GlasstraceExporter, API_KEY_PENDING, extractLeadingPath, extractPathOnl
 import { SessionManager } from "../../../packages/sdk/src/session.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 import * as consoleCapture from "../../../packages/sdk/src/console-capture.js";
+import { _resetExportCircuitBreakerForTesting } from "../../../packages/sdk/src/export-circuit-breaker.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -145,6 +146,10 @@ function createExporter(overrides?: {
 describe("GlasstraceExporter", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // The export circuit breaker is a module singleton; reset it
+    // between tests so consecutive-failure counters from one
+    // failure-injection test do not leak into the next (DISC-1568).
+    _resetExportCircuitBreakerForTesting();
   });
 
   describe("Enrichment basics", () => {

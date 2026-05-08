@@ -160,6 +160,52 @@ export interface SdkLifecycleEvents {
     timestamp: string;
     providerClass?: string;
   };
+  /**
+   * The export-path circuit breaker has tripped from CLOSED to OPEN
+   * (DISC-1568 / Wave 15C). Fired exactly once per outage; the
+   * `category` discriminates the failure class that crossed the
+   * consecutive-failure threshold and `nextProbeMs` reports the
+   * scheduled HALF_OPEN delay.
+   *
+   * **PII-safety:** the payload's `message` is built from a fixed
+   * template and references only the closed `category` enum and the
+   * failure count; never URLs, headers, payload bodies, or the
+   * underlying error message text. Mirrors the DISC-1556 `otel:failed`
+   * contract.
+   */
+  "otel:circuit_opened": {
+    category:
+      | "auth"
+      | "client_error"
+      | "rate_limit"
+      | "server_error"
+      | "network";
+    message: string;
+    timestamp: string;
+    consecutiveFailures: number;
+    nextProbeMs: number;
+  };
+  /**
+   * The breaker's backoff timer expired and the next real export
+   * batch is being permitted as a probe (DISC-1568). `previousTimerMs`
+   * reports the timer that just elapsed; useful for surfacing a
+   * recovery-attempt diagnostic in the CLI bridge.
+   */
+  "otel:circuit_half_open": {
+    timestamp: string;
+    previousTimerMs: number;
+  };
+  /**
+   * The breaker has transitioned back to CLOSED, either because a
+   * probe succeeded or because credential rotation reset the breaker
+   * (DISC-1568). `outageDurationMs` reports the wall-clock duration
+   * the breaker spent in OPEN+HALF_OPEN; `0` when the close was a
+   * defensive no-op (already CLOSED).
+   */
+  "otel:circuit_closed": {
+    timestamp: string;
+    outageDurationMs: number;
+  };
   "otel:shutdown_started": Record<string, never>;
   "otel:shutdown_completed": Record<string, never>;
 
@@ -337,6 +383,70 @@ export function setOtelState(to: OtelState): void {
   }
 
   _otelState = to;
+}
+
+// ---------------------------------------------------------------------------
+// Degradation Source Registry (DISC-1568 / Wave 15C)
+//
+// Multiple subsystems can independently push the SDK into
+// `CoreState.ACTIVE_DEGRADED`. Each source registers a key here when
+// it goes degraded and clears the same key when it recovers.
+// `recomputeCoreFromDegradationSources()` reads the registry and
+// transitions `ACTIVE ↔ ACTIVE_DEGRADED` only when the SDK is in one
+// of those two states — `OtelState.COEXISTENCE_FAILED` and other
+// pre-`ACTIVE` states are untouched.
+//
+// Keys are namespaced strings (e.g., `"export-circuit"`) so multiple
+// sources can coexist without clobbering each other. Centralising the
+// recompute prevents the "two sources of truth" bug where one source
+// thinks the SDK is healthy but another still has it degraded.
+// ---------------------------------------------------------------------------
+
+const _degradationSources = new Set<string>();
+
+/**
+ * Register a subsystem-specific degradation source. Idempotent — calling
+ * twice with the same key has no additional effect. After updating the
+ * registry the function calls {@link recomputeCoreFromDegradationSources}
+ * so a transition fires immediately when appropriate.
+ */
+export function pushDegradationSource(key: string): void {
+  _degradationSources.add(key);
+  recomputeCoreFromDegradationSources();
+}
+
+/**
+ * Clear a previously-registered degradation source. Triggers a
+ * recompute so the SDK can return to `CoreState.ACTIVE` if no other
+ * source remains.
+ */
+export function clearDegradationSource(key: string): void {
+  _degradationSources.delete(key);
+  recomputeCoreFromDegradationSources();
+}
+
+/**
+ * Re-evaluate the core state against the degradation registry:
+ *
+ * - At least one source AND core is `ACTIVE` → transition to
+ *   `ACTIVE_DEGRADED`.
+ * - Zero sources AND core is `ACTIVE_DEGRADED` → transition to
+ *   `ACTIVE`.
+ * - Otherwise: no-op. We do not push a pre-ACTIVE state forward and
+ *   we do not transition out of terminal/shutdown states.
+ *
+ * Centralised so a future degradation source (e.g., heartbeat
+ * failures) can reuse the same path without duplicating the guard.
+ */
+export function recomputeCoreFromDegradationSources(): void {
+  const hasDegradation = _degradationSources.size > 0;
+  if (hasDegradation && _coreState === CoreState.ACTIVE) {
+    setCoreState(CoreState.ACTIVE_DEGRADED);
+    return;
+  }
+  if (!hasDegradation && _coreState === CoreState.ACTIVE_DEGRADED) {
+    setCoreState(CoreState.ACTIVE);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -766,6 +876,7 @@ export function resetLifecycleForTesting(): void {
   _emitting = false;
   _shutdownHooks = [];
   _shutdownExecuted = false;
+  _degradationSources.clear();
   if (_signalHandler && typeof process !== "undefined") {
     process.removeListener("SIGTERM", _signalHandler);
     process.removeListener("SIGINT", _signalHandler);

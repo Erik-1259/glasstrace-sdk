@@ -90,8 +90,17 @@ export interface RuntimeStateLastError {
    *   span processor (DISC-1556). Spans flowing through the existing
    *   provider will not reach the Glasstrace exporter; the documented
    *   manual `createGlasstraceSpanProcessor()` workaround applies.
+   * - `"export-circuit-open"`: the export-path circuit breaker tripped
+   *   after {@link FAILURE_THRESHOLD} consecutive non-success export
+   *   results (DISC-1568 / Wave 15C). Spans are dropped via
+   *   `recordSpansDropped` until the next probe succeeds or
+   *   credentials rotate. The `exportCircuitCategory` field
+   *   disambiguates the underlying failure class (auth, rate_limit,
+   *   server_error, etc.).
    */
-  category: "auto-attach-returned-null";
+  category:
+    | "auto-attach-returned-null"
+    | "export-circuit-open";
   /** Human-readable summary built from a fixed template — no user data. */
   message: string;
   /** ISO 8601 timestamp of the failure. */
@@ -101,9 +110,22 @@ export interface RuntimeStateLastError {
    * (e.g., `"BasicTracerProvider"`, `"NextTracerProvider"`). Reflects
    * `delegate.constructor.name` only — never URLs, headers, or
    * credentials. Absent if the provider exposes no readable
-   * constructor.
+   * constructor. Applies only to `category === "auto-attach-returned-null"`.
    */
   providerClass?: string;
+  /**
+   * Failure category that tripped the export-path circuit when
+   * `category === "export-circuit-open"` (DISC-1568). Closed enum;
+   * extending the set is non-breaking, removing or renaming a member
+   * is a public-contract change because CLI consumers may render the
+   * value verbatim.
+   */
+  exportCircuitCategory?:
+    | "auth"
+    | "client_error"
+    | "rate_limit"
+    | "server_error"
+    | "network";
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +216,27 @@ export function startRuntimeStateWriter(options: {
   onLifecycleEvent("otel:failed", (payload) => {
     _lastError = { ...payload };
     debouncedWrite();
+  });
+
+  // DISC-1568 / Wave 15C: persist the export-path circuit breaker's
+  // OPEN transition the same way. Close events clear the field only
+  // when the previous error was an export-circuit-open record — we
+  // must not clobber an unrelated `auto-attach-returned-null` error
+  // that may already be set (memo §Decision 5).
+  onLifecycleEvent("otel:circuit_opened", (payload) => {
+    _lastError = {
+      category: "export-circuit-open",
+      message: payload.message,
+      timestamp: payload.timestamp,
+      exportCircuitCategory: payload.category,
+    };
+    debouncedWrite();
+  });
+  onLifecycleEvent("otel:circuit_closed", () => {
+    if (_lastError?.category === "export-circuit-open") {
+      _lastError = undefined;
+      debouncedWrite();
+    }
   });
 
   // Auth events — write when key resolves or claim transitions occur

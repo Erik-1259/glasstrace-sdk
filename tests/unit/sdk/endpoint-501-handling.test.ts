@@ -5,6 +5,7 @@ import type { ExportResult } from "@opentelemetry/core";
 import { ExportResultCode } from "@opentelemetry/core";
 import { GlasstraceExporter } from "../../../packages/sdk/src/enriching-exporter.js";
 import { SessionManager } from "../../../packages/sdk/src/session.js";
+import { _resetExportCircuitBreakerForTesting } from "../../../packages/sdk/src/export-circuit-breaker.js";
 import type { CaptureConfig } from "@glasstrace/protocol";
 
 /**
@@ -77,6 +78,9 @@ function createMockSpan(name?: string): ReadableSpan {
 describe("SDK endpoint targeting (DISC-1074)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // Reset the export circuit-breaker singleton so failure counters
+    // from one test do not leak into the next (DISC-1568).
+    _resetExportCircuitBreakerForTesting();
   });
 
   describe("SDK does not send to client observation endpoint", () => {

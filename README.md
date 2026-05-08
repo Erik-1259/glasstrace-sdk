@@ -448,6 +448,58 @@ agent-specific configs that were set up via the CLI; the command
 detects credential drift via the `.glasstrace/mcp-connected` marker
 and re-registers automatically.
 
+## Production Export Resilience
+
+The SDK protects your application from wasted traffic when the
+Glasstrace ingest endpoint is unreachable or rejecting batches
+(invalid credentials, server outage, network partition). A circuit
+breaker on the export path counts consecutive non-success exports
+and trips after **five consecutive failures**, dropping subsequent
+batches until a probe succeeds.
+
+Behavior:
+
+- **Trip threshold**: 5 consecutive failed export attempts. Any 2xx
+  response resets the counter.
+- **Backoff**: 30 seconds initially, doubling on each failed probe up
+  to a 30-minute cap (30s → 60s → 120s → 240s → 480s → 960s →
+  1800s).
+- **Drop-not-buffer**: while the breaker is OPEN, span batches are
+  dropped via the existing `recordSpansDropped` health surface. No
+  unbounded buffering. The BSP never retries (the OPEN window is
+  itself the backoff).
+- **Recovery**: when the timer expires, the next real batch acts as
+  the probe. If it succeeds the breaker closes. If it fails the
+  timer doubles and the cycle repeats.
+- **Credential rotation**: when `registerGlasstrace()` or the
+  background heartbeat resolves a different API key, the breaker
+  resets to CLOSED immediately. An in-flight probe at rotation time
+  is invalidated via a generation counter — its outcome is ignored
+  so a stale failure cannot poison the post-rotation breaker.
+- **FSM coupling**: while the breaker is OPEN the SDK reports
+  `getStatus().tracing === "degraded"`; when the breaker recovers
+  and no other degradation source is active, `tracing` returns to
+  `"active"`.
+
+Operational visibility:
+
+- `getStatus().tracing` returns `"degraded"` while the breaker is
+  OPEN.
+- `.glasstrace/runtime-state.json` records the most recent OPEN
+  state under `lastError` with `category: "export-circuit-open"` and
+  `exportCircuitCategory` set to the failure class (`"auth"`,
+  `"client_error"`, `"rate_limit"`, `"server_error"`, or
+  `"network"`). The record is cleared automatically when the breaker
+  recovers.
+- `npx glasstrace status` surfaces both fields without requiring a
+  live process connection.
+
+Internally the breaker emits three structured lifecycle events
+(`otel:circuit_opened`, `otel:circuit_half_open`,
+`otel:circuit_closed`) that the runtime-state writer subscribes to.
+Their payloads are PII-safe by construction — the closed
+`category` enum and a fixed-template `message` only.
+
 ## Configuration
 
 | Environment Variable | Required | Description |
