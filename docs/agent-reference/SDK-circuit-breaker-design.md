@@ -2,7 +2,7 @@
 # SDK Export-Path Circuit Breaker — Design Memo (Wave 15C)
 
 **Status:** DRAFT — gating dependency for Wave 15C-impl
-**Tracker:** [DISC-1568](../../../glasstrace-product/docs/discoveries/DISC-1568.md)
+**Tracker:** DISC-1568 (filed in the private `glasstrace-product` repo; consult that repo's `docs/discoveries/DISC-1568.md` for full text — this SDK repo cannot link to it)
 **Original failure-mode entry:** DISC-377 §Item 4 (note: DISC-377's
 "Filed as DISC-441" pointer is a citation error — DISC-441 is unrelated
 pnpm bundling work; DISC-1568 is the correct tracker).
@@ -83,13 +83,14 @@ proved citation; no claim is `uncertain`.
 This memo reserves the following lifecycle event-name prefix for Wave
 15C-impl:
 
-- **`lifecycle.export.circuit.*`** — circuit-breaker state transitions
-  (specific event names listed under §5 below).
+- **`otel:circuit_*`** — circuit-breaker state transitions, extending the
+  existing `otel:` namespace where `otel:configured` and `otel:failed`
+  already live (specific event names listed under §5 below).
 
 This reservation is non-overlapping with Wave 15B's reservations:
 
-- 15B reserves `lifecycle.middleware.*` and `lifecycle.async.*`.
-- 15C reserves `lifecycle.export.circuit.*`.
+- 15B reserves the middleware-ownership and post-response async event surface (15B-brief uses dot-separated working names; the actual event names will be locked at 15B-impl time and SHOULD use the colon-convention `namespace:event_name` per the existing `core:state_changed` / `otel:failed` precedent — file a follow-up to 15B-brief if needed before 15B-impl).
+- 15C reserves `otel:circuit_*` (this memo).
 
 ---
 
@@ -228,11 +229,11 @@ because we don't return failure to it.**
 
 **Decision:**
 
-### Lifecycle events (reserved prefix `lifecycle.export.circuit.*`)
+### Lifecycle events (reserved prefix `otel:circuit_*`)
 
 ```ts
 // Added to SdkLifecycleEvents in lifecycle.ts:133-170
-"lifecycle.export.circuit.opened": {
+"otel:circuit_opened": {
   /** Why the circuit tripped. */
   category: ExportCircuitFailureCategory;
   /** Human-readable summary built from a fixed template; no user data. */
@@ -245,14 +246,14 @@ because we don't return failure to it.**
   nextProbeMs: number;
 };
 
-"lifecycle.export.circuit.half_open": {
+"otel:circuit_half_open": {
   /** ISO 8601 timestamp at which the probe attempt is being made. */
   timestamp: string;
   /** Backoff timer that just expired (ms). */
   previousTimerMs: number;
 };
 
-"lifecycle.export.circuit.closed": {
+"otel:circuit_closed": {
   /** ISO 8601 timestamp. */
   timestamp: string;
   /**
@@ -302,7 +303,7 @@ exportCircuitCategory?: ExportCircuitFailureCategory;
 
 **Subscription wiring:** `runtime-state.ts:194-197` (the existing
 `onLifecycleEvent("otel:failed", ...)` listener) is duplicated for
-`lifecycle.export.circuit.opened`. The CLOSED transition clears
+`otel:circuit_opened`. The CLOSED transition clears
 `_lastError` only when the previous error category was
 `"export-circuit-open"` (we must not clobber a separate `auto-attach-
 returned-null` error).
@@ -407,7 +408,7 @@ emitter.
 - state → CLOSED
 - `runtime-state.lastError` → cleared if its category was
   `"export-circuit-open"`
-- emit `lifecycle.export.circuit.closed` with
+- emit `otel:circuit_closed` with
   `outageDurationMs: <time since OPEN>` so the CLI bridge can
   report "outage cleared by credential rotation".
 
@@ -435,7 +436,7 @@ Fixture shape for every test below:
 - **Time advancement.** Vitest `vi.useFakeTimers()` + `vi.advanceTimersByTime()`.
   No real-clock waiting in any test.
 - **Lifecycle event capture.** Subscribe via `onLifecycleEvent` for the
-  three `lifecycle.export.circuit.*` events; assert payload contents.
+  three `otel:circuit_* (extending existing `otel:` namespace where `otel:configured` and `otel:failed` already live)` events; assert payload contents.
 - **Runtime-state assertion.** Read the on-disk `runtime-state.json` via
   the existing `_readRuntimeStateForTesting()` helper at
   `runtime-state.ts` (or add one if absent — file under the
@@ -443,17 +444,17 @@ Fixture shape for every test below:
 
 | # | Scenario | Setup | Expected |
 |---|---|---|---|
-| 1 | CLOSED → OPEN under N consecutive failures | Mock transport returns `{ code: 1, error }` for 5 batches in a row. | After 5th failure: state = OPEN, `lifecycle.export.circuit.opened` fires once with `consecutiveFailures: 5`, `runtime-state.lastError.category === "export-circuit-open"`, `recordSpansDropped` increments by N for any subsequent batch in OPEN. |
-| 2 | OPEN → HALF_OPEN after timer T expires | Trip circuit per #1, advance fake timers by 30000ms. | State transitions to HALF_OPEN. `lifecycle.export.circuit.half_open` fires once with `previousTimerMs: 30000`. Next export attempt is allowed through. |
-| 3 | HALF_OPEN → CLOSED on success | From #2, mock transport returns `{ code: 0 }` on the next export. | State = CLOSED. `lifecycle.export.circuit.closed` fires once with `outageDurationMs >= 30000`. `runtime-state.lastError` cleared (when category was `export-circuit-open`). Failure counter = 0. |
+| 1 | CLOSED → OPEN under N consecutive failures | Mock transport returns `{ code: 1, error }` for 5 batches in a row. | After 5th failure: state = OPEN, `otel:circuit_opened` fires once with `consecutiveFailures: 5`, `runtime-state.lastError.category === "export-circuit-open"`, `recordSpansDropped` increments by N for any subsequent batch in OPEN. |
+| 2 | OPEN → HALF_OPEN after timer T expires | Trip circuit per #1, advance fake timers by 30000ms. | State transitions to HALF_OPEN. `otel:circuit_half_open` fires once with `previousTimerMs: 30000`. Next export attempt is allowed through. |
+| 3 | HALF_OPEN → CLOSED on success | From #2, mock transport returns `{ code: 0 }` on the next export. | State = CLOSED. `otel:circuit_closed` fires once with `outageDurationMs >= 30000`. `runtime-state.lastError` cleared (when category was `export-circuit-open`). Failure counter = 0. |
 | 4 | HALF_OPEN → OPEN on failure with doubled timer | From #2, mock transport returns `{ code: 1 }` on the probe. | State = OPEN. Next backoff = 60000ms (T₀ × 2). After 6 doublings, capped at 1800000ms. |
-| 5 | Reset on credential rotation | Trip circuit per #1. Call `_setCurrentConfig` with a new key (different SHA-256). | State = CLOSED immediately. Failure counter = 0. `lifecycle.export.circuit.closed` fires with `outageDurationMs` set to time since OPEN. `runtime-state.lastError` cleared. |
+| 5 | Reset on credential rotation | Trip circuit per #1. Call `_setCurrentConfig` with a new key (different SHA-256). | State = CLOSED immediately. Failure counter = 0. `otel:circuit_closed` fires with `outageDurationMs` set to time since OPEN. `runtime-state.lastError` cleared. |
 | 6 | Bounded behavior under sustained failure | Trip circuit, then emit 100,000 spans during OPEN over simulated 30 minutes. | No memory growth (assert no internal queue size grows). All spans counted via `recordSpansDropped`. CPU bound: assert each `export()` call is O(1) (no per-span allocation in OPEN). |
 | 7 | Interaction with shutdown — don't block flush | Trip circuit. Call `GlasstraceExporter.shutdown()`. | Shutdown completes within 100ms (no delegate flush attempted while OPEN; existing pending-batch callbacks invoked with `{ code: 0 }` — recon #9). Test: assert shutdown promise resolves before fake timer for the next probe expires. |
-| 8 | Lifecycle event payload coverage | Trip + recover circuit. | Each of the 3 `lifecycle.export.circuit.*` events fires with the contracted payload shape (assert keys present, types correct, no extra keys, no PII fields). |
+| 8 | Lifecycle event payload coverage | Trip + recover circuit. | Each of the 3 `otel:circuit_* (extending existing `otel:` namespace where `otel:configured` and `otel:failed` already live)` events fires with the contracted payload shape (assert keys present, types correct, no extra keys, no PII fields). |
 | 9 | FSM coexistence — circuit OPEN sets ACTIVE_DEGRADED | Healthy SDK at `CoreState.ACTIVE`. Trip circuit. | `CoreState === ACTIVE_DEGRADED`. On circuit CLOSED, `CoreState === ACTIVE` (no other degradation). |
 | 10 | FSM coexistence — circuit recovery does not clobber OTel-failed | Set `OtelState.COEXISTENCE_FAILED` (already-degraded path). Trip then recover circuit. | Stays at `CoreState.ACTIVE_DEGRADED` after circuit closed (OTel still failed). Helper from §6 must guard correctly. |
-| 11 | Failure-category routing | Inject `{ code: 1, error: { status: 401 } }`, `{ status: 503 }`, network error, `{ status: 429 }`. | Each tripped open event has the correct `category` in `lifecycle.export.circuit.opened` and the matching `exportCircuitCategory` in `runtime-state.lastError`. |
+| 11 | Failure-category routing | Inject `{ code: 1, error: { status: 401 } }`, `{ status: 503 }`, network error, `{ status: 429 }`. | Each tripped open event has the correct `category` in `otel:circuit_opened` and the matching `exportCircuitCategory` in `runtime-state.lastError`. |
 | 12 | Probe-during-rotation race | Trip circuit, advance to HALF_OPEN, kick off probe. Mid-probe, rotate the key. | Probe-completion callback observes the generation-counter mismatch (per §7) and is no-op. Post-rotation state = CLOSED. New failures from the new key start fresh. |
 
 **Coverage gates for 15C-impl:**
@@ -499,4 +500,4 @@ Fixture shape for every test below:
   (gitignored; do NOT PR)
 - Wave 15B reservations — `lifecycle.middleware.*`,
   `lifecycle.async.*` (non-overlapping with this memo's
-  `lifecycle.export.circuit.*`)
+  `otel:circuit_* (extending existing `otel:` namespace where `otel:configured` and `otel:failed` already live)`)
