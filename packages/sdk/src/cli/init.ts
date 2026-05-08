@@ -467,6 +467,12 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   const summary: string[] = [];
   const warnings: string[] = [];
   const errors: string[] = [];
+  // DISC-1565: tracks whether the static discovery file write failed
+  // during this invocation. Treated as a partial-success at final
+  // return — non-zero exit so the dispatcher does not print
+  // "Glasstrace initialized successfully!". CI / scripts wrapping init
+  // see the failure via exit code instead of having to grep stderr.
+  let discoveryFileWriteFailed = false;
 
   // Step 0: Resolve the correct project root (monorepo awareness)
   let projectRoot: string;
@@ -726,6 +732,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
                 : ""
             }. The Glasstrace browser extension cannot discover this project until the file is written; rerun \`glasstrace init\` after fixing the underlying error.`,
           );
+          discoveryFileWriteFailed = true;
           break;
       }
 
@@ -757,6 +764,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
           resolveStaticRoot(projectRoot).layout,
         )}: ${err instanceof Error ? err.message : String(err)}`,
       );
+      discoveryFileWriteFailed = true;
     }
 
     // `anyConfigWritten` covers both fresh writes AND user-preserved
@@ -1003,6 +1011,18 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     }
   }
 
+  // DISC-1565: a static-discovery write failure is a partial-success.
+  // The browser extension cannot discover this project without the
+  // file, so reporting exit 0 would lead users to believe the install
+  // completed end-to-end when one user-visible promise (extension
+  // discovery) is not actually live. Surface the failure via non-zero
+  // exit so CI / scripts see it without parsing stderr; the dispatcher
+  // also uses this to suppress the "Glasstrace initialized
+  // successfully!" line.
+  if (discoveryFileWriteFailed) {
+    return { exitCode: 1, summary, warnings, errors };
+  }
+
   return { exitCode: 0, summary, warnings, errors };
 }
 
@@ -1176,8 +1196,37 @@ const scriptBasename = scriptPath !== undefined ? path.basename(scriptPath) : un
 const isDirectExecution =
   scriptPath !== undefined &&
   (scriptPath.endsWith("/cli/init.js") ||
+    scriptPath.endsWith("/cli/init.cjs") ||
     scriptPath.endsWith("/cli/init.ts") ||
     scriptBasename === "glasstrace");
+
+/**
+ * Detect a help invocation. Help flags short-circuit before any
+ * subcommand routing so help invocations never run mutating code paths
+ * (DISC-1566). Accepts the argv slice from the second positional onward
+ * (i.e., `process.argv.slice(2)`).
+ *
+ * The check is presence-based on `--help` or `-h` anywhere in the slice.
+ * Composite invocations like `glasstrace init --yes --help` are help
+ * invocations: the user asked for help, so help is what they get; the
+ * `--yes` is ignored.
+ */
+export function isHelpInvocation(argv: readonly string[]): boolean {
+  return argv.some((arg) => arg === "--help" || arg === "-h");
+}
+
+const HELP_TEXT =
+  "glasstrace — Glasstrace SDK CLI\n" +
+  "\n" +
+  "Usage:\n" +
+  "  glasstrace init [--yes] [--coverage-map] [--force] [--validate]\n" +
+  "  glasstrace uninit [--dry-run] [--force]\n" +
+  "  glasstrace status [--json]\n" +
+  "  glasstrace mcp add [--force] [--dry-run]\n" +
+  "  glasstrace upgrade-instructions\n" +
+  "\n" +
+  "Run a command without arguments to see its defaults.\n" +
+  "Docs: https://glasstrace.dev/docs/cli\n";
 
 if (isDirectExecution) {
   // Enforce minimum Node.js version before any command processing.
@@ -1188,6 +1237,16 @@ if (isDirectExecution) {
       `Error: @glasstrace/sdk requires Node.js >= 20. Current version: ${process.version}\n`,
     );
     process.exit(1);
+  }
+
+  // DISC-1566: short-circuit help invocations BEFORE subcommand routing.
+  // The previous routing treated any argv-2 starting with `-` as init,
+  // so `glasstrace --help` and `glasstrace init --help` both ran init's
+  // mutating path. Detect help anywhere in the argv slice and exit
+  // cleanly with help text — no project mutation, no subcommand load.
+  if (isHelpInvocation(process.argv.slice(2))) {
+    process.stdout.write(HELP_TEXT);
+    process.exit(0);
   }
 
   const subcommand = process.argv[2];

@@ -83,7 +83,7 @@ init-hang cannot leave your installation in a broken state.
 | Exit code | Meaning |
 |-----------|---------|
 | `0` | Scaffolding succeeded AND the server confirmed the anon key. |
-| `1` | Scaffolding failed. No verification attempted. |
+| `1` | Scaffolding failed, OR the static-discovery file at `public/.well-known/glasstrace.json` could not be written. The browser extension cannot discover the project until that file is written; rerun `glasstrace init` after fixing the underlying error (most commonly: the static root is missing or read-only). |
 | `2` | Scaffolding succeeded but server verification failed. Safe to re-run. |
 
 On a non-zero verification exit, the error message distinguishes three
@@ -97,6 +97,18 @@ Transport errors are retried twice (500 ms + 1500 ms backoff, 20-second
 total cap). HTTP 4xx/5xx and malformed responses are surfaced
 immediately. Set `GLASSTRACE_SKIP_INIT_VERIFY=1` to skip verification
 for offline installs.
+
+## Getting help
+
+```bash
+glasstrace --help        # or: glasstrace -h
+glasstrace init --help   # same; help short-circuits subcommand routing
+```
+
+Help invocations print the command list and exit cleanly without
+modifying the project. Help is detected anywhere in the argv slice,
+including composite invocations like `glasstrace init --yes --help`
+(the `--yes` is ignored — the user asked for help).
 
 ## Refreshing agent instruction guidance
 
