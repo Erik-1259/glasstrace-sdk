@@ -7,7 +7,12 @@ import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
-import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger } from "./lifecycle.js";
+import { setOtelState, OtelState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger, pushDegradationSource } from "./lifecycle.js";
+import {
+  peekExportCircuitBreaker,
+  _resetExportCircuitBreakerForTesting,
+} from "./export-circuit-breaker.js";
+import { hashApiKey } from "./api-key-hash.js";
 import {
   emitNudgeMessage,
   emitGuidanceMessage,
@@ -29,12 +34,38 @@ const additionalExporters: GlasstraceExporter[] = [];
 let injectedProcessor: SpanProcessor | null = null;
 
 /**
+ * SHA-256-derived stable identifier of the most recently resolved
+ * API key. Used to detect credential rotation (DISC-1568 / Wave 15C)
+ * so the export-path circuit breaker can reset to CLOSED on rotation.
+ */
+let resolvedApiKeyHash: string = "";
+
+/**
  * Sets the resolved API key for OTel export authentication.
  * Called once the anonymous key or dev key is available.
+ *
+ * On rotation (the new key's SHA-256 differs from the previously-
+ * stored hash) this notifies the export-path circuit breaker so any
+ * outage tied to the old credentials is cleared. The breaker is
+ * peeked, not constructed — if no exporter has yet observed a batch
+ * the breaker is absent and the rotation has nothing to clear.
+ *
  * @param key - The resolved API key (anonymous or developer).
  */
 export function setResolvedApiKey(key: string): void {
+  const newHash = hashApiKey(key);
+  // Skip rotation handling when this is the first key resolution
+  // (there's nothing to "rotate from") OR when the key is unchanged.
+  // The first-resolution check uses the stored hash being empty so
+  // the same setResolvedApiKey() call does not erroneously trip a
+  // rotation-reset on the very first key arrival from the registration
+  // path.
+  const isRotation = resolvedApiKeyHash !== "" && resolvedApiKeyHash !== newHash;
   resolvedApiKey = key;
+  resolvedApiKeyHash = newHash;
+  if (isRotation) {
+    peekExportCircuitBreaker()?.resetForKeyRotation();
+  }
 }
 
 /**
@@ -71,9 +102,15 @@ export function registerExporterForKeyNotification(exporter: GlasstraceExporter)
  */
 export function resetOtelConfigForTesting(): void {
   resolvedApiKey = API_KEY_PENDING;
+  resolvedApiKeyHash = "";
   activeExporter = null;
   injectedProcessor = null;
   additionalExporters.length = 0;
+  // The export circuit breaker is conceptually part of the OTel
+  // export pipeline owned by this module, so its singleton is reset
+  // here too. Test files that reset the OTel config get a fresh
+  // breaker without having to import the breaker reset directly.
+  _resetExportCircuitBreakerForTesting();
   // Signal and beforeExit handler cleanup is handled by resetLifecycleForTesting()
   // via the shutdown coordinator.
   // Reset coexistence state here as well so that test suites that call
@@ -290,12 +327,22 @@ async function runCoexistencePath(
     timestamp: new Date().toISOString(),
     providerClass: readProviderClass(existingProvider),
   });
-  // Cross-layer effect: trigger ACTIVE_DEGRADED if core state permits it
-  // (per DISC-1247, KEY_PENDING → ACTIVE_DEGRADED is not valid, so we guard).
-  const coreState = getCoreState();
-  if (coreState === CoreState.ACTIVE || coreState === CoreState.KEY_RESOLVED) {
-    setCoreState(CoreState.ACTIVE_DEGRADED);
-  }
+  // Cross-layer effect: register a degradation source so the
+  // centralised `recomputeCoreFromDegradationSources()` machinery is
+  // the single source of truth for ACTIVE_DEGRADED. The push is
+  // idempotent and self-guards: registry-driven recompute only acts
+  // when core is `ACTIVE` (per DISC-1247, `KEY_PENDING` →
+  // `ACTIVE_DEGRADED` is not a valid transition; the registry will
+  // catch up at the moment core reaches `ACTIVE` via the catch-up
+  // hook in `setCoreState`).
+  //
+  // Migrated from the prior `setCoreState(ACTIVE_DEGRADED)` direct
+  // write per Copilot review of PR #260 (2026-05-08): a future
+  // `clearDegradationSource` from another subsystem (e.g., the export
+  // circuit) would otherwise have clobbered this auto-attach-failure
+  // degradation back to ACTIVE because the registry didn't know about
+  // it. Now both subsystems share the same registry semantics.
+  pushDegradationSource("otel-coexistence-failed");
 }
 
 /**

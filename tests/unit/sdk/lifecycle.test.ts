@@ -22,6 +22,8 @@ import {
   executeShutdown,
   registerBeforeExitTrigger,
   resetLifecycleForTesting,
+  pushDegradationSource,
+  clearDegradationSource,
 } from "../../../packages/sdk/src/lifecycle.js";
 
 const mockLogger = vi.fn();
@@ -731,6 +733,66 @@ describe("SDK Lifecycle State Machine", () => {
 
       // Only one handler registered despite two calls
       expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore + 1);
+    });
+  });
+
+  describe("Degradation source registry (DISC-1568 / Wave 15C)", () => {
+    it("re-applies a pre-ACTIVE degradation source on transition into ACTIVE", () => {
+      // Codex P1 finding 2026-05-08: a degradation source pushed
+      // while core is in KEY_PENDING / KEY_RESOLVED no-ops at push
+      // time because `recomputeCoreFromDegradationSources()` only
+      // acts when core is already ACTIVE. Without the catch-up hook
+      // in `setCoreState`, the SDK would later report ACTIVE while a
+      // degradation source is still recorded — false healthy signal.
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+
+      // Push the source while in a pre-ACTIVE state. Recompute is a
+      // no-op now; registry has the entry.
+      pushDegradationSource("export-circuit");
+      expect(getCoreState()).toBe(CoreState.KEY_PENDING);
+
+      setCoreState(CoreState.KEY_RESOLVED);
+      // Still pre-ACTIVE; registry still no-op.
+      expect(getCoreState()).toBe(CoreState.KEY_RESOLVED);
+
+      // The moment we transition to ACTIVE, the catch-up hook fires
+      // recompute and the registry's truth wins.
+      setCoreState(CoreState.ACTIVE);
+      expect(getCoreState()).toBe(CoreState.ACTIVE_DEGRADED);
+
+      // Clearing the source brings us back to ACTIVE.
+      clearDegradationSource("export-circuit");
+      expect(getCoreState()).toBe(CoreState.ACTIVE);
+    });
+
+    it("does not re-apply when registry is empty on ACTIVE entry", () => {
+      // Catch-up hook only fires when the registry has entries; a
+      // clean transition to ACTIVE stays ACTIVE.
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+      expect(getCoreState()).toBe(CoreState.ACTIVE);
+    });
+
+    it("multiple sources stay degraded until all clear", () => {
+      setCoreState(CoreState.REGISTERING);
+      setCoreState(CoreState.KEY_PENDING);
+      setCoreState(CoreState.KEY_RESOLVED);
+      setCoreState(CoreState.ACTIVE);
+
+      pushDegradationSource("export-circuit");
+      pushDegradationSource("otel-coexistence-failed");
+      expect(getCoreState()).toBe(CoreState.ACTIVE_DEGRADED);
+
+      // Clearing one of two sources keeps the SDK degraded.
+      clearDegradationSource("export-circuit");
+      expect(getCoreState()).toBe(CoreState.ACTIVE_DEGRADED);
+
+      // Clearing the last source returns to ACTIVE.
+      clearDegradationSource("otel-coexistence-failed");
+      expect(getCoreState()).toBe(CoreState.ACTIVE);
     });
   });
 });
