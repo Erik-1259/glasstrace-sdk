@@ -340,12 +340,21 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
     // Defensive wrap around `tracer.startActiveSpan` itself.
     // OTel's noop tracer never throws; a real provider could
     // (e.g., a misbehaving custom processor in coexistence). If the
-    // tracer call throws, instrumentation must not break the user's
-    // middleware — fall back to direct invocation. The noop case is
-    // already handled inside the callback via `isNoopSpan`; this
-    // try/catch handles the "tracer object itself failed" case.
+    // tracer call throws BEFORE invoking our callback, fall back to
+    // running the handler directly so instrumentation does not break
+    // the user's middleware.
+    //
+    // CRITICAL: the fallback runs ONLY when the tracer failed
+    // pre-callback. The callback itself rethrows handler errors
+    // (`recordSpanError` + `throw error`) which would otherwise be
+    // intercepted here and cause the handler to run a second time
+    // (Codex P1, 2026-05-08). The `callbackInvoked` flag
+    // distinguishes pre-callback tracer failure from post-callback
+    // handler-error rethrow.
+    let callbackInvoked = false;
     try {
       return tracer.startActiveSpan(options.name, (span) => {
+      callbackInvoked = true;
       // SDK-not-registered fast path. Detecting via the public
       // `isRecording()` method on the started span is the canonical
       // OTel-API-only probe — the noop tracer's `NonRecordingSpan`
@@ -413,10 +422,16 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
       endSpanSafely(span);
       return result;
     });
-    } catch {
-      // `tracer.startActiveSpan` itself threw. Drop instrumentation
-      // for this invocation and run the user's handler directly.
-      // Failing instrumentation must never break a user request hook.
+    } catch (err) {
+      if (callbackInvoked) {
+        // The tracer's callback ran and our code (or the user's
+        // handler via our rethrow) threw. That error is intentional;
+        // propagate it without invoking the handler again.
+        throw err;
+      }
+      // `tracer.startActiveSpan` failed BEFORE invoking our callback.
+      // Drop instrumentation for this invocation and run the user's
+      // handler directly so the request does not break.
       return (handler as (...args: unknown[]) => unknown)(req, ...rest);
     }
   }) as H;

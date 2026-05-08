@@ -314,16 +314,17 @@ describe("withAsyncCausality — span activation (regression)", () => {
     );
     await continuation();
 
+    // Use the `getSpan` helper so the assertion fails loudly if
+    // multiple spans with the same name slip through (Copilot review
+    // 2026-05-08 — `find()` would silently take the first match).
     const finished = exporter.getFinishedSpans();
-    const outer = finished.find((s) => s.name === "outer-async");
-    const child = finished.find((s) => s.name === "child-during-fn");
-    expect(outer, "expected outer-async span to be exported").toBeDefined();
-    expect(child, "expected child span to be exported").toBeDefined();
-    expect(child!.parentSpanContext?.spanId).toBe(
-      outer!.spanContext().spanId,
+    const outer = getSpan(finished, "outer-async");
+    const child = getSpan(finished, "child-during-fn");
+    expect(child.parentSpanContext?.spanId).toBe(
+      outer.spanContext().spanId,
     );
-    expect(child!.spanContext().traceId).toBe(
-      outer!.spanContext().traceId,
+    expect(child.spanContext().traceId).toBe(
+      outer.spanContext().traceId,
     );
   });
 });

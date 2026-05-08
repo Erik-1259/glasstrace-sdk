@@ -27,7 +27,10 @@ import {
   BasicTracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
+  SamplingDecision,
   type ReadableSpan,
+  type Sampler,
+  type SamplingResult,
 } from "@opentelemetry/sdk-trace-base";
 import { trace, SpanStatusCode, SpanKind } from "@opentelemetry/api";
 import {
@@ -396,12 +399,14 @@ describe("tracedRequestMiddleware — sampler-drop discriminator (regression)", 
     // Replace the parent describe's provider with one whose sampler
     // returns NOT_RECORD for every shouldSample call.
     await provider.shutdown();
-    const dropSampler = {
-      shouldSample: () => ({ decision: 0 /* SamplingDecision.NOT_RECORD */ }),
+    const dropSampler: Sampler = {
+      shouldSample: (): SamplingResult => ({
+        decision: SamplingDecision.NOT_RECORD,
+      }),
       toString: () => "DropSampler",
     };
     const dropProvider = new BasicTracerProvider({
-      sampler: dropSampler as never,
+      sampler: dropSampler,
       spanProcessors: [new SimpleSpanProcessor(exporter)],
     });
     trace.setGlobalTracerProvider(dropProvider);
@@ -435,6 +440,36 @@ describe("tracedRequestMiddleware — sampler-drop discriminator (regression)", 
       );
       await dropProvider.shutdown();
     }
+  });
+
+  // Regression for Codex P1 on PR #264 (2026-05-08): an earlier
+  // version of the defensive try/catch wrapped the entire
+  // `tracer.startActiveSpan(...)` call, which intercepted the
+  // callback's intentional rethrow of handler errors and ran the
+  // handler a SECOND time in the catch fallback. The fix added a
+  // `callbackInvoked` flag so the fallback only fires when
+  // `startActiveSpan` itself failed BEFORE the callback ran.
+  //
+  // This test pins the no-double-invocation invariant: a handler
+  // that throws synchronously must run exactly once, and the error
+  // must propagate.
+  it("does not double-invoke the handler when it throws synchronously", () => {
+    let invocations = 0;
+    const wrapped = tracedRequestMiddleware(
+      { name: "throwing" },
+      (): unknown => {
+        invocations++;
+        throw new Error("user-handler-sync-throw");
+      },
+    );
+
+    expect(() =>
+      wrapped({ nextUrl: { pathname: "/x" } }),
+    ).toThrow("user-handler-sync-throw");
+
+    // Critical: handler ran ONCE. If the outer try/catch were too
+    // broad, this would be 2.
+    expect(invocations).toBe(1);
   });
 });
 
