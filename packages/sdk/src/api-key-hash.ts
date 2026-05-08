@@ -13,11 +13,16 @@
  * SDK, so the hash adds no new exposure surface. The hash is **not**
  * logged or surfaced in `runtime-state.json`.
  *
- * The implementation uses `node:crypto` synchronously. Falls back to
- * a length-prefixed string identity check if `node:crypto` is not
- * available (non-Node runtimes); the fallback is intentional —
- * detecting rotation in a non-Node runtime via raw-string compare is
- * a degraded but correct equivalent.
+ * The implementation uses `node:crypto` synchronously and emits a
+ * SHA-256 hex digest prefixed with `sha256:`. Falls back to an FNV-1a
+ * 32-bit hash prefixed with `fnv:` if `node:crypto` is not available
+ * (non-Node runtimes — Edge, Workers, browsers); the fallback is
+ * intentional — detecting rotation via FNV-1a is a degraded but
+ * correct equivalent (collision-resistant for the rotation-detection
+ * use case, which only needs key inequality, not security). The two
+ * algorithms are mutually exclusive at runtime — the same process
+ * always uses the same algorithm — so a hash from one is never
+ * compared against a hash from the other.
  */
 
 let cryptoModule: typeof import("node:crypto") | null | undefined;

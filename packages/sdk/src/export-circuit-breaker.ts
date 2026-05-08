@@ -242,17 +242,24 @@ function readStatus(info: ExportFailureInfo): number | undefined {
   const direct = record.status;
   if (typeof direct === "number") return direct;
 
+  // OTLP exporter surfaces status as a string in some Node versions
+  // (e.g. `"401"`); coerce defensively. The same coercion applies to
+  // the nested `response.status` path (Copilot review 2026-05-08;
+  // discovered by inspection; no in-the-wild repro yet but the cost
+  // of the extra check is negligible).
+  if (typeof direct === "string") {
+    const parsed = Number.parseInt(direct, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
   const nested = record.response;
   if (nested && typeof nested === "object") {
     const nestedStatus = (nested as Record<string, unknown>).status;
     if (typeof nestedStatus === "number") return nestedStatus;
-  }
-
-  // OTLP exporter surfaces status as a string in some Node versions
-  // (e.g. `"401"`); coerce defensively.
-  if (typeof direct === "string") {
-    const parsed = Number.parseInt(direct, 10);
-    if (Number.isFinite(parsed)) return parsed;
+    if (typeof nestedStatus === "string") {
+      const parsed = Number.parseInt(nestedStatus, 10);
+      if (Number.isFinite(parsed)) return parsed;
+    }
   }
 
   return undefined;
@@ -356,6 +363,17 @@ export function createExportCircuitBreaker(
   let openedAtMs: number | null = null;
   let pendingTimer: unknown = null;
   /**
+   * HALF_OPEN single-probe gate. The contract is that exactly one
+   * batch is admitted while the circuit is HALF_OPEN; if multiple
+   * concurrent `export()` callers arrived in the same tick they would
+   * all see `state === "HALF_OPEN"` and `shouldExport()` would return
+   * `true` for each, sending parallel probes that race the recorded
+   * outcome (Codex P1 + Copilot, 2026-05-08). The flag is set when
+   * `shouldExport()` admits a HALF_OPEN probe and cleared by
+   * `recordSuccess()` / `recordFailure()` (or any state transition).
+   */
+  let halfOpenProbeInFlight = false;
+  /**
    * Generation counter. Incremented on every credential rotation
    * (memo §Decision 7) so a HALF_OPEN probe completion handler that
    * captured the previous generation can detect the rotation and
@@ -387,6 +405,7 @@ export function createExportCircuitBreaker(
   function transitionToOpen(category: ExportCircuitFailureCategory): void {
     const wasNonOpen = state !== "OPEN";
     state = "OPEN";
+    halfOpenProbeInFlight = false;
     if (openedAtMs === null) {
       openedAtMs = now();
     }
@@ -418,6 +437,7 @@ export function createExportCircuitBreaker(
 
   function transitionToHalfOpen(previousTimerMs: number): void {
     state = "HALF_OPEN";
+    halfOpenProbeInFlight = false;
     try {
       events.emitHalfOpen({
         timestamp: new Date(now()).toISOString(),
@@ -439,6 +459,7 @@ export function createExportCircuitBreaker(
     consecutiveFailures = 0;
     currentBackoffMs = INITIAL_BACKOFF_MS;
     openedAtMs = null;
+    halfOpenProbeInFlight = false;
     clearPendingTimer();
     try {
       events.emitClosed({
@@ -459,13 +480,24 @@ export function createExportCircuitBreaker(
 
   return {
     shouldExport(): boolean {
-      return state !== "OPEN";
+      if (state === "OPEN") return false;
+      if (state === "HALF_OPEN") {
+        // Single-probe gate: only the first concurrent caller is
+        // admitted while a probe is in flight. Subsequent callers see
+        // `false` and their spans are dropped (same as OPEN). The flag
+        // clears on probe-result record or any state transition.
+        if (halfOpenProbeInFlight) return false;
+        halfOpenProbeInFlight = true;
+        return true;
+      }
+      return true; // CLOSED
     },
 
     recordSuccess(): void {
       if (state === "HALF_OPEN") {
         // Probe succeeded → close. Counter and backoff reset inside
-        // transitionToClosed.
+        // transitionToClosed; the in-flight gate also clears.
+        halfOpenProbeInFlight = false;
         transitionToClosed();
         return;
       }
@@ -484,6 +516,7 @@ export function createExportCircuitBreaker(
         // re-emit `otel:circuit_opened` for the same outage. The
         // caller's lifecycle stream sees a single open / many half-
         // open / one close.
+        halfOpenProbeInFlight = false;
         state = "OPEN";
         scheduleHalfOpen(currentBackoffMs);
         return;

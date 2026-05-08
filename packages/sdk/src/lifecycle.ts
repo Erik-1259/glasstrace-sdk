@@ -319,6 +319,17 @@ export function setCoreState(to: CoreState): void {
   } finally {
     _emitting = false;
   }
+
+  // Catch-up after entering ACTIVE: if a degradation source was
+  // pushed while core was still in a pre-ACTIVE state
+  // (KEY_PENDING/KEY_RESOLVED), `recomputeCoreFromDegradationSources()`
+  // no-op'd at push time because the guard said "only act if core is
+  // ACTIVE". Now that we've reached ACTIVE, re-evaluate so the
+  // registry's truth wins (Codex P1, 2026-05-08; covers the export
+  // circuit + future degradation sources uniformly).
+  if (to === CoreState.ACTIVE && _degradationSources.size > 0) {
+    recomputeCoreFromDegradationSources();
+  }
 }
 
 /**

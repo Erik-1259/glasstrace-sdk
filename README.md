@@ -497,8 +497,11 @@ Operational visibility:
 Internally the breaker emits three structured lifecycle events
 (`otel:circuit_opened`, `otel:circuit_half_open`,
 `otel:circuit_closed`) that the runtime-state writer subscribes to.
-Their payloads are PII-safe by construction — the closed
-`category` enum and a fixed-template `message` only.
+Their payloads are PII-safe by construction — the closed `category`
+enum, a fixed-template `message`, and structured numeric/timestamp
+fields only (e.g. `consecutiveFailures`, `nextProbeMs`,
+`previousTimerMs`, `outageDurationMs`, ISO-8601 `timestamp`). No
+URLs, headers, request bodies, or credentials are ever included.
 
 ## Configuration
 

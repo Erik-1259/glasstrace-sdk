@@ -367,14 +367,46 @@ describe("ExportCircuitBreaker — pure logic", () => {
   });
 
   // Generic: shouldExport semantics across each state
-  it("only blocks export in OPEN state", () => {
+  it("only blocks export in OPEN state and admits exactly one probe in HALF_OPEN", () => {
     expect(breaker.shouldExport()).toBe(true);
     for (let i = 0; i < FAILURE_THRESHOLD; i++) breaker.recordFailure({ status: 500 });
     expect(breaker.shouldExport()).toBe(false);
     vi.advanceTimersByTime(INITIAL_BACKOFF_MS);
-    expect(breaker.shouldExport()).toBe(true); // HALF_OPEN
+    expect(breaker.getState()).toBe("HALF_OPEN");
+    // First HALF_OPEN caller is admitted as the single probe.
+    expect(breaker.shouldExport()).toBe(true);
+    // Subsequent concurrent callers (before the first probe records)
+    // are blocked — single-probe contract per the design memo §5
+    // and the Codex P1 finding 2026-05-08.
+    expect(breaker.shouldExport()).toBe(false);
+    expect(breaker.shouldExport()).toBe(false);
     breaker.recordSuccess();
-    expect(breaker.shouldExport()).toBe(true); // CLOSED
+    // After probe success → CLOSED → all callers admitted again.
+    expect(breaker.getState()).toBe("CLOSED");
+    expect(breaker.shouldExport()).toBe(true);
+    expect(breaker.shouldExport()).toBe(true);
+  });
+
+  it("re-admits a single probe on each HALF_OPEN re-entry after a failed probe", () => {
+    // Trip OPEN.
+    for (let i = 0; i < FAILURE_THRESHOLD; i++) breaker.recordFailure({ status: 500 });
+    expect(breaker.getState()).toBe("OPEN");
+
+    // First HALF_OPEN window: admit one probe, fail it, back to OPEN.
+    vi.advanceTimersByTime(INITIAL_BACKOFF_MS);
+    expect(breaker.getState()).toBe("HALF_OPEN");
+    expect(breaker.shouldExport()).toBe(true);
+    expect(breaker.shouldExport()).toBe(false); // gate held
+    breaker.recordFailure({ status: 500 });
+    expect(breaker.getState()).toBe("OPEN");
+
+    // Second HALF_OPEN window (doubled timer): gate is reset and one
+    // probe is admitted again. This proves the gate clears on every
+    // state transition, not just on success/close.
+    vi.advanceTimersByTime(INITIAL_BACKOFF_MS * 2);
+    expect(breaker.getState()).toBe("HALF_OPEN");
+    expect(breaker.shouldExport()).toBe(true);
+    expect(breaker.shouldExport()).toBe(false);
   });
 });
 

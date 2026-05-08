@@ -7,7 +7,7 @@ import * as otelApi from "@opentelemetry/api";
 import { GlasstraceExporter, API_KEY_PENDING } from "./enriching-exporter.js";
 import { getActiveConfig } from "./init-client.js";
 import { sdkLog } from "./console-capture.js";
-import { setOtelState, OtelState, getCoreState, CoreState, setCoreState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger } from "./lifecycle.js";
+import { setOtelState, OtelState, emitLifecycleEvent, registerShutdownHook, registerBeforeExitTrigger, pushDegradationSource } from "./lifecycle.js";
 import {
   peekExportCircuitBreaker,
   _resetExportCircuitBreakerForTesting,
@@ -327,12 +327,22 @@ async function runCoexistencePath(
     timestamp: new Date().toISOString(),
     providerClass: readProviderClass(existingProvider),
   });
-  // Cross-layer effect: trigger ACTIVE_DEGRADED if core state permits it
-  // (per DISC-1247, KEY_PENDING → ACTIVE_DEGRADED is not valid, so we guard).
-  const coreState = getCoreState();
-  if (coreState === CoreState.ACTIVE || coreState === CoreState.KEY_RESOLVED) {
-    setCoreState(CoreState.ACTIVE_DEGRADED);
-  }
+  // Cross-layer effect: register a degradation source so the
+  // centralised `recomputeCoreFromDegradationSources()` machinery is
+  // the single source of truth for ACTIVE_DEGRADED. The push is
+  // idempotent and self-guards: registry-driven recompute only acts
+  // when core is `ACTIVE` (per DISC-1247, `KEY_PENDING` →
+  // `ACTIVE_DEGRADED` is not a valid transition; the registry will
+  // catch up at the moment core reaches `ACTIVE` via the catch-up
+  // hook in `setCoreState`).
+  //
+  // Migrated from the prior `setCoreState(ACTIVE_DEGRADED)` direct
+  // write per Copilot review of PR #260 (2026-05-08): a future
+  // `clearDegradationSource` from another subsystem (e.g., the export
+  // circuit) would otherwise have clobbered this auto-attach-failure
+  // degradation back to ACTIVE because the registry didn't know about
+  // it. Now both subsystems share the same registry semantics.
+  pushDegradationSource("otel-coexistence-failed");
 }
 
 /**
