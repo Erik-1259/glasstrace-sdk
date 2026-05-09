@@ -491,20 +491,48 @@ describe("generateInfoSection", () => {
           expect(stepOnePrefixIdx).toBeLessThan(findIdx + 200);
         });
 
-        it("references the empty-result envelope contract (closeMatches / recentRoutesSample / recoveryActions / notAbsenceProof)", () => {
+        it("references the empty-result envelope contract (closeMatches / recentRoutesSample / windowActivity / humanReadable / recoveryActions / diagnosticValue / recommendedNextStep / notAbsenceProof)", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
             ENDPOINT,
             SDK_VERSION,
           );
           // Workflow §4 — load-bearing recovery contract from MCP-025 /
-          // MCP-027 codified in `wire-mcp.ts` ToolDiagnosticSchema +
-          // CandidateDiagnosticSchema. Without these the agent bails to
-          // source on empty results — the failure mode this wave fixes.
+          // MCP-027 / DISC-1626 / DISC-1652 codified in
+          // `wire-mcp.ts` ToolDiagnosticSchema + CandidateDiagnosticSchema.
+          // Without these the agent bails to source on empty results —
+          // the failure mode the parent wave fixes. Wave 17 follow-up
+          // (post-PR-998) added windowActivity, humanReadable,
+          // diagnosticValue, and recommendedNextStep alongside the
+          // original closeMatches / recentRoutesSample / recoveryActions
+          // because each disambiguates a different reason for the empty
+          // result.
           expect(info).toContain("`closeMatches`");
           expect(info).toContain("`recentRoutesSample`");
+          expect(info).toContain("`windowActivity`");
+          expect(info).toContain("`humanReadable`");
           expect(info).toContain("`recoveryActions`");
+          expect(info).toContain("`diagnosticValue`");
+          expect(info).toContain("`recommendedNextStep`");
           expect(info).toContain("`notAbsenceProof: true`");
+        });
+
+        it("describes windowActivity's four-way distinguisher (Wave 17 follow-up — DISC-1652 Amendment 1 / DISC-1654)", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          // windowActivity is the load-bearing distinguisher between
+          // "wrong vocabulary", "no traffic in window", "captureConfig-
+          // blocked", and "no traces ever for this tenant" — the fields
+          // the agent reads to disambiguate are totalTracesInWindow,
+          // totalTracesInTenantEver, and captureConfigBlocksRequest.
+          // Pin all three so the rendered text retains the four-way
+          // explanation if a future content edit shortens it by accident.
+          expect(info).toContain("totalTracesInWindow");
+          expect(info).toContain("totalTracesInTenantEver");
+          expect(info).toContain("captureConfigBlocksRequest");
         });
 
         it("references the side-effect evidence allowlist (sideEffectSummary + all 7 allowlisted keys)", () => {
