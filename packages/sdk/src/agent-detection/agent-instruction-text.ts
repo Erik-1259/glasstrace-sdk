@@ -26,6 +26,26 @@
  * this module in lockstep with the protocol change so the
  * agent-instruction text never references fields that don't exist.
  *
+ * **Wave 17 follow-up (2026-05-09, post-PR-998):** the
+ * vocabulary-mismatch-recovery wave (DISC-1626 + 40 sibling DISCs,
+ * shipped via `glasstrace-product` PR #998) added five fields to
+ * the no-match envelope on `find_trace_candidates`'s
+ * `CandidateDiagnosticSchema` and the sibling-tools'
+ * `ToolDiagnosticSchema`: `windowActivity`, `humanReadable`,
+ * `diagnosticValue`, `recommendedNextStep`, and `maxUsefulFollowups`.
+ * The Workflow §4 below names `closeMatches` /
+ * `recentRoutesSample` / `windowActivity` / `humanReadable` /
+ * `recoveryActions` / `diagnosticValue` / `recommendedNextStep`
+ * because each disambiguates a different reason for an empty
+ * result — most notably, `windowActivity` carries the four-way
+ * distinguisher between "wrong vocabulary", "no traffic in window",
+ * "captureConfig-blocked", and "no traces ever for this tenant"
+ * (per `wire-mcp.ts` `NoMatchWindowActivitySchema` /
+ * DISC-1652 Amendment 1 / DISC-1654). Without `windowActivity`
+ * the agent cannot distinguish a vocabulary miss from "the SDK was
+ * never registered for this tenant" — they look identical at the
+ * `closeMatches`-only layer.
+ *
  * **Heuristic-first vs tool-first framing:** the body opens with
  * explicit "Call Glasstrace FIRST when" / "SKIP Glasstrace when"
  * rules so a frontier agent has a cheap pre-tool-call decision
@@ -77,7 +97,13 @@ export function buildAgentInstructionBody(): string {
     "1. Start with `find_trace_candidates`. Pass whatever route or procedure name is natural — the server normalizes vocabulary and, on miss, returns close matches and a sample of routes actually present in the window.",
     "2. Take the highest-confidence candidate's `suggestedFollowups` and pass them straight to `get_trace` or `get_root_cause`.",
     "3. For side-effect bugs, read `sideEffectSummary` in the `get_trace` / `get_root_cause` response. The allowlisted fields (`templateKey`, `providerOperation`, `role`, `locale`, `timezone`, `status`, `phase`) are the ones that disambiguate payload bugs.",
-    "4. If a tool returns empty, READ the response's `closeMatches`, `recentRoutesSample`, and `recoveryActions` before pivoting to source. Empty results carry `notAbsenceProof: true` — they are never proof the bug did not occur.",
+    "4. If a tool returns empty, READ the response's empty-result envelope before pivoting to source — each field disambiguates a different reason for the empty result:",
+    "   - `closeMatches` / `recentRoutesSample` — your filter vocabulary doesn't match server-side names; the server returns the closest known names + a sample of routes actually present.",
+    "   - `windowActivity` — load-bearing four-way distinguisher. `totalTracesInWindow === 0` AND `totalTracesInTenantEver > 0` means \"your time window missed the activity\"; `totalTracesInTenantEver === 0` means \"this tenant has never produced traces\" (SDK not registered, or never hit); `captureConfigBlocksRequest === true` means \"the SDK's capture config dropped this route\"; otherwise the empty result is a vocabulary miss — see `closeMatches`.",
+    "   - `humanReadable` — prose guidance written for the agent.",
+    "   - `recoveryActions` — concrete next-call shapes.",
+    "   - `diagnosticValue` / `recommendedNextStep` — whether to keep searching or stop.",
+    "   Empty results carry `notAbsenceProof: true` — they are never proof the bug did not occur.",
     "",
     "### Tools",
     "- `find_trace_candidates` — discovery, vocabulary-tolerant filter",
