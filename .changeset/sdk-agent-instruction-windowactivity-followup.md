@@ -26,9 +26,10 @@ this tenant", because the two look identical at the
 
 Existing users on stale SDKs continue to see the prior content in
 their agent instruction files until they run
-`npx @glasstrace/sdk upgrade-instructions` (or
-`npx @glasstrace/sdk mcp add` against the same target) — the
-explicit DISC-1592 upgrade-refresh contract.
+`npx glasstrace upgrade-instructions` (or
+`npx glasstrace mcp add` against the same target) — the explicit
+DISC-1592 upgrade-refresh contract. (`glasstrace` is the SDK's
+published CLI bin name, per `packages/sdk/package.json`.)
 
 The DISC-1592 / DISC-1602 marker contract is preserved intact;
 this is content-only, no public API surface change. **Patch bump.**
