@@ -41,6 +41,14 @@ import {
   SpanStatusCode,
   type AttributeValue,
 } from "@opentelemetry/api";
+import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
+import { emitLifecycleEvent } from "../lifecycle.js";
+import { getBatchEnvelope, resolveBatchMember } from "./batch-context.js";
+
+export {
+  wrapBatchedHttpHandler,
+  type WrapBatchedHttpHandlerOptions,
+} from "./batch-handler.js";
 
 /**
  * Permissive structural bound for a tRPC middleware function. The shape
@@ -221,10 +229,12 @@ export function tracedMiddleware<T extends MiddlewareFunction>(
         // middleware span back to its procedure without joining against
         // the parent HTTP span. Both fields are documented as Tier 2
         // heuristics in `sdk-trpc.md` §4.
+        let procedurePath: string | undefined;
         if (mwOpts && typeof mwOpts === "object") {
           const path = (mwOpts as { path?: unknown }).path;
           if (typeof path === "string") {
             span.setAttribute("trpc.path", path);
+            procedurePath = path;
           }
           const type = (mwOpts as { type?: unknown }).type;
           if (
@@ -233,6 +243,49 @@ export function tracedMiddleware<T extends MiddlewareFunction>(
             type === "subscription"
           ) {
             span.setAttribute("trpc.type", type);
+          }
+        }
+
+        // SDK-052 / Wave 16B — when this invocation runs under a
+        // `wrapBatchedHttpHandler` envelope, label the span with its
+        // positional batch-member index and the full member-procedures
+        // list. Positional matching disambiguates batches that include
+        // the same procedure name multiple times. When no envelope is
+        // present (the non-batched path or apps not using the
+        // wrapper), this branch is a no-op and the span shape is
+        // unchanged from today.
+        if (procedurePath !== undefined) {
+          const resolved = resolveBatchMember(procedurePath);
+          if (resolved !== undefined) {
+            span.setAttribute(
+              GLASSTRACE_ATTRIBUTE_NAMES.TRPC_BATCH_MEMBER_INDEX,
+              resolved.index,
+            );
+            span.setAttribute(
+              GLASSTRACE_ATTRIBUTE_NAMES.TRPC_BATCH_MEMBER_PROCEDURES,
+              resolved.allNames,
+            );
+          } else {
+            // The envelope might exist but the procedure name doesn't
+            // map — emit the mismatch event for observability and
+            // proceed without batch attributes (trace shape preserved).
+            // We only emit the event when we can confirm an envelope
+            // exists; otherwise this is the non-batched path (no
+            // envelope at all) and silence is correct.
+            const envelope = getBatchEnvelope();
+            if (envelope !== undefined) {
+              emitLifecycleEvent("otel:trpc_batch_member_mismatch", {
+                procedureName: procedurePath,
+                // Use the envelope's precomputed allNames cache
+                // rather than rebuilding `procedures.map(...)` on
+                // every mismatch — the rebuild was the residual
+                // O(N) waste from the original implementation that
+                // the precomputed-cache fix in batch-context.ts is
+                // designed to eliminate.
+                batchMembers: envelope.allNames,
+                spanId: span.spanContext().spanId,
+              });
+            }
           }
         }
 

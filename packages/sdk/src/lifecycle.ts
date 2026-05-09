@@ -250,6 +250,26 @@ export interface SdkLifecycleEvents {
     timestamp: string;
     outageDurationMs: number;
   };
+  /**
+   * `tracedMiddleware` ran for a procedure invocation under a
+   * `wrapBatchedHttpHandler` batch envelope but could not resolve
+   * the invocation to a positional batch member (the
+   * `procedureName` does not appear in the envelope's procedure
+   * list, OR the per-name occurrence count exceeds the positional
+   * matches available). The middleware emits the span as today
+   * (no batch attributes); this event is informational only — the
+   * trace shape is preserved (SDK-052 / Wave 16B).
+   *
+   * **PII-safety:** `procedureName` and `batchMembers` are tRPC
+   * procedure names already on the trace; no new disclosure
+   * surface. `spanId` is the OTel span identifier of the
+   * unmatched member span.
+   */
+  "otel:trpc_batch_member_mismatch": {
+    procedureName: string;
+    batchMembers: ReadonlyArray<string>;
+    spanId: string;
+  };
   "otel:shutdown_started": Record<string, never>;
   "otel:shutdown_completed": Record<string, never>;
 
