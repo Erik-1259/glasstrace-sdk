@@ -256,7 +256,19 @@ describe("registerGlasstrace() Orchestrator", () => {
       registerGlasstrace();
       const elapsed = Date.now() - start;
 
-      expect(elapsed).toBeLessThan(100);
+      // Non-blocking invariant: registerGlasstrace() must NOT await
+      // background init work (OTel registration, key resolution, init
+      // POST). Real background work would be on the order of seconds
+      // (network I/O); a synchronous return is on the order of
+      // single-digit milliseconds. The 500ms threshold is generous
+      // enough to tolerate CI scheduler jitter and module-import cost
+      // on slow build agents while still failing fast if a regression
+      // makes the API await something it shouldn't. Prior threshold
+      // (100ms) was tight enough that CI cold-starts intermittently
+      // exceeded it (observed at 121ms on a stable-build runner) —
+      // flake fixed by bumping to 500ms; the actual non-blocking
+      // behavior is unchanged.
+      expect(elapsed).toBeLessThan(500);
     });
 
     it("should send init request to the backend in the background", async () => {
