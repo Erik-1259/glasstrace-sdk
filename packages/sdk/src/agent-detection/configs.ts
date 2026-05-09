@@ -1,4 +1,5 @@
 import type { DetectedAgent } from "./detect.js";
+import { buildAgentInstructionBody } from "./agent-instruction-text.js";
 
 /**
  * Generates the MCP server configuration content for a given agent.
@@ -85,6 +86,7 @@ export function generateMcpConfig(
         {
           mcpServers: {
             glasstrace: {
+              type: "http",
               url: endpoint,
               headers: {
                 Authorization: `Bearer ${bearer}`,
@@ -101,7 +103,8 @@ export function generateMcpConfig(
         {
           mcpServers: {
             glasstrace: {
-              serverUrl: endpoint,
+              type: "http",
+              url: endpoint,
               headers: {
                 Authorization: `Bearer ${bearer}`,
               },
@@ -179,20 +182,41 @@ function hashMarkers(sdkVersion: string): MarkerPair {
  * Generates informational content for an agent's instruction file.
  *
  * This content is designed to be appended to or inserted into agent-specific
- * instruction files (CLAUDE.md, .cursorrules, codex.md). It contains ONLY
- * the endpoint URL, tool descriptions, and setup instructions. Auth tokens
- * are NEVER included in this output.
+ * instruction files (CLAUDE.md, .cursorrules, codex.md). It contains a
+ * tight, agent-facing decision policy + workflow + tool list — no
+ * endpoint URL, no auth tokens, no setup instructions (those live in
+ * the user's MCP config and the SDK README; the agent reads this file
+ * to decide WHEN to call Glasstrace MCP and HOW to use the returned
+ * evidence).
  *
- * The rendered block opens with a cost-aware cross-tool decision paragraph
- * (DISC-1593 / SDK-050) telling the user's AI agent **when** Glasstrace
- * MCP is worth calling at all and **which** tool is the cheapest first
- * call for each symptom class. The start marker carries a `v=<sdkVersion>`
- * stamp (DISC-1592 / SDK-050) so a later `glasstrace upgrade-instructions`
- * run — and the SDK's stale-section warning at init — can detect that
- * the file was rendered by an older SDK and refresh the block.
+ * The rendered block opens with explicit "Call Glasstrace FIRST when"
+ * / "SKIP Glasstrace when" decision rules so a frontier agent has a
+ * cheap pre-tool-call heuristic it can apply BEFORE spending tokens
+ * on tool consideration. The Workflow section names
+ * `find_trace_candidates` as the discovery entry point and instructs
+ * the agent to READ `closeMatches` / `recentRoutesSample` /
+ * `recoveryActions` before pivoting to source — that is the
+ * load-bearing recovery contract from MCP-025 / MCP-027 (codified in
+ * `wire-mcp.ts` `ToolDiagnosticSchema` / `CandidateDiagnosticSchema`)
+ * and it prevents the bail-to-source failure mode that the prior
+ * SDK-050 cost-aware decision paragraph did not surface.
+ *
+ * The body itself lives in a sibling module
+ * (`agent-instruction-text.ts`) so future content evolutions are a
+ * single-file edit and don't disturb the marker / version-stamp /
+ * per-agent-format machinery in this file.
+ *
+ * The start marker carries a `v=<sdkVersion>` stamp (DISC-1592 /
+ * SDK-050) so a later `glasstrace upgrade-instructions` run — and
+ * the SDK's stale-section warning at init — can detect that the
+ * file was rendered by an older SDK and refresh the block.
  *
  * @param agent - The detected agent to generate info for.
- * @param endpoint - The Glasstrace MCP endpoint URL.
+ * @param endpoint - The Glasstrace MCP endpoint URL. (Validated for
+ *   non-emptiness here for backwards compatibility with the prior
+ *   SDK-050 contract; not currently inlined in the body — agents
+ *   reach Glasstrace via the MCP server name `glasstrace` configured
+ *   separately in `.glasstrace/mcp.json` or per-agent native config.)
  * @param sdkVersion - The SDK semver string to embed in the start marker
  *   (e.g. `1.4.0`, `0.0.0-canary-20260508120000`). Must match
  *   `[A-Za-z0-9.+\-]+`; arbitrary or empty values throw.
@@ -217,35 +241,7 @@ export function generateInfoSection(
     );
   }
 
-  // Cost-aware cross-tool decision paragraph (DISC-1593 / SDK-050
-  // Required Semantics §1). Load-bearing semantics:
-  //   1. Frame Glasstrace MCP as conditionally worth calling.
-  //   2. Name cheapest-orientation routing per symptom class.
-  //   3. Restate the no-candidates / no_traces_found "scoped retrieval
-  //      result, not absence of the bug" contract.
-  //   4. List the conditions that justify calling Glasstrace MCP at all.
-  // Wording aligned with MCP-025's planned `recoveryActions` so the two
-  // surfaces do not contradict each other.
-  const content = [
-    "",
-    "## Glasstrace MCP Integration",
-    "",
-    `Glasstrace is configured as an MCP server at: ${endpoint}`,
-    "",
-    "Glasstrace MCP is available when runtime evidence would materially reduce uncertainty. Use it when there is a failing request, stack trace, unclear runtime behavior, race/data-flow symptom, side effect, or performance issue that source inspection alone does not explain. For a current error, `get_latest_error` or `get_error_list` is usually the cheapest orientation call. For a known route/procedure with no exact error, use `find_trace_candidates` and follow returned exact `get_trace` or `get_root_cause` arguments only if the candidates look relevant. Do not call trace tools for trivial source-local fixes. Treat **no candidates** or **no_traces_found** as a scoped retrieval result, not proof the bug is absent.",
-    "",
-    "Available tools:",
-    "- `get_latest_error` - Get the most recent error trace from the current session",
-    "- `find_trace_candidates` - First-contact route/procedure/URL candidate selection when you have a route fragment, tRPC procedure, method, status, or rough recent activity window but not the exact trace ID. Returns candidate traces plus suggested `get_trace` / `get_root_cause` follow-up call arguments. Candidate discovery, not root-cause proof.",
-    "- `get_error_list` - List recent errors with filtering and pagination",
-    "- `get_trace` - Get a specific trace by ID or URL pattern",
-    "- `get_root_cause` - Get the root cause analysis for a specific error trace (requires a `traceId` from `get_latest_error`, `get_error_list`, or `get_trace`)",
-    "- `get_test_suggestions` - Get test suggestions for a specific error trace (requires a `traceId` from `get_latest_error`, `get_error_list`, or `get_trace`)",
-    "- `get_session_timeline` - Get the timeline of all traces in the current session",
-    "",
-    "To refresh this managed section after a `@glasstrace/sdk` upgrade, run: `npx glasstrace upgrade-instructions`. To reconfigure MCP credentials, run: `npx glasstrace mcp add`.",
-    "",
-  ].join("\n");
+  const content = buildAgentInstructionBody();
 
   switch (agent.name) {
     case "claude": {
