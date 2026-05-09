@@ -207,6 +207,58 @@ example, captured at module top-level), the callback still runs but
 no causal evidence is emitted — missing evidence is preferable to
 guessed evidence.
 
+### tRPC Batch Member Tracing
+
+When tRPC's HTTP-batch link bundles multiple procedures into a
+single HTTP request (e.g.,
+`GET /api/trpc/polls.get,polls.comments.list?batch=1`), the SDK
+collapses the batch into one root HTTP server span. The new opt-in
+`wrapBatchedHttpHandler` adds per-member span attribution so each
+procedure's middleware span is labeled with its position in the
+batch:
+
+```ts
+import { wrapBatchedHttpHandler, tracedMiddleware } from "@glasstrace/sdk/trpc";
+import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
+
+const handler = (req: Request) =>
+  fetchRequestHandler({ endpoint: "/api/trpc", req, router });
+
+// app/api/trpc/[trpc]/route.ts
+export const POST = wrapBatchedHttpHandler(handler);
+export const GET = wrapBatchedHttpHandler(handler);
+```
+
+When `tracedMiddleware` (also from `@glasstrace/sdk/trpc`) is in
+the procedure chain, each member span gains:
+
+- `glasstrace.trpc.batch.member_index` (number) — zero-based
+  positional index in the batch. Load-bearing for batches that
+  include the same procedure name more than once.
+- `glasstrace.trpc.batch.member_procedures` (string array) — the
+  full ordered list of procedure names in the batch.
+
+If your tRPC handler is mounted at a non-default base path (e.g.
+`/api/v2/trpc/`), pass it explicitly:
+
+```ts
+export const POST = wrapBatchedHttpHandler(handler, {
+  basePath: "/api/v2/trpc/",
+});
+```
+
+**Out of scope (today):**
+
+- Per-member duration / status / DB attribution at the agent-facing
+  query layer — still requires companion product-side ingestion +
+  MCP projection work; tracked as an open follow-up.
+- The root HTTP server span's `glasstrace.trpc.procedure` attribute
+  remains the comma-joined member list (unchanged from prior
+  releases).
+
+Apps NOT using `wrapBatchedHttpHandler`, and apps NOT using
+`tracedMiddleware`, see no trace-shape change.
+
 ## Coexistence with Other OTel Tools
 
 Glasstrace coexists with any tool that owns the OpenTelemetry

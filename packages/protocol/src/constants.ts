@@ -59,6 +59,31 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   SOURCE_LINE: "glasstrace.source.line",
   SOURCE_MAPPED: "glasstrace.source.mapped",
   TRPC_PROCEDURE: "glasstrace.trpc.procedure",
+  /**
+   * Zero-based positional index of the current member within a tRPC
+   * HTTP-batch dispatch (SDK-052 / DISC-1534 SDK-side slice). Set on
+   * member spans by `tracedMiddleware` when the SDK's
+   * `wrapBatchedHttpHandler` envelope is in scope. Numeric.
+   *
+   * Load-bearing for batches that include the same procedure name
+   * more than once — name-only matching cannot disambiguate, so the
+   * positional index is the canonical disambiguator. Absent on
+   * non-batched spans and on apps not using `wrapBatchedHttpHandler`.
+   */
+  TRPC_BATCH_MEMBER_INDEX: "glasstrace.trpc.batch.member_index",
+  /**
+   * Ordered list of all procedure names in the current tRPC HTTP
+   * batch (SDK-052 / DISC-1534 SDK-side slice). Stored as an OTel
+   * typed string array (`string[]`), NOT a JSON-encoded string —
+   * the typed-array form preserves first-class queryability in the
+   * OTel ingest pipeline.
+   *
+   * Set on the batch's root HTTP server span AND on each member
+   * span that `tracedMiddleware` produces (denormalized for query
+   * convenience). Absent on non-batched spans.
+   */
+  TRPC_BATCH_MEMBER_PROCEDURES:
+    "glasstrace.trpc.batch.member_procedures",
   ERROR_RESPONSE_BODY: "glasstrace.error.response_body",
   NEXT_ACTION_DETECTED: "glasstrace.next.action.detected",
 
