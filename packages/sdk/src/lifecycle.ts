@@ -139,6 +139,34 @@ export interface SdkLifecycleEvents {
   "core:ready": Record<string, never>;
   "core:shutdown_started": Record<string, never>;
   "core:shutdown_completed": Record<string, never>;
+  /**
+   * The boundary-masked-error heuristic fired for an HTTP server span
+   * (SDK-051 / DISC-1125 — same-span scope). Emitted from the enriching
+   * exporter when an HTTP server span has an exception event AND a
+   * trigger-set status (200/0/undefined), and the SDK promotes the
+   * inferred `glasstrace.http.status_code`. Informational only —
+   * subscribers MAY use this for observability (e.g., heuristic
+   * activation rate dashboards) but the heuristic's behavior does
+   * NOT depend on subscribers.
+   *
+   * **Same-span scope:** this event fires when the HTTP server span
+   * itself carries the exception event (the DISC-1134 case the
+   * existing inference block already handled). Descendant-traversal
+   * detection (the page-route boundary case where the exception lives
+   * in a child span) is tracked separately and does NOT emit this
+   * event today.
+   *
+   * **PII-safety:** `exceptionMessage` is truncated to 256 characters
+   * and is the same content already present on the span's exception
+   * event — no new disclosure surface beyond what already ships in the
+   * trace itself. `spanId` is the OTel span identifier for the HTTP
+   * server span where the heuristic fired.
+   */
+  "core:error_boundary_detected": {
+    spanId: string;
+    inferredStatus: number;
+    exceptionMessage?: string;
+  };
 
   "auth:key_resolved": { key: string; mode: "anonymous" | "dev" };
   "auth:claim_started": { accountId: string };

@@ -1791,6 +1791,294 @@ describe("GlasstraceExporter", () => {
     });
   });
 
+  describe("Boundary-masked-error audit (SDK-051 / DISC-1125 — same-span scope)", () => {
+    // SDK-051 / Wave 16A. The existing DISC-1134 inference block at
+    // enriching-exporter.ts:421-457 already promotes boundary-masked
+    // errors when the HTTP server span itself carries the exception
+    // event AND http.status_code is in the trigger set {200, 0,
+    // undefined}. SDK-051 adds a `glasstrace.http.boundary_masked`
+    // audit attribute and a `core:error_boundary_detected` lifecycle
+    // event so the heuristic's activation is observable downstream.
+    //
+    // Same-span scope only — the descendant-traversal case (DISC-1125
+    // page-route boundary) is tracked in a follow-up DISC and does
+    // NOT emit this attribute today.
+
+    it("sets boundary_masked: true when the inference block fires (status_code=200)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("TypeError", "boom")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBe(true);
+    });
+
+    it("sets boundary_masked: true when status_code is 0", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 0,
+        },
+        events: [createExceptionEvent("Error", "underlying")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBe(true);
+    });
+
+    it("sets boundary_masked: true when status_code is undefined", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          // no http.status_code
+        },
+        events: [createExceptionEvent("Error", "underlying")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBe(true);
+    });
+
+    it("does NOT set boundary_masked when status is already 4xx/5xx (heuristic does not fire)", () => {
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 500,
+        },
+        events: [createExceptionEvent("Error", "real 500")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+    });
+
+    it("does NOT set boundary_masked when status is explicitly OK (suppression option B)", () => {
+      // Suppression option B from SDK-051 §4: setting OTel span status
+      // to OK clears the ERROR-descendant trigger. Existing DISC-1134
+      // logic also requires statusNotExplicitlyOK; this test pins that
+      // the audit attribute is NOT set when the handler explicitly
+      // marked the span OK.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.OK },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("Error", "graceful")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+    });
+
+    it("does NOT set boundary_masked when there is no error signal (suppression option A — no recordException)", () => {
+      // Suppression option A from SDK-051 §4: avoid recordException
+      // for intentional graceful errors. Without an exception event
+      // and without ERROR-status, the heuristic does not fire.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+    });
+
+    it("does NOT set boundary_masked on non-HTTP spans (regression guard for non-framework apps)", () => {
+      // Gate 2: non-Next.js/non-HTTP regression. The heuristic only
+      // touches HTTP server spans; other span shapes pass through
+      // unchanged.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        kind: SpanKind.INTERNAL,
+        attributes: {
+          // no http.method — the heuristic's `if (method && ...)` gate
+          // never enters
+          "db.system": "postgresql",
+        },
+        events: [createExceptionEvent("DbError", "connection refused")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+    });
+
+    it("emits core:error_boundary_detected lifecycle event when the heuristic fires", async () => {
+      // Lifecycle event payload contract — informational; downstream
+      // tooling MAY consume this for activation-rate dashboards. The
+      // heuristic's behavior does NOT depend on subscribers.
+      const lifecycle = await import(
+        "../../../packages/sdk/src/lifecycle.js"
+      );
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const { exporter } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("TypeError", "boom")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const payload = handler.mock.calls[0][0] as {
+        spanId: string;
+        inferredStatus: number;
+        exceptionMessage?: string;
+      };
+      expect(payload.spanId).toBe("b7ad6b7169203331");
+      expect(payload.inferredStatus).toBe(500);
+      expect(payload.exceptionMessage).toBe("boom");
+
+      lifecycle.offLifecycleEvent(
+        "core:error_boundary_detected",
+        handler,
+      );
+    });
+
+    it("truncates long exception messages to 256 chars in the lifecycle payload", async () => {
+      const lifecycle = await import(
+        "../../../packages/sdk/src/lifecycle.js"
+      );
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const longMessage = "x".repeat(1000);
+      const { exporter } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("Error", longMessage)],
+      });
+
+      exporter.export([span], vi.fn());
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const payload = handler.mock.calls[0][0] as {
+        exceptionMessage?: string;
+      };
+      expect(payload.exceptionMessage).toBeDefined();
+      expect(payload.exceptionMessage!.length).toBe(256);
+      expect(payload.exceptionMessage).toBe("x".repeat(256));
+
+      lifecycle.offLifecycleEvent(
+        "core:error_boundary_detected",
+        handler,
+      );
+    });
+
+    it("uses error.type to override 500 when it parses to a valid HTTP status", () => {
+      // Pre-existing DISC-1134 behavior: error.type can carry a
+      // numeric HTTP status (e.g., from Next.js). Verify the audit
+      // attribute is set alongside the parsed status, not just for
+      // the default-500 case.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+          "error.type": "503",
+        },
+        events: [createExceptionEvent("Error", "service down")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(503);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBe(true);
+    });
+
+    it("omits exceptionMessage from payload when no exception event or message attr is present", async () => {
+      // Heuristic still fires when only span.status is ERROR (no
+      // exception event); the lifecycle payload should omit the
+      // optional exceptionMessage field rather than emit `undefined`
+      // or empty string.
+      const lifecycle = await import(
+        "../../../packages/sdk/src/lifecycle.js"
+      );
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const { exporter } = createExporter();
+      const span = createMockSpan({
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "GET",
+          "http.status_code": 200,
+        },
+        events: [],
+      });
+
+      exporter.export([span], vi.fn());
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const payload = handler.mock.calls[0][0] as {
+        spanId: string;
+        inferredStatus: number;
+        exceptionMessage?: string;
+      };
+      expect(payload.spanId).toBe("b7ad6b7169203331");
+      expect(payload.inferredStatus).toBe(500);
+      // Tighter assertion: the optional key should be ABSENT from the
+      // payload (the spread `...(... ? {key: ...} : {})` omits the key
+      // entirely when there's no value) — not just `undefined`.
+      expect("exceptionMessage" in payload).toBe(false);
+
+      lifecycle.offLifecycleEvent(
+        "core:error_boundary_detected",
+        handler,
+      );
+    });
+  });
+
   describe("tRPC procedure extraction (DISC-1215)", () => {
     it("extracts procedure name from standard tRPC URL", () => {
       const { exporter, delegate } = createExporter();

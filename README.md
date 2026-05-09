@@ -33,6 +33,47 @@ Traces are sent to the Glasstrace ingestion API, where they're
 enriched with AI-generated root cause analysis and made available
 through an MCP server that coding agents can query directly.
 
+### Boundary-masked error detection
+
+When an HTTP request handler records an unhandled exception via
+OTel's `recordException()` but returns an HTTP 200 response (a
+common pattern when frameworks catch errors and render fallback
+pages), the SDK promotes the trace's inferred `status_code` to
+500 (or, when the span carries a numeric `error.type` attribute
+in the 400-599 range, to that parsed value) so the error is
+visible to error-based queries like `get_latest_error`. Promotion
+fires when ALL of:
+
+1. The HTTP server span has either `status.code === ERROR`, an
+   `exception` event, or `exception.*` attributes.
+2. `http.status_code` is in `{200, 0, undefined}`.
+3. The span's status is not explicitly `OK`.
+
+When promotion fires, the SDK also sets
+`glasstrace.http.boundary_masked: true` as an audit attribute and
+emits the `core:error_boundary_detected` lifecycle event
+(`{ spanId, inferredStatus, exceptionMessage? }`).
+
+**Suppression options** (for graceful-degradation patterns where you
+want to keep the 200 status):
+
+- Avoid calling `recordException()` for intentional graceful errors
+  — these aren't unhandled exceptions, so the heuristic naturally
+  excludes them.
+- Set the OTel span status to `OK` (instead of leaving it at
+  `ERROR`/`UNSET`) — this clears the heuristic's trigger condition.
+
+The SDK deliberately does not document spoofing `http.status_code`
+to a non-trigger value as a suppression mechanism; that pattern
+corrupts downstream telemetry semantics.
+
+**Same-span scope.** Today the heuristic only fires when the HTTP
+server span itself carries the exception signal. The case where an
+exception lives in a child span (e.g., a database query span) and
+the parent HTTP span returns 200 with no exception event is not
+yet covered; it requires descendant-traversal in the exporter and
+is tracked as a follow-up.
+
 ## Packages
 
 | Package | Description |

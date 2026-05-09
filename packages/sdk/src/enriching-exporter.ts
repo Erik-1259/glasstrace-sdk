@@ -446,6 +446,33 @@ export class GlasstraceExporter implements SpanExporter {
             extra[ATTR.HTTP_STATUS_CODE] = 500;
           }
 
+          // SDK-051 / DISC-1125 — boundary-masked-error audit attribute.
+          // Set to true exactly when the inference block fires. Strict
+          // additivity: backend ignores unknown attributes today; this
+          // surface is for downstream observability of heuristic
+          // activation rate. Same-span scope only — descendant-traversal
+          // (the page-route boundary case) is tracked in a follow-up DISC.
+          extra[ATTR.HTTP_BOUNDARY_MASKED] = true;
+
+          // Emit lifecycle event for subscribers (informational; the
+          // heuristic's behavior does NOT depend on subscribers). The
+          // payload's `exceptionMessage` is truncated to 256 chars and is
+          // the same content already on the span's exception event — no
+          // new disclosure surface beyond the trace itself.
+          const inferredStatus = extra[ATTR.HTTP_STATUS_CODE] as number;
+          const eventDetails = getExceptionEventDetails(span);
+          const exceptionMessage = eventDetails.message
+            ?? (typeof attrs["exception.message"] === "string"
+                  ? (attrs["exception.message"] as string)
+                  : undefined);
+          emitLifecycleEvent("core:error_boundary_detected", {
+            spanId: span.spanContext().spanId,
+            inferredStatus,
+            ...(exceptionMessage !== undefined
+              ? { exceptionMessage: exceptionMessage.slice(0, 256) }
+              : {}),
+          });
+
           if (this.verbose) {
             sdkLog("info",
               `[glasstrace] enrichSpan "${name}": inferred status_code=${extra[ATTR.HTTP_STATUS_CODE]} ` +
