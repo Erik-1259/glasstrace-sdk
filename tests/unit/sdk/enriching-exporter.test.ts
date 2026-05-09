@@ -1794,15 +1794,19 @@ describe("GlasstraceExporter", () => {
   describe("Boundary-masked-error audit (SDK-051 / DISC-1125 — same-span scope)", () => {
     // SDK-051 / Wave 16A. The existing DISC-1134 inference block at
     // enriching-exporter.ts:421-457 already promotes boundary-masked
-    // errors when the HTTP server span itself carries the exception
-    // event AND http.status_code is in the trigger set {200, 0,
-    // undefined}. SDK-051 adds a `glasstrace.http.boundary_masked`
-    // audit attribute and a `core:error_boundary_detected` lifecycle
-    // event so the heuristic's activation is observable downstream.
+    // errors when an HTTP server span has any of the broader trigger
+    // signals — `span.status.code === ERROR`, an `exception` event
+    // from `recordException()`, OR `exception.type` / `exception.message`
+    // span attributes — AND `http.status_code` is in the trigger set
+    // `{200, 0, undefined}` AND `span.status` is not explicitly OK.
+    // SDK-051 adds a `glasstrace.http.boundary_masked` audit attribute
+    // and a `core:error_boundary_detected` lifecycle event so the
+    // heuristic's activation is observable downstream.
     //
     // Same-span scope only — the descendant-traversal case (DISC-1125
-    // page-route boundary) is tracked in a follow-up DISC and does
-    // NOT emit this attribute today.
+    // page-route boundary, where the exception lives in a child span)
+    // is tracked in a follow-up DISC and does NOT emit this attribute
+    // today.
 
     it("sets boundary_masked: true when the inference block fires (status_code=200)", () => {
       const { exporter, delegate } = createExporter();

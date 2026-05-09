@@ -35,14 +35,15 @@ through an MCP server that coding agents can query directly.
 
 ### Boundary-masked error detection
 
-When an HTTP request handler records an unhandled exception via
-OTel's `recordException()` but returns an HTTP 200 response (a
-common pattern when frameworks catch errors and render fallback
-pages), the SDK promotes the trace's inferred `status_code` to
-500 (or, when the span carries a numeric `error.type` attribute
-in the 400-599 range, to that parsed value) so the error is
-visible to error-based queries like `get_latest_error`. Promotion
-fires when ALL of:
+When an HTTP request handler surfaces an error signal on its span
+(via `span.setStatus(ERROR)`, OTel's `recordException()`, or by
+setting `exception.*` span attributes) but returns an HTTP 200
+response — a common pattern when frameworks catch errors and
+render fallback pages — the SDK promotes the trace's inferred
+`status_code` to 500 (or, when the span carries a numeric
+`error.type` attribute in the 400-599 range, to that parsed value)
+so the error is visible to error-based queries like
+`get_latest_error`. Promotion fires when ALL of:
 
 1. The HTTP server span has either `status.code === ERROR`, an
    `exception` event, or `exception.*` attributes.
