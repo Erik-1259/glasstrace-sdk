@@ -1,5 +1,103 @@
 # @glasstrace/sdk
 
+## 1.10.0
+
+### Minor Changes
+
+- ed7d6e9: feat(sdk): boundary-masked-error audit attribute + lifecycle event (SDK-051)
+
+  Adds observability for the SDK's existing same-span boundary-masked-error
+  heuristic (the DISC-1134 status-inference path at
+  `enriching-exporter.ts`):
+
+  - New wire attribute `glasstrace.http.boundary_masked: true` is set on
+    HTTP server spans where the SDK promotes an inferred `status_code`
+    because an error signal (any of: `span.status === ERROR`, an
+    `exception` event, or `exception.*` attributes) was present
+    alongside a trigger-set status (`{200, 0, undefined}`). Strict
+    additivity — backend ignores unknown attributes today, so this is
+    for downstream observability of heuristic activation rate.
+  - New lifecycle event `core:error_boundary_detected` fires once per
+    promotion with `{ spanId, inferredStatus, exceptionMessage? }`.
+    Subscribers MAY consume this for activation-rate dashboards; the
+    heuristic's behavior does NOT depend on subscribers. Exception
+    messages are truncated to 256 chars in the payload and omitted
+    entirely when neither an exception event nor `exception.message`
+    attribute was present.
+
+  **Same-span scope only.** This release covers the case where the HTTP
+  server span itself carries the error signal. Page-route boundary
+  detection where the exception lives in a child span requires
+  descendant-traversal in the exporter and is tracked in a follow-up
+  DISC. DISC-1125 stays PARTIAL after this release.
+
+  Patch bump for `@glasstrace/protocol` (new constant; strict
+  additivity).
+
+- 691071e: feat(sdk): tRPC batch member span emission via wrapBatchedHttpHandler (SDK-052)
+
+  Adds opt-in per-member span attribution for batched tRPC HTTP
+  requests. Apps that wrap their tRPC HTTP handler with the new
+  `wrapBatchedHttpHandler` AND use `tracedMiddleware` get a
+  `glasstrace.trpc.batch.member_index` (number) and
+  `glasstrace.trpc.batch.member_procedures` (OTel typed string array)
+  attribute on each member span, so per-member attribution is
+  preserved when tRPC's HTTP-batch link bundles multiple procedures
+  into a single HTTP request.
+
+  **Public API additions:**
+
+  - `wrapBatchedHttpHandler<H>(handler, options?: { basePath?: string })`
+    exported from `@glasstrace/sdk/trpc`. Apps wrap their tRPC HTTP
+    handler (Next.js app-router route, Express endpoint, etc.) once
+    at the boundary; the wrapper inspects each request's URL and
+    sets a request-scoped `AsyncLocalStorage` envelope when the URL
+    matches the batch pattern at the configured base path.
+    Default `basePath` is `/api/trpc/`; apps that mount tRPC at a
+    different path pass their actual base path explicitly (per
+    DISC-1215, the tRPC base path is configurable on the user side).
+
+  **Wire format additions (strict additivity):**
+
+  - `glasstrace.trpc.batch.member_index` — zero-based positional
+    index of each member in the batch. Load-bearing for batches that
+    include the same procedure name more than once (positional
+    matching, NOT name-only matching).
+  - `glasstrace.trpc.batch.member_procedures` — OTel typed string
+    array (`string[]`) listing all member procedure names in the
+    batch order.
+
+  **Lifecycle event addition:**
+
+  - `otel:trpc_batch_member_mismatch` fires when `tracedMiddleware`
+    runs under an envelope but the procedure name doesn't match any
+    positional member (the failure mode that preserves trace shape).
+    Informational; subscribers MAY consume it for observability.
+
+  **Cross-version compatibility:** works with `@trpc/server@^10` and
+  `@trpc/server@^11`. The envelope is propagated via Node
+  `AsyncLocalStorage` rather than tRPC's `createContext` shape
+  (which differs between major versions).
+
+  **Out of scope (DISC-1534 stays PARTIAL after this release):**
+
+  - Product backend ingestion storage of per-member span hierarchy —
+    separate product-side wave.
+  - MCP query projection of per-member duration / status / DB
+    attribution — separate product-side wave.
+  - Auto-attach integration (wrapping tRPC handlers automatically) —
+    v1 is opt-in; a future brief may add auto-detection.
+  - Root HTTP server span shape — the existing comma-joined
+    `glasstrace.trpc.procedure` attribute is unchanged. The brief
+    proposed reshaping it to a first-member representative + array,
+    but that is non-additive and is deferred to a separate wave.
+
+  Apps not using `wrapBatchedHttpHandler`, and apps not using
+  `tracedMiddleware`, see no trace-shape change.
+
+  Patch bump for `@glasstrace/protocol` (new constants; strict
+  additivity).
+
 ## 1.9.1
 
 ### Patch Changes
