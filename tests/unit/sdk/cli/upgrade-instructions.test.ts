@@ -101,11 +101,13 @@ describe("runUpgradeInstructions", () => {
     expect(written).toContain("v=0.0.0-test");
     expect(written).toContain("## Untouched section");
     expect(written).toContain("User-owned text here.");
-    // The decision paragraph (DISC-1593) is now in the rendered
-    // managed section.
-    expect(written).toContain(
-      "runtime evidence would materially reduce uncertainty",
-    );
+    // Wave 17 agent-instruction body (Erik's 2026-05-09 Prompt 1)
+    // is now rendered in the managed section. Pin the new
+    // load-bearing decision-rule heading instead of the prior
+    // SDK-050 / DISC-1593 paragraph wording.
+    expect(written).toContain("### Call Glasstrace FIRST when:");
+    expect(written).toContain("### SKIP Glasstrace when:");
+    expect(written).toContain("### Workflow");
   });
 
   it("refreshes a legacy unstamped managed section in place (DISC-1592 backward-compat)", async () => {

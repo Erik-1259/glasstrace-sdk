@@ -122,7 +122,10 @@ describe("Agent MCP auto-configuration integration tests", () => {
     // The end marker remains unstamped.
     expect(claudeMd).toMatch(/<!-- glasstrace:mcp:start v=\S+ -->/);
     expect(claudeMd).toContain("<!-- glasstrace:mcp:end -->");
-    expect(claudeMd).toContain("Glasstrace MCP Integration");
+    // Wave 17: heading evolved from "Glasstrace MCP Integration" (SDK-050)
+    // to "Glasstrace MCP — Runtime Debugging Evidence" (Erik's 2026-05-09
+    // Prompt 1 directive). Pin the new heading.
+    expect(claudeMd).toContain("Glasstrace MCP — Runtime Debugging Evidence");
     expect(claudeMd).not.toContain("gt_anon_");
     expect(claudeMd).not.toContain("Bearer");
 
@@ -172,12 +175,13 @@ describe("Agent MCP auto-configuration integration tests", () => {
     expect(claudeConfig.mcpServers.glasstrace.type).toBe("http");
     expect(claudeConfig.mcpServers.glasstrace.url).toBe(MCP_ENDPOINT);
 
-    // Cursor: .cursor/mcp.json with url (no type)
+    // Cursor: .cursor/mcp.json — Wave 17 / DISC-1573: now emits the
+    // canonical { type: "http", url, headers } shape.
     const cursorConfig = JSON.parse(
       fs.readFileSync(path.join(tmpDir, ".cursor", "mcp.json"), "utf-8"),
     );
     expect(cursorConfig.mcpServers.glasstrace.url).toBe(MCP_ENDPOINT);
-    expect(cursorConfig.mcpServers.glasstrace).not.toHaveProperty("type");
+    expect(cursorConfig.mcpServers.glasstrace.type).toBe("http");
 
     // Gemini: .gemini/settings.json with httpUrl
     const geminiConfig = JSON.parse(
@@ -302,7 +306,7 @@ describe("Agent MCP auto-configuration integration tests", () => {
 
   // ───── Test 5: Agent-specific Cursor ─────
 
-  it("agent-specific Cursor: .cursor/mcp.json has url + headers, no type field", async () => {
+  it("agent-specific Cursor: .cursor/mcp.json emits the canonical Claude-compatible HTTP shape (Wave 17 / DISC-1573)", async () => {
     tmpDir = createTmpProject();
     fs.mkdirSync(path.join(tmpDir, ".git"), { recursive: true });
     fs.mkdirSync(path.join(tmpDir, ".cursor"), { recursive: true });
@@ -320,6 +324,7 @@ describe("Agent MCP auto-configuration integration tests", () => {
     expect(cursorConfig).toEqual({
       mcpServers: {
         glasstrace: {
+          type: "http",
           url: MCP_ENDPOINT,
           headers: {
             Authorization: `Bearer ${ANON_KEY}`,
@@ -327,15 +332,16 @@ describe("Agent MCP auto-configuration integration tests", () => {
         },
       },
     });
-    // Explicitly verify no type field
+    // DISC-1573 / Wave 17: explicitly verify the type field IS now
+    // present (the prior shape omitted it).
     expect(
       Object.keys(cursorConfig.mcpServers.glasstrace),
-    ).not.toContain("type");
+    ).toContain("type");
   });
 
   // ───── Test 6: Agent-specific Windsurf ─────
 
-  it("agent-specific Windsurf: config uses serverUrl", async () => {
+  it("agent-specific Windsurf: config emits the canonical Claude-compatible HTTP shape (Wave 17 / DISC-1574 — was: serverUrl, no type)", async () => {
     tmpDir = createTmpProject();
     fs.mkdirSync(path.join(tmpDir, ".git"), { recursive: true });
 
@@ -358,7 +364,9 @@ describe("Agent MCP auto-configuration integration tests", () => {
       });
       expect(result.exitCode).toBe(0);
 
-      // Windsurf config uses serverUrl
+      // Windsurf config — Wave 17 / DISC-1574: now emits `url` (not the
+      // prior `serverUrl`) AND includes `type: "http"`, aligning with
+      // the canonical Claude-compatible HTTP shape.
       const windsurfConfigPath = path.join(
         fakeHome,
         ".codeium",
@@ -370,12 +378,11 @@ describe("Agent MCP auto-configuration integration tests", () => {
       const windsurfConfig = JSON.parse(
         fs.readFileSync(windsurfConfigPath, "utf-8"),
       );
-      expect(windsurfConfig.mcpServers.glasstrace.serverUrl).toBe(
-        MCP_ENDPOINT,
-      );
-      expect(windsurfConfig.mcpServers.glasstrace).not.toHaveProperty(
-        "url",
-      );
+      expect(windsurfConfig.mcpServers.glasstrace.url).toBe(MCP_ENDPOINT);
+      expect(windsurfConfig.mcpServers.glasstrace.type).toBe("http");
+      // Regression guard: the legacy `serverUrl` field MUST NOT appear,
+      // and the gemini-only `httpUrl` field MUST NOT appear.
+      expect(windsurfConfig.mcpServers.glasstrace.serverUrl).toBeUndefined();
       expect(windsurfConfig.mcpServers.glasstrace).not.toHaveProperty(
         "httpUrl",
       );
