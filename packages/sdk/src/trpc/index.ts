@@ -263,7 +263,7 @@ export function tracedMiddleware<T extends MiddlewareFunction>(
             );
             span.setAttribute(
               GLASSTRACE_ATTRIBUTE_NAMES.TRPC_BATCH_MEMBER_PROCEDURES,
-              resolved.allNames as string[],
+              resolved.allNames,
             );
           } else {
             // The envelope might exist but the procedure name doesn't
@@ -276,7 +276,13 @@ export function tracedMiddleware<T extends MiddlewareFunction>(
             if (envelope !== undefined) {
               emitLifecycleEvent("otel:trpc_batch_member_mismatch", {
                 procedureName: procedurePath,
-                batchMembers: envelope.procedures.map((m) => m.name),
+                // Use the envelope's precomputed allNames cache
+                // rather than rebuilding `procedures.map(...)` on
+                // every mismatch — the rebuild was the residual
+                // O(N) waste from the original implementation that
+                // the precomputed-cache fix in batch-context.ts is
+                // designed to eliminate.
+                batchMembers: envelope.allNames,
                 spanId: span.spanContext().spanId,
               });
             }

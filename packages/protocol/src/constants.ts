@@ -78,9 +78,14 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
    * the typed-array form preserves first-class queryability in the
    * OTel ingest pipeline.
    *
-   * Set on the batch's root HTTP server span AND on each member
-   * span that `tracedMiddleware` produces (denormalized for query
-   * convenience). Absent on non-batched spans.
+   * Set on each member span that `tracedMiddleware` produces when a
+   * `wrapBatchedHttpHandler` envelope is in scope. Absent on
+   * non-batched spans, on the root HTTP server span (today's
+   * release ships strict-additive scope only — per-root-span
+   * attribution is deferred to a follow-up wave because changing
+   * the root span's existing `glasstrace.trpc.procedure` shape from
+   * comma-joined to first-member representative is non-additive),
+   * and on apps not using `wrapBatchedHttpHandler`.
    */
   TRPC_BATCH_MEMBER_PROCEDURES:
     "glasstrace.trpc.batch.member_procedures",

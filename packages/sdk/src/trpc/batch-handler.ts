@@ -23,6 +23,7 @@
  */
 import { sdkLog } from "../console-capture.js";
 import {
+  buildEnvelope,
   withBatchEnvelope,
   type BatchEnvelope,
   type BatchMember,
@@ -43,9 +44,13 @@ export interface WrapBatchedHttpHandlerOptions {
    * mounts). Per DISC-1215, the tRPC base path is configurable on
    * the user side; this option propagates that decision.
    *
-   * The supplied value MUST end with `/` so it doesn't accidentally
-   * match prefix substrings (e.g., `/api/trpc-internal/...` should
-   * not match `/api/trpc/`).
+   * Callers MAY supply the path with or without a trailing `/` —
+   * the wrapper normalizes by appending `/` when missing. The
+   * normalized form (with trailing `/`) is what's used for prefix
+   * matching, so it can't accidentally match prefix substrings
+   * (e.g., `/api/trpc-internal/...` does not match `/api/trpc/`).
+   * Apps SHOULD pass the trailing slash explicitly; the runtime
+   * normalization is a safety net, not a documented affordance.
    */
   basePath?: string;
 }
@@ -70,9 +75,14 @@ let _malformedUrlWarned = false;
  * reads the envelope and adds the batch attributes to each member
  * span.
  *
- * Non-batched requests (no `batch=` query param, or single-procedure
- * URL without comma-list) pass through to the underlying handler
- * unchanged — the trace shape is identical to today's behavior.
+ * Non-batched requests (no `batch=` query param OR a URL whose
+ * pathname doesn't match the configured `basePath`) pass through
+ * to the underlying handler unchanged — the trace shape is
+ * identical to today's behavior. **Single-procedure URLs with
+ * `batch=1` ARE treated as batches** (a one-member batch is still
+ * a batch in tRPC's protocol semantics; the wrapper builds a
+ * single-element envelope and `tracedMiddleware` labels the one
+ * member span with `member_index: 0`).
  *
  * @example
  * ```ts
@@ -116,34 +126,46 @@ export function wrapBatchedHttpHandler<
  * recognize (in which case the wrapper falls through to a no-op
  * pass-through — never throws).
  *
- * Supported shapes:
- *   - Web `Request` (Next.js app-router, fetch adapter): `.url`
- *   - Next.js `NextRequest`: `.nextUrl.href` or `.url`
- *   - Node `IncomingMessage` (Express, raw http): `.url`
- *   - tRPC's own `{ req, res }` envelope: `req.url`
+ * Express-mounting awareness: when an Express app mounts the
+ * tRPC handler with `app.use('/api/trpc', ...)`, the framework
+ * rewrites `req.url` to strip the mount prefix — so a request to
+ * `/api/trpc/polls.get?batch=1` arrives at the handler with
+ * `req.url === '/polls.get?batch=1'` and `req.originalUrl ===
+ * '/api/trpc/polls.get?batch=1'`. The wrapper prefers
+ * `originalUrl` (and `baseUrl + url` as a secondary fallback) so
+ * the basePath match against `/api/trpc/` succeeds for Express
+ * users without forcing them to mount-aware-configure the wrapper.
+ *
+ * Supported shapes (checked in this preference order):
+ *   - Express `Request`: `.originalUrl` (mount-aware)
+ *   - Express `Request`: `.baseUrl + .url` reconstruction
+ *   - Web `Request` / Next.js `NextRequest`: `.url`
+ *   - Next.js `NextRequest`: `.nextUrl.href` (fallback)
+ *   - tRPC's own `{ req, res }` envelope: `req.originalUrl` /
+ *     `req.url` via the same precedence
  */
 function extractRequestUrl(arg: unknown): string | undefined {
   if (typeof arg !== "object" || arg === null) {
     return undefined;
   }
-  // Web Request / Next.js NextRequest both have a `.url` string field.
-  const directUrl = (arg as { url?: unknown }).url;
-  if (typeof directUrl === "string") {
-    return directUrl;
+  // Try the request object directly first.
+  const direct = readUrlFromRequest(arg);
+  if (direct !== undefined) {
+    return direct;
   }
-  // Some tRPC adapters wrap the Web Request in `{ req, res }`.
-  const reqWrapper = (arg as { req?: { url?: unknown } }).req;
+  // Some tRPC adapters wrap the request in `{ req, res }`.
+  const reqWrapper = (arg as { req?: unknown }).req;
   if (
     reqWrapper !== undefined &&
     reqWrapper !== null &&
     typeof reqWrapper === "object"
   ) {
-    const wrappedUrl = reqWrapper.url;
-    if (typeof wrappedUrl === "string") {
-      return wrappedUrl;
+    const wrapped = readUrlFromRequest(reqWrapper);
+    if (wrapped !== undefined) {
+      return wrapped;
     }
   }
-  // NextRequest exposes `nextUrl.href` as a fallback.
+  // NextRequest exposes `nextUrl.href` as a final fallback.
   const nextUrl = (arg as { nextUrl?: { href?: unknown } }).nextUrl;
   if (
     nextUrl !== undefined &&
@@ -154,6 +176,38 @@ function extractRequestUrl(arg: unknown): string | undefined {
     if (typeof href === "string") {
       return href;
     }
+  }
+  return undefined;
+}
+
+/**
+ * Reads the most-correct URL from a request-shaped object,
+ * preferring `originalUrl` (Express mount-aware) over `url`. Falls
+ * back to `baseUrl + url` reconstruction when only those are
+ * available.
+ */
+function readUrlFromRequest(req: object): string | undefined {
+  // Express request: originalUrl is the un-rewritten request path
+  // including any mount prefix that was stripped from `url`.
+  const originalUrl = (req as { originalUrl?: unknown }).originalUrl;
+  if (typeof originalUrl === "string" && originalUrl.length > 0) {
+    return originalUrl;
+  }
+  // Reconstruct from baseUrl + url for Express-mounted handlers
+  // that don't expose originalUrl (rare, but defensively handled).
+  const baseUrl = (req as { baseUrl?: unknown }).baseUrl;
+  const url = (req as { url?: unknown }).url;
+  if (
+    typeof baseUrl === "string" &&
+    baseUrl.length > 0 &&
+    typeof url === "string"
+  ) {
+    return baseUrl + url;
+  }
+  // Web Request / Next.js NextRequest / un-mounted Node http:
+  // plain `.url` carries the full request path.
+  if (typeof url === "string") {
+    return url;
   }
   return undefined;
 }
@@ -231,10 +285,7 @@ function parseBatchUrl(
     index,
   }));
 
-  return {
-    procedures,
-    nameCounters: new Map<string, number>(),
-  };
+  return buildEnvelope(procedures);
 }
 
 /**

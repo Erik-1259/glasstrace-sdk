@@ -36,10 +36,33 @@ export interface BatchMember {
  * Request-scoped envelope set by `wrapBatchedHttpHandler` for the
  * duration of one batched HTTP request. Read by `tracedMiddleware`
  * via `getBatchEnvelope()`.
+ *
+ * **Performance contract:** `allNames` and `nameToPositions` are
+ * precomputed at envelope construction so per-member span
+ * attribution stays O(1) per `resolveBatchMember` invocation.
+ * Without these caches the resolver would scan `procedures` and
+ * rebuild the names list on every call, making total work O(N^2)
+ * for an N-member batch on a hot request path.
  */
 export interface BatchEnvelope {
   /** Ordered procedure list as parsed from the URL. */
   readonly procedures: ReadonlyArray<BatchMember>;
+  /**
+   * Pre-materialized names list — the same value passed onto each
+   * member span as `glasstrace.trpc.batch.member_procedures`. It's
+   * a real `string[]` (not a derived `map(...)` view) so OTel's
+   * span-attribute setter accepts it without a synthetic copy on
+   * every invocation, and so the OTel typed-array contract is
+   * satisfied with a concrete mutable array (per Copilot review).
+   */
+  readonly allNames: string[];
+  /**
+   * Index from procedure-name → ordered list of positional indices
+   * in `procedures` where that name appears. Built once at envelope
+   * construction so `resolveBatchMember` can look up the N-th
+   * positional match for the N-th invocation in O(1).
+   */
+  readonly nameToPositions: ReadonlyMap<string, ReadonlyArray<number>>;
   /**
    * Per-name occurrence counter. Mutated by `tracedMiddleware` as
    * each invocation maps itself to the next positional member of
@@ -50,6 +73,32 @@ export interface BatchEnvelope {
 }
 
 const _als = new AsyncLocalStorage<BatchEnvelope>();
+
+/**
+ * Construct a `BatchEnvelope` from an ordered list of member names.
+ * Pre-computes `allNames` and `nameToPositions` so subsequent
+ * `resolveBatchMember` calls run in O(1) regardless of batch size.
+ */
+export function buildEnvelope(
+  procedures: ReadonlyArray<BatchMember>,
+): BatchEnvelope {
+  const allNames: string[] = procedures.map((m) => m.name);
+  const positions = new Map<string, number[]>();
+  for (const member of procedures) {
+    let list = positions.get(member.name);
+    if (list === undefined) {
+      list = [];
+      positions.set(member.name, list);
+    }
+    list.push(member.index);
+  }
+  return {
+    procedures,
+    allNames,
+    nameToPositions: positions,
+    nameCounters: new Map<string, number>(),
+  };
+}
 
 /**
  * Run `fn` with `envelope` set as the request-scoped batch envelope.
@@ -86,30 +135,31 @@ export function getBatchEnvelope(): BatchEnvelope | undefined {
  * under tRPC's batch-dispatch ordering — repeated invocations of
  * the same name within a single request consume positional matches
  * in order.
+ *
+ * **Performance:** O(1) per invocation. Uses the precomputed
+ * `nameToPositions` index built by `buildEnvelope`.
  */
 export function resolveBatchMember(
   procedureName: string,
 ):
-  | { envelope: BatchEnvelope; index: number; allNames: ReadonlyArray<string> }
+  | { envelope: BatchEnvelope; index: number; allNames: string[] }
   | undefined {
   const envelope = _als.getStore();
   if (envelope === undefined) {
     return undefined;
   }
-  const occurrence = envelope.nameCounters.get(procedureName) ?? 0;
-  let seen = 0;
-  for (const member of envelope.procedures) {
-    if (member.name === procedureName) {
-      if (seen === occurrence) {
-        envelope.nameCounters.set(procedureName, occurrence + 1);
-        return {
-          envelope,
-          index: member.index,
-          allNames: envelope.procedures.map((m) => m.name),
-        };
-      }
-      seen += 1;
-    }
+  const positions = envelope.nameToPositions.get(procedureName);
+  if (positions === undefined) {
+    return undefined;
   }
-  return undefined;
+  const occurrence = envelope.nameCounters.get(procedureName) ?? 0;
+  if (occurrence >= positions.length) {
+    return undefined;
+  }
+  envelope.nameCounters.set(procedureName, occurrence + 1);
+  return {
+    envelope,
+    index: positions[occurrence]!,
+    allNames: envelope.allNames,
+  };
 }

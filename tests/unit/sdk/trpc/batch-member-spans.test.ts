@@ -255,6 +255,70 @@ describe("wrapBatchedHttpHandler — non-batched regression", () => {
   });
 });
 
+describe("wrapBatchedHttpHandler — Express-mounted handlers (req.originalUrl)", () => {
+  // When an Express app uses `app.use('/api/trpc', tRPCHandler)`,
+  // the framework rewrites `req.url` to drop the mount prefix —
+  // so the handler sees `req.url === '/polls.get?batch=1'` rather
+  // than `/api/trpc/polls.get?batch=1`. The wrapper checks
+  // `req.originalUrl` first to recover the un-rewritten path.
+
+  it("uses req.originalUrl when available (Express mount-aware)", async () => {
+    const middleware = tracedMiddleware(
+      { name: "trpc-express" },
+      async ({ next }: { next: () => Promise<unknown> }) => next(),
+    );
+
+    const handler = wrapBatchedHttpHandler(async () => {
+      await middleware({
+        path: "polls.get",
+        next: async () => ({ ok: true }),
+      } as unknown as never);
+      return "ok";
+    });
+
+    // Simulate an Express request post-mount: `url` has the mount
+    // prefix stripped, `originalUrl` retains it. Without the
+    // originalUrl precedence, basePath matching would fail.
+    const reqLike = {
+      url: "/polls.get?batch=1",
+      originalUrl: "/api/trpc/polls.get?batch=1",
+    };
+    await handler(reqLike as unknown as never);
+
+    const span = getSpan("trpc-express");
+    expect(span?.attributes[ATTR.TRPC_BATCH_MEMBER_INDEX]).toBe(0);
+    expect(span?.attributes[ATTR.TRPC_BATCH_MEMBER_PROCEDURES]).toEqual([
+      "polls.get",
+    ]);
+  });
+
+  it("reconstructs from baseUrl + url when originalUrl is missing", async () => {
+    const middleware = tracedMiddleware(
+      { name: "trpc-express-baseUrl" },
+      async ({ next }: { next: () => Promise<unknown> }) => next(),
+    );
+
+    const handler = wrapBatchedHttpHandler(async () => {
+      await middleware({
+        path: "polls.get",
+        next: async () => ({ ok: true }),
+      } as unknown as never);
+      return "ok";
+    });
+
+    // Some Express-like frameworks expose baseUrl + (rewritten) url
+    // but no originalUrl. The wrapper reconstructs.
+    const reqLike = {
+      url: "/polls.get?batch=1",
+      baseUrl: "/api/trpc",
+    };
+    await handler(reqLike as unknown as never);
+
+    const span = getSpan("trpc-express-baseUrl");
+    expect(span?.attributes[ATTR.TRPC_BATCH_MEMBER_INDEX]).toBe(0);
+  });
+});
+
 describe("wrapBatchedHttpHandler — opt-in semantics", () => {
   it("apps NOT using the wrapper see no envelope (regression for backwards-compat)", async () => {
     const middleware = tracedMiddleware(
@@ -351,6 +415,51 @@ describe("wrapBatchedHttpHandler — failure modes", () => {
     expect(payload.batchMembers).toEqual(["polls.get"]);
     expect(typeof payload.spanId).toBe("string");
     expect(payload.spanId.length).toBeGreaterThan(0);
+
+    offLifecycleEvent("otel:trpc_batch_member_mismatch", handler_listener);
+  });
+
+  it("emits mismatch event when occurrence count exceeds positional matches (3rd invocation of a 2-member name)", async () => {
+    const handler_listener = vi.fn();
+    onLifecycleEvent("otel:trpc_batch_member_mismatch", handler_listener);
+
+    const middleware = tracedMiddleware(
+      { name: "trpc-overflow" },
+      async ({ next }: { next: () => Promise<unknown> }) => next(),
+    );
+
+    const handler = wrapBatchedHttpHandler(async () => {
+      // Envelope has polls.get TWICE. Middleware fires THREE times
+      // for polls.get — the third has no positional match.
+      await middleware({
+        path: "polls.get",
+        next: async () => ({ ok: true }),
+      } as unknown as never);
+      await middleware({
+        path: "polls.get",
+        next: async () => ({ ok: true }),
+      } as unknown as never);
+      await middleware({
+        path: "polls.get",
+        next: async () => ({ ok: true }),
+      } as unknown as never);
+      return new Response("ok");
+    });
+
+    const req = new Request(
+      "http://localhost:3000/api/trpc/polls.get,polls.get?batch=1",
+    );
+    await handler(req);
+
+    // First two invocations match positions 0 and 1; the third
+    // exceeds available positional matches and emits mismatch.
+    expect(handler_listener).toHaveBeenCalledTimes(1);
+    const payload = handler_listener.mock.calls[0][0] as {
+      procedureName: string;
+      batchMembers: ReadonlyArray<string>;
+    };
+    expect(payload.procedureName).toBe("polls.get");
+    expect(payload.batchMembers).toEqual(["polls.get", "polls.get"]);
 
     offLifecycleEvent("otel:trpc_batch_member_mismatch", handler_listener);
   });
