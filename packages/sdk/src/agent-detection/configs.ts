@@ -196,10 +196,12 @@ function hashMarkers(sdkVersion: string): MarkerPair {
  * `find_trace_candidates` as the discovery entry point and instructs
  * the agent to READ `closeMatches` / `recentRoutesSample` /
  * `recoveryActions` before pivoting to source — that is the
- * load-bearing recovery contract from MCP-025 / MCP-027 (codified in
- * `wire-mcp.ts` `ToolDiagnosticSchema` / `CandidateDiagnosticSchema`)
- * and it prevents the bail-to-source failure mode that the prior
- * SDK-050 cost-aware decision paragraph did not surface.
+ * load-bearing recovery contract from MCP-025 / MCP-027 (codified
+ * in the server-side MCP contract maintained in the private
+ * `glasstrace-product` repo's `shared/types/wire-mcp.ts` —
+ * `ToolDiagnosticSchema` / `CandidateDiagnosticSchema`) and it
+ * prevents the bail-to-source failure mode that the prior SDK-050
+ * cost-aware decision paragraph did not surface.
  *
  * The body itself lives in a sibling module
  * (`agent-instruction-text.ts`) so future content evolutions are a

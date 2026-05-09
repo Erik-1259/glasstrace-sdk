@@ -507,17 +507,23 @@ describe("generateInfoSection", () => {
           expect(info).toContain("`notAbsenceProof: true`");
         });
 
-        it("references the side-effect evidence allowlist (sideEffectSummary + 6 allowlisted keys)", () => {
+        it("references the side-effect evidence allowlist (sideEffectSummary + all 7 allowlisted keys)", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
             ENDPOINT,
             SDK_VERSION,
           );
-          // Workflow §3 — sideEffectSummary plus the six allowlisted
-          // keys from agent-evidence.ts:500-506. These are the ones
-          // that disambiguate payload bugs.
+          // Workflow §3 — sideEffectSummary plus all seven
+          // allowlisted keys from the server-side
+          // `agent-evidence.ts` SIDE_EFFECT_ALLOWED_KEYS list (lines
+          // 500-506: templateKey, providerOperation, role, locale,
+          // timezone, status, phase). These are the ones that
+          // disambiguate payload bugs. (`providerOperation` was
+          // missing from the wave's first draft and added on
+          // Copilot's review.)
           expect(info).toContain("`sideEffectSummary`");
           expect(info).toContain("`templateKey`");
+          expect(info).toContain("`providerOperation`");
           expect(info).toContain("`role`");
           expect(info).toContain("`locale`");
           expect(info).toContain("`timezone`");

@@ -16,12 +16,15 @@
  * production and must not regress).
  *
  * **Vocabulary alignment:** every MCP tool name and response-field
- * name in the body below is verified against the current
- * `@glasstrace/protocol` `wire-mcp.ts` contract. If the server-side
- * MCP contract evolves (renames a field, restructures
- * `suggestedFollowups`, etc.), update this module in lockstep with
- * the protocol change so the agent-instruction text never references
- * fields that don't exist.
+ * name in the body below is verified against the current MCP server
+ * contract maintained in the private `glasstrace-product` repo
+ * (`shared/types/wire-mcp.ts` and `shared/types/agent-evidence.ts`
+ * there); the SDK consumes the resulting wire format but does not
+ * own the schema source of truth for those tool names and field
+ * names. If the server-side MCP contract evolves (renames a field,
+ * restructures `suggestedFollowups`, adds new tools, etc.), update
+ * this module in lockstep with the protocol change so the
+ * agent-instruction text never references fields that don't exist.
  *
  * **Heuristic-first vs tool-first framing:** the body opens with
  * explicit "Call Glasstrace FIRST when" / "SKIP Glasstrace when"
@@ -73,12 +76,13 @@ export function buildAgentInstructionBody(): string {
     "### Workflow",
     "1. Start with `find_trace_candidates`. Pass whatever route or procedure name is natural — the server normalizes vocabulary and, on miss, returns close matches and a sample of routes actually present in the window.",
     "2. Take the highest-confidence candidate's `suggestedFollowups` and pass them straight to `get_trace` or `get_root_cause`.",
-    "3. For side-effect bugs, read `sideEffectSummary` in the `get_trace` / `get_root_cause` response. The allowlisted fields (`templateKey`, `role`, `locale`, `timezone`, `status`, `phase`) are the ones that disambiguate payload bugs.",
+    "3. For side-effect bugs, read `sideEffectSummary` in the `get_trace` / `get_root_cause` response. The allowlisted fields (`templateKey`, `providerOperation`, `role`, `locale`, `timezone`, `status`, `phase`) are the ones that disambiguate payload bugs.",
     "4. If a tool returns empty, READ the response's `closeMatches`, `recentRoutesSample`, and `recoveryActions` before pivoting to source. Empty results carry `notAbsenceProof: true` — they are never proof the bug did not occur.",
     "",
     "### Tools",
     "- `find_trace_candidates` — discovery, vocabulary-tolerant filter",
-    "- `get_trace` / `get_root_cause` — exact trace by id",
+    "- `get_trace` — exact trace by `traceId`",
+    "- `get_root_cause` — root-cause analysis for a `traceId`",
     "- `get_session_timeline` — events for a session",
     "- `get_latest_error` / `get_error_list` — recent server errors",
     "",
