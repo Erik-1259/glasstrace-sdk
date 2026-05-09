@@ -139,6 +139,46 @@ export interface SdkLifecycleEvents {
   "core:ready": Record<string, never>;
   "core:shutdown_started": Record<string, never>;
   "core:shutdown_completed": Record<string, never>;
+  /**
+   * The boundary-masked-error heuristic fired for an HTTP server span
+   * (SDK-051 / DISC-1125 — same-span scope). Emitted from the enriching
+   * exporter when ALL of the following hold for an HTTP server span:
+   *
+   *   1. At least one error signal is present on the span — any of:
+   *      `span.status.code === SpanStatusCode.ERROR`, an `exception`
+   *      event from `recordException()`, OR an `exception.type` /
+   *      `exception.message` span attribute.
+   *   2. `http.status_code` is in the trigger set `{200, 0, undefined}`.
+   *   3. `span.status.code` is not explicitly `OK`.
+   *
+   * When all three hold, the SDK promotes the inferred
+   * `glasstrace.http.status_code` (typically to 500, or to a value
+   * parsed from a numeric `error.type` attribute when present) and
+   * fires this event. Informational only — subscribers MAY use it for
+   * observability (e.g., heuristic activation rate dashboards) but the
+   * heuristic's behavior does NOT depend on subscribers.
+   *
+   * **Same-span scope:** this event fires when the HTTP server span
+   * itself carries the error signal (the DISC-1134 case the existing
+   * inference block already handled). Descendant-traversal detection
+   * (the page-route boundary case where the exception lives in a
+   * child span) is tracked separately and does NOT emit this event
+   * today.
+   *
+   * **PII-safety:** `exceptionMessage` is truncated to 256 characters
+   * and is the same content already present on the span's exception
+   * event or `exception.message` attribute — no new disclosure surface
+   * beyond what already ships in the trace itself. `exceptionMessage`
+   * is OMITTED from the payload entirely when no exception event /
+   * attribute is present (the `status.code === ERROR`-only case).
+   * `spanId` is the OTel span identifier for the HTTP server span
+   * where the heuristic fired.
+   */
+  "core:error_boundary_detected": {
+    spanId: string;
+    inferredStatus: number;
+    exceptionMessage?: string;
+  };
 
   "auth:key_resolved": { key: string; mode: "anonymous" | "dev" };
   "auth:claim_started": { accountId: string };

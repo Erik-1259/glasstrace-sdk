@@ -19,6 +19,21 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   HTTP_METHOD: "glasstrace.http.method",
   HTTP_STATUS_CODE: "glasstrace.http.status_code",
   HTTP_DURATION_MS: "glasstrace.http.duration_ms",
+  /**
+   * Boolean audit attribute set to `true` only when the SDK's
+   * boundary-masked-error heuristic at `enriching-exporter.ts`
+   * fires (SDK-051 / DISC-1125 — same-span scope; descendant-traversal
+   * scope is tracked in a follow-up DISC).
+   *
+   * Strict additivity: backend ingestion ignores unknown attributes
+   * today; this attribute is for audit/observability. Downstream
+   * tooling MAY surface heuristic activation rates by querying for
+   * spans with this attribute set; the backend's status-handling
+   * pipeline does NOT depend on it.
+   *
+   * Absent on spans where the heuristic did not fire.
+   */
+  HTTP_BOUNDARY_MASKED: "glasstrace.http.boundary_masked",
   ERROR_MESSAGE: "glasstrace.error.message",
   ERROR_CODE: "glasstrace.error.code",
   ERROR_CATEGORY: "glasstrace.error.category",
