@@ -260,15 +260,18 @@ describe("registerGlasstrace() Orchestrator", () => {
       // background init work (OTel registration, key resolution, init
       // POST). Real background work would be on the order of seconds
       // (network I/O); a synchronous return is on the order of
-      // single-digit milliseconds. The 500ms threshold is generous
-      // enough to tolerate CI scheduler jitter and module-import cost
-      // on slow build agents while still failing fast if a regression
-      // makes the API await something it shouldn't. Prior threshold
-      // (100ms) was tight enough that CI cold-starts intermittently
-      // exceeded it (observed at 121ms on a stable-build runner) —
-      // flake fixed by bumping to 500ms; the actual non-blocking
-      // behavior is unchanged.
-      expect(elapsed).toBeLessThan(500);
+      // single-digit milliseconds even on slow CI agents. The 200ms
+      // threshold is 2× the cold-start jitter observed on a
+      // stable-build runner (121ms; the prior 100ms threshold was too
+      // tight) while staying tight enough to fail fast if a regression
+      // accidentally awaits 150ms+ of work — exactly the class of bug
+      // this assertion is designed to catch. Earlier consideration of
+      // bumping to 500ms was rejected per Codex review of PR #273:
+      // 500ms would let regressions that await 150-400ms operations
+      // pass undetected, weakening the core guarantee. 200ms is the
+      // tightest threshold that reliably tolerates CI cold-start
+      // jitter without weakening regression coverage.
+      expect(elapsed).toBeLessThan(200);
     });
 
     it("should send init request to the backend in the background", async () => {
