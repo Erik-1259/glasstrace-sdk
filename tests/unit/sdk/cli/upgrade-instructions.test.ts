@@ -273,6 +273,50 @@ describe("runUpgradeInstructions", () => {
   // detect.ts that becomes more lenient about R_OK or against TOCTOU
   // (file readable at detect time, unreadable at refresh time).
 
+  it("Codex P2 v5 regression: monorepo legacy-path resolution — agent detected via walk-up to git root resolves legacy paths against the foundDir, not against projectRoot", async () => {
+    // Monorepo layout: testDir is the git root; the Codex legacy
+    // file `codex.md` lives at the git root with a managed section;
+    // the SDK is initialized in `packages/api/`. The agent is
+    // detected via walk-up to the git root, so `agent.infoFilePath`
+    // points at the gitRoot's AGENTS.md. The legacy-path helper
+    // must resolve `codex.md` against the gitRoot (foundDir
+    // derived from infoFilePath), NOT against the projectRoot
+    // (`packages/api/`), or the migration would skip the user.
+    await mkdir(join(testDir, ".git"), { recursive: true });
+    await writeFile(
+      join(testDir, "package.json"),
+      JSON.stringify({ name: "monorepo" }),
+    );
+    // Legacy codex.md at the git root with a stale managed section.
+    await writeFile(
+      join(testDir, "codex.md"),
+      [
+        "<!-- glasstrace:mcp:start v=1.0.0 -->",
+        "old codex content",
+        "<!-- glasstrace:mcp:end -->",
+      ].join("\n"),
+      "utf-8",
+    );
+    const apiDir = join(testDir, "packages", "api");
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(
+      join(apiDir, "package.json"),
+      JSON.stringify({ name: "api" }),
+    );
+
+    const result = await runUpgradeInstructions({ projectRoot: apiDir });
+
+    expect(result.exitCode).toBe(0);
+    // The legacy codex.md at the git root is detected as
+    // having a managed section → codex is opted in → AGENTS.md
+    // gets created at the git root (where the agent's foundDir
+    // resolved to).
+    const agentsMdPath = join(testDir, "AGENTS.md");
+    const agentsMd = await readFile(agentsMdPath, "utf-8");
+    expect(agentsMd).toContain("<!-- glasstrace:mcp:start v=");
+    expect(agentsMd).toContain("Glasstrace MCP");
+  });
+
   it("returns no refreshed entries when no opted-in markers exist (Wave 18: generic fallback's canonical AGENTS.md is created only when a managed section already exists somewhere)", async () => {
     // Only `.git/` and `package.json` — no agent markers, no
     // pre-existing managed section anywhere. The Wave 18 opt-in

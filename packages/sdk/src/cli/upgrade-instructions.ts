@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { MCP_ENDPOINT } from "../mcp-runtime.js";
 import { detectAgents } from "../agent-detection/detect.js";
 import { hasManagedSection } from "../agent-detection/inject.js";
@@ -12,17 +12,37 @@ import type { DetectedAgent } from "../agent-detection/detect.js";
  * users who installed via an older SDK and need their managed section
  * migrated to the Wave 18 canonical destinations.
  */
-function legacyDestinationsForAgent(
-  name: DetectedAgent["name"],
-  projectRoot: string,
-): string[] {
-  switch (name) {
+function legacyDestinationsForAgent(agent: DetectedAgent): string[] {
+  // Resolve legacy paths relative to the agent's detected `foundDir`
+  // (the directory where `detectAgents` resolved the marker), NOT
+  // against the project root. `detectAgents` walks up to the git
+  // root for monorepo support, so for a project initialized in
+  // `packages/api/` with a legacy `codex.md` at the git root, the
+  // detected agent's `infoFilePath` is `<gitRoot>/AGENTS.md` and we
+  // need the legacy `codex.md` to resolve under `<gitRoot>`, not
+  // under `packages/api/` (Codex P2 review of v5).
+  if (agent.infoFilePath === null) {
+    return [];
+  }
+  switch (agent.name) {
     case "codex":
-      return [join(projectRoot, "codex.md")];
+      // agent.infoFilePath = <foundDir>/AGENTS.md → foundDir = dirname
+      return [join(dirname(agent.infoFilePath), "codex.md")];
     case "cursor":
-      return [join(projectRoot, ".cursorrules")];
+      // agent.infoFilePath = <foundDir>/.cursor/rules/glasstrace.mdc
+      // → foundDir = dirname(dirname(dirname(infoFilePath)))
+      return [
+        join(dirname(dirname(dirname(agent.infoFilePath))), ".cursorrules"),
+      ];
     case "windsurf":
-      return [join(projectRoot, ".windsurfrules")];
+      // agent.infoFilePath = <foundDir>/.windsurf/rules/glasstrace.md
+      // → foundDir = dirname(dirname(dirname(infoFilePath)))
+      return [
+        join(
+          dirname(dirname(dirname(agent.infoFilePath))),
+          ".windsurfrules",
+        ),
+      ];
     case "claude":
     case "gemini":
     case "generic":
@@ -191,10 +211,7 @@ export async function runUpgradeInstructions(
     // destination AND the agent's known legacy destinations. If
     // either has a managed section the user has opted in; refresh
     // proceeds. If neither has one, the user opted out; skip.
-    const legacyDestinations = legacyDestinationsForAgent(
-      agent.name,
-      options.projectRoot,
-    );
+    const legacyDestinations = legacyDestinationsForAgent(agent);
     let optedIn: boolean;
     try {
       optedIn = await anyHasManagedSection([
