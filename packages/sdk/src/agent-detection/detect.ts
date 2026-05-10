@@ -42,34 +42,62 @@ const AGENT_RULES: AgentRule[] = [
   },
   {
     name: "codex",
+    // Codex 2026 default discovery is `AGENTS.override.md` → `AGENTS.md` →
+    // opt-in `project_doc_fallback_filenames`; `codex.md` is NOT in the
+    // default fallback list. Detection requires Codex-specific markers
+    // (`codex.md` legacy, `.codex/` config dir) — `AGENTS.md` is NOT
+    // included as a marker because the SDK now writes `AGENTS.md`
+    // broadly via the multi-target dispatcher's companion writes; if
+    // `AGENTS.md` were a Codex marker, every project with the SDK's
+    // own companion AGENTS.md would re-classify as Codex on subsequent
+    // detect runs and trigger unintended `.codex/config.toml` writes
+    // (Codex P1 + Copilot P1 review of Wave 18 PR #274). The canonical
+    // write destination remains AGENTS.md regardless of which marker
+    // classified the project.
     markers: ["codex.md", ".codex"],
     mcpConfigPath: (dir) => join(dir, ".codex", "config.toml"),
-    infoFilePath: (dir) => join(dir, "codex.md"),
+    infoFilePath: (dir) => join(dir, "AGENTS.md"),
     cliBinary: "codex",
     registrationCommand: "npx glasstrace mcp add --agent codex",
   },
   {
     name: "gemini",
-    markers: [".gemini"],
+    markers: [".gemini", "GEMINI.md"],
     mcpConfigPath: (dir) => join(dir, ".gemini", "settings.json"),
-    infoFilePath: () => null,
+    infoFilePath: (dir) => join(dir, "GEMINI.md"),
     cliBinary: "gemini",
     registrationCommand: "npx glasstrace mcp add --agent gemini",
   },
   {
     name: "cursor",
+    // `.cursor/rules/*.mdc` is the current canonical format per Cursor's
+    // 2026 docs. `.cursorrules` (single file) is supported-but-deprecated
+    // and stays as a transitional fallback that the multi-target write
+    // helper writes unconditionally alongside the .mdc canonical.
     markers: [".cursor", ".cursorrules"],
     mcpConfigPath: (dir) => join(dir, ".cursor", "mcp.json"),
-    infoFilePath: (dir) => join(dir, ".cursorrules"),
+    infoFilePath: (dir) => join(dir, ".cursor", "rules", "glasstrace.mdc"),
     cliBinary: null,
     registrationCommand: "npx glasstrace mcp add --agent cursor",
   },
   {
     name: "windsurf",
-    markers: [".windsurfrules", ".windsurf"],
+    // Windsurf's current canonical workspace-rules format is
+    // `.windsurf/rules/*.md`. AGENTS.md is a parallel cross-tool
+    // mechanism Windsurf also reads BUT is NOT included as a Windsurf
+    // detection marker — the SDK writes `AGENTS.md` broadly via the
+    // multi-target dispatcher's companion writes, so treating
+    // `AGENTS.md` as a Windsurf marker would re-classify every
+    // SDK-managed project as Windsurf and cause `glasstrace uninit`
+    // to mutate the global `~/.codeium/windsurf/mcp_config.json` for
+    // non-Windsurf projects (Codex P1 + Copilot P1 review of Wave 18
+    // PR #274). The single-file `.windsurfrules` is the deprecated
+    // legacy form — recognized as a marker so legacy projects classify
+    // correctly, but the SDK no longer writes to it.
+    markers: [".windsurf", ".windsurfrules"],
     mcpConfigPath: () =>
       join(homedir(), ".codeium", "windsurf", "mcp_config.json"),
-    infoFilePath: (dir) => join(dir, ".windsurfrules"),
+    infoFilePath: (dir) => join(dir, ".windsurf", "rules", "glasstrace.md"),
     cliBinary: null,
     registrationCommand: "npx glasstrace mcp add --agent windsurf",
   },
@@ -207,11 +235,16 @@ export async function detectAgents(
     }
     seenAgents.add(rule.name);
 
-    // Determine info file path — only include if the file actually exists
-    let infoFilePath = rule.infoFilePath(foundDir);
-    if (infoFilePath !== null && !(await pathExists(infoFilePath))) {
-      infoFilePath = null;
-    }
+    // Determine info file path. Wave 18: dropped the prior path-exists
+    // gate that nulled out infoFilePath when the file didn't pre-exist —
+    // the DISC-1592 / DISC-1602 marker contract makes file creation safe
+    // (idempotent in-place replacement on re-runs), and `inject.ts`'s
+    // existing create-or-replace logic already handles missing-file
+    // creation under the same marker contract. The gate was a safety
+    // guard added BEFORE the marker contract existed; with the contract
+    // soaked in production it became a gratuitous skip that left new
+    // installs with no managed section.
+    const infoFilePath = rule.infoFilePath(foundDir);
 
     const cliAvailable = rule.cliBinary
       ? await isCliAvailable(rule.cliBinary)
@@ -226,11 +259,16 @@ export async function detectAgents(
     });
   }
 
-  // Always include generic fallback
+  // Always include generic fallback. Wave 18: write AGENTS.md as the
+  // universal cross-tool fallback (per the agents.md spec governed by
+  // the Agentic AI Foundation under the Linux Foundation; adopted by
+  // Cursor, Codex, Claude Code, Copilot, Devin, Windsurf, and Gemini
+  // CLI). Generic-detected projects (no per-agent markers) previously
+  // got NO instruction injection at all.
   detected.push({
     name: "generic",
     mcpConfigPath: join(resolvedRoot, ".glasstrace", "mcp.json"),
-    infoFilePath: null,
+    infoFilePath: join(resolvedRoot, "AGENTS.md"),
     cliAvailable: false,
     registrationCommand: null,
   });

@@ -92,8 +92,11 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     setCoreState(CoreState.REGISTERING);
 
     // SDK-050 / DISC-1592: emit a one-time stderr warning if the project's
-    // agent instruction file (CLAUDE.md / codex.md / .cursorrules) carries
-    // a managed-section stamp older than the running SDK version. The
+    // agent instruction file (any of AGENTS.md / CLAUDE.md / GEMINI.md /
+    // .cursor/rules/glasstrace.mdc / .windsurf/rules/glasstrace.md /
+    // .cursorrules / codex.md / .windsurfrules — Wave 18 expanded set
+    // per DISC-1782) carries a managed-section stamp older than the
+    // running SDK version. The
     // helper is best-effort, never throws, never mutates files, and
     // respects the GLASSTRACE_DISABLE_UPGRADE_NOTICE opt-out. Placed after
     // the Node-runtime guard above so it cannot fire in non-Node contexts.

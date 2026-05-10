@@ -113,11 +113,49 @@ including composite invocations like `glasstrace init --yes --help`
 ## Refreshing agent instruction guidance
 
 `glasstrace init` and `glasstrace mcp add` write a managed Glasstrace
-MCP section into your project's agent instruction file (CLAUDE.md /
-codex.md / .cursorrules). The section opens with a cost-aware
-cross-tool decision paragraph telling your AI agent **when** Glasstrace
-MCP is worth calling and **which** tool is the cheapest first call for
-each symptom class.
+MCP section into your project's agent instruction file(s). Per the
+2026 cross-tool standard governed by the Agentic AI Foundation under
+the Linux Foundation (`agents.md`), the SDK writes:
+
+- **`AGENTS.md`** — universal cross-tool destination. Read by Cursor,
+  Codex, Claude Code, GitHub Copilot, Devin, Windsurf, and Gemini CLI.
+  Always written.
+- **`CLAUDE.md`** — Claude Code primary canonical destination.
+- **`GEMINI.md`** — Gemini CLI primary canonical destination (default
+  `context.fileName`).
+- **`.cursor/rules/glasstrace.mdc`** — Cursor canonical 2026
+  destination (Markdown-extension format with YAML frontmatter
+  `alwaysApply: true`); plus `.cursorrules` written unconditionally
+  as a transitional fallback for migration teams on mixed Cursor
+  versions.
+- **`.windsurf/rules/glasstrace.md`** — Windsurf workspace-rules
+  directory (active first-class format per Windsurf's docs at
+  `windsurf.com/university`).
+
+The section opens with explicit "Call Glasstrace FIRST when" / "SKIP
+Glasstrace when" decision rules telling your AI agent **when**
+Glasstrace MCP is worth calling and **which** tool is the cheapest
+first call for each symptom class.
+
+### Migration from legacy filenames
+
+If you installed `@glasstrace/sdk` before v1.11 (Wave 18 / DISC-1782),
+your project may have a managed Glasstrace block in legacy
+destinations the SDK no longer writes to as primary:
+
+- `codex.md` (Codex now reads `AGENTS.md` by default)
+- `.windsurfrules` (Windsurf moved to `.windsurf/rules/*.md`)
+
+Run `npx glasstrace upgrade-instructions` to migrate: the managed
+section is created at the new canonical destination(s). The legacy
+files are left untouched (their managed sections become stale but
+your free-text content is preserved); copy any custom prose from the
+legacy file to `AGENTS.md` to keep your agent's visibility into it.
+
+If you need to roll back to a pre-v1.11 SDK, pin to `~1.10.0` in
+`package.json`; the older SDK does not recognize `AGENTS.md` /
+`GEMINI.md` / `.cursor/rules/` as agent-instruction targets so its
+stale-section warning will not see them.
 
 The managed section's start marker carries an SDK version stamp, e.g.
 `<!-- glasstrace:mcp:start v=1.5.0 -->`. When you upgrade

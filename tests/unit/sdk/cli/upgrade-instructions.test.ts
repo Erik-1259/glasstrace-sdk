@@ -150,7 +150,7 @@ describe("runUpgradeInstructions", () => {
     expect(written).toBe(claudeBody);
   });
 
-  it("refreshes every detected file in a multi-file project (CLAUDE.md + .cursorrules)", async () => {
+  it("refreshes every detected file in a multi-file project (Wave 18: writes canonical 2026 destinations + transitional .cursorrules)", async () => {
     const claudeBody = [
       "<!-- glasstrace:mcp:start v=1.0.0 -->",
       "old claude",
@@ -169,36 +169,72 @@ describe("runUpgradeInstructions", () => {
     const result = await runUpgradeInstructions({ projectRoot: testDir });
 
     expect(result.exitCode).toBe(0);
-    expect(result.refreshed.sort()).toEqual([".cursorrules", "CLAUDE.md"]);
+    // Wave 18: refreshed list reports the canonical destinations
+    // (CLAUDE.md, .cursor/rules/glasstrace.mdc) — the legacy
+    // .cursorrules is also written via the multi-target dispatcher
+    // as a transitional fallback but is not separately listed in
+    // `refreshed` since it follows the canonical destination.
+    expect(result.refreshed.sort()).toEqual([
+      ".cursor/rules/glasstrace.mdc",
+      "CLAUDE.md",
+    ]);
 
     const claudeAfter = await readFile(join(testDir, "CLAUDE.md"), "utf-8");
-    const cursorAfter = await readFile(join(testDir, ".cursorrules"), "utf-8");
     expect(claudeAfter).not.toContain("old claude");
-    expect(cursorAfter).not.toContain("old cursor (legacy)");
     expect(claudeAfter).toContain("<!-- glasstrace:mcp:start v=");
-    expect(cursorAfter).toContain("# glasstrace:mcp:start v=");
+
+    // The legacy .cursorrules (transitional fallback) is also
+    // refreshed by the multi-target dispatcher; hash markers are
+    // preserved per generateInfoSectionForCursorrulesLegacy.
+    const cursorRulesAfter = await readFile(
+      join(testDir, ".cursorrules"),
+      "utf-8",
+    );
+    expect(cursorRulesAfter).not.toContain("old cursor (legacy)");
+    expect(cursorRulesAfter).toContain("# glasstrace:mcp:start v=");
+
+    // The canonical .cursor/rules/glasstrace.mdc destination was
+    // created with YAML frontmatter + HTML markers per Wave 18.
+    const mdcAfter = await readFile(
+      join(testDir, ".cursor", "rules", "glasstrace.mdc"),
+      "utf-8",
+    );
+    expect(mdcAfter).toContain("alwaysApply: true");
+    expect(mdcAfter).toContain("<!-- glasstrace:mcp:start v=");
   });
 
-  it("refreshes only the file that has a managed section, leaving others alone", async () => {
+  it("refreshes when ANY known destination has a managed section (Wave 18 broadened opt-in gate per DISC-1782)", async () => {
+    // Pre-Wave-18 the gate was "canonical infoFilePath has managed
+    // section". Post-Wave-18 the canonical destinations changed for
+    // most agents (Codex codex.md → AGENTS.md; Cursor .cursorrules →
+    // .cursor/rules/glasstrace.mdc; etc.) so the gate now also
+    // checks legacy destinations to avoid skipping legacy users.
     const claudeBody = [
       "<!-- glasstrace:mcp:start v=1.0.0 -->",
       "old",
       "<!-- glasstrace:mcp:end -->",
     ].join("\n");
-    const cursorBody = "Hand-written cursor rules — no Glasstrace block.\n";
+    // Cursor project: legacy .cursorrules has a managed section but
+    // the new canonical .cursor/rules/glasstrace.mdc does not exist
+    // yet. Wave 18 should still refresh (migrate) because the legacy
+    // destination has a section.
+    const cursorLegacyBody = [
+      "# glasstrace:mcp:start v=1.0.0",
+      "old legacy cursor",
+      "# glasstrace:mcp:end",
+    ].join("\n");
     await scaffoldProject(testDir, ["claude", "cursor"], {
       "CLAUDE.md": claudeBody,
-      ".cursorrules": cursorBody,
+      ".cursorrules": cursorLegacyBody,
     });
 
     const result = await runUpgradeInstructions({ projectRoot: testDir });
 
     expect(result.exitCode).toBe(0);
-    expect(result.refreshed).toEqual(["CLAUDE.md"]);
-    expect(result.skipped).toEqual([".cursorrules"]);
-
-    const cursorAfter = await readFile(join(testDir, ".cursorrules"), "utf-8");
-    expect(cursorAfter).toBe(cursorBody);
+    expect(result.refreshed.sort()).toEqual([
+      ".cursor/rules/glasstrace.mdc",
+      "CLAUDE.md",
+    ]);
   });
 
   it("re-running the command produces byte-for-byte identical output (idempotent)", async () => {
@@ -237,8 +273,57 @@ describe("runUpgradeInstructions", () => {
   // detect.ts that becomes more lenient about R_OK or against TOCTOU
   // (file readable at detect time, unreadable at refresh time).
 
-  it("returns no refreshed entries when no agents are detected", async () => {
-    // Only `.git/` and `package.json` — no agent markers at all.
+  it("Codex P2 v5 regression: monorepo legacy-path resolution — agent detected via walk-up to git root resolves legacy paths against the foundDir, not against projectRoot", async () => {
+    // Monorepo layout: testDir is the git root; the Codex legacy
+    // file `codex.md` lives at the git root with a managed section;
+    // the SDK is initialized in `packages/api/`. The agent is
+    // detected via walk-up to the git root, so `agent.infoFilePath`
+    // points at the gitRoot's AGENTS.md. The legacy-path helper
+    // must resolve `codex.md` against the gitRoot (foundDir
+    // derived from infoFilePath), NOT against the projectRoot
+    // (`packages/api/`), or the migration would skip the user.
+    await mkdir(join(testDir, ".git"), { recursive: true });
+    await writeFile(
+      join(testDir, "package.json"),
+      JSON.stringify({ name: "monorepo" }),
+    );
+    // Legacy codex.md at the git root with a stale managed section.
+    await writeFile(
+      join(testDir, "codex.md"),
+      [
+        "<!-- glasstrace:mcp:start v=1.0.0 -->",
+        "old codex content",
+        "<!-- glasstrace:mcp:end -->",
+      ].join("\n"),
+      "utf-8",
+    );
+    const apiDir = join(testDir, "packages", "api");
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(
+      join(apiDir, "package.json"),
+      JSON.stringify({ name: "api" }),
+    );
+
+    const result = await runUpgradeInstructions({ projectRoot: apiDir });
+
+    expect(result.exitCode).toBe(0);
+    // The legacy codex.md at the git root is detected as
+    // having a managed section → codex is opted in → AGENTS.md
+    // gets created at the git root (where the agent's foundDir
+    // resolved to).
+    const agentsMdPath = join(testDir, "AGENTS.md");
+    const agentsMd = await readFile(agentsMdPath, "utf-8");
+    expect(agentsMd).toContain("<!-- glasstrace:mcp:start v=");
+    expect(agentsMd).toContain("Glasstrace MCP");
+  });
+
+  it("returns no refreshed entries when no opted-in markers exist (Wave 18: generic fallback's canonical AGENTS.md is created only when a managed section already exists somewhere)", async () => {
+    // Only `.git/` and `package.json` — no agent markers, no
+    // pre-existing managed section anywhere. The Wave 18 opt-in
+    // gate (anyHasManagedSection across canonical + legacy) returns
+    // false, so the generic fallback is skipped — upgrade-
+    // instructions does not first-time-install AGENTS.md without
+    // a prior opt-in signal.
     await mkdir(join(testDir, ".git"), { recursive: true });
     await writeFile(
       join(testDir, "package.json"),
@@ -249,6 +334,9 @@ describe("runUpgradeInstructions", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.refreshed).toEqual([]);
-    expect(result.skipped).toEqual([]);
+    // The generic fallback's AGENTS.md is added to skipped because
+    // the agent loop iterates it (infoFilePath !== null after
+    // Wave 18) and the opt-in gate returns false.
+    expect(result.skipped).toEqual(["AGENTS.md"]);
   });
 });

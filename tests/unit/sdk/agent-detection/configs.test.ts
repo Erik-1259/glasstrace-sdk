@@ -393,10 +393,10 @@ describe("generateInfoSection", () => {
   });
 
   describe("Cursor info section", () => {
-    it("uses hash comment markers", () => {
+    it("uses HTML comment markers (Wave 18: cursor canonical destination is .cursor/rules/glasstrace.mdc which is Markdown-extension; prior hash markers were for the legacy .cursorrules file)", () => {
       const info = generateInfoSection(makeAgent("cursor"), ENDPOINT, SDK_VERSION);
-      expect(info).toContain("# glasstrace:mcp:start");
-      expect(info).toContain("# glasstrace:mcp:end");
+      expect(info).toContain("<!-- glasstrace:mcp:start");
+      expect(info).toContain("<!-- glasstrace:mcp:end -->");
     });
 
     it("does NOT contain any auth token", () => {
@@ -416,20 +416,32 @@ describe("generateInfoSection", () => {
     });
   });
 
-  describe("agents with no info section", () => {
-    it("returns empty string for gemini", () => {
+  describe("Wave 18: all agents now render an info section", () => {
+    // Pre-Wave-18 the gemini/windsurf/generic branches returned ""
+    // because the SDK had no canonical destination wired for them.
+    // Wave 18 (DISC-1782) wires every agent to a 2026 canonical
+    // destination (GEMINI.md / .windsurf/rules/glasstrace.md /
+    // AGENTS.md) so generateInfoSection now returns content for all
+    // six agents.
+    it("renders the body for gemini wrapped in HTML markers", () => {
       const info = generateInfoSection(makeAgent("gemini"), ENDPOINT, SDK_VERSION);
-      expect(info).toBe("");
+      expect(info).toContain("<!-- glasstrace:mcp:start");
+      expect(info).toContain("<!-- glasstrace:mcp:end -->");
+      expect(info).toContain("Glasstrace MCP");
     });
 
-    it("returns empty string for windsurf", () => {
+    it("renders the body for windsurf wrapped in HTML markers", () => {
       const info = generateInfoSection(makeAgent("windsurf"), ENDPOINT, SDK_VERSION);
-      expect(info).toBe("");
+      expect(info).toContain("<!-- glasstrace:mcp:start");
+      expect(info).toContain("<!-- glasstrace:mcp:end -->");
+      expect(info).toContain("Glasstrace MCP");
     });
 
-    it("returns empty string for generic", () => {
+    it("renders the body for generic wrapped in HTML markers (universal AGENTS.md fallback)", () => {
       const info = generateInfoSection(makeAgent("generic"), ENDPOINT, SDK_VERSION);
-      expect(info).toBe("");
+      expect(info).toContain("<!-- glasstrace:mcp:start");
+      expect(info).toContain("<!-- glasstrace:mcp:end -->");
+      expect(info).toContain("Glasstrace MCP");
     });
   });
 
@@ -454,7 +466,15 @@ describe("generateInfoSection", () => {
     const TARGETS = [
       { name: "claude" as const, markerKind: "html" as const },
       { name: "codex" as const, markerKind: "html" as const },
-      { name: "cursor" as const, markerKind: "hash" as const },
+      // Wave 18 (DISC-1782): Cursor's canonical destination changed
+      // from `.cursorrules` (hash markers) to `.cursor/rules/
+      // glasstrace.mdc` (Markdown-extension format with HTML markers).
+      // The legacy `.cursorrules` transitional fallback retains hash
+      // markers via `generateInfoSectionForCursorrulesLegacy`.
+      { name: "cursor" as const, markerKind: "html" as const },
+      { name: "gemini" as const, markerKind: "html" as const },
+      { name: "windsurf" as const, markerKind: "html" as const },
+      { name: "generic" as const, markerKind: "html" as const },
     ];
 
     for (const target of TARGETS) {

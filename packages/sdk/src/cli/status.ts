@@ -20,11 +20,20 @@ const MCP_TOML_FILES = [".codex/config.toml"] as const;
 
 /**
  * Agent info files that may contain glasstrace marker sections.
+ * Wave 18 (DISC-1782) expanded the canonical set to follow the 2026
+ * cross-tool standard. Canonical 2026 destinations first, legacy
+ * destinations last (still scanned so `glasstrace status` can
+ * surface stale sections from pre-Wave-18 installs).
  */
 const AGENT_INFO_FILES = [
+  "AGENTS.md",
   "CLAUDE.md",
-  "codex.md",
+  "GEMINI.md",
+  ".cursor/rules/glasstrace.mdc",
+  ".windsurf/rules/glasstrace.md",
   ".cursorrules",
+  "codex.md",
+  ".windsurfrules",
 ] as const;
 
 /**

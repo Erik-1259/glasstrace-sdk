@@ -22,8 +22,9 @@ import {
 import { buildImportGraph } from "../import-graph.js";
 import { getOrCreateAnonKey, readAnonKey } from "../anon-key.js";
 import { detectAgents } from "../agent-detection/detect.js";
-import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
-import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
+import { generateMcpConfig } from "../agent-detection/configs.js";
+import { injectAllTargets } from "../agent-detection/inject-all-targets.js";
+import { writeMcpConfig, updateGitignore } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
 import { NEXT_CONFIG_NAMES, formatAgentName } from "./constants.js";
 import { resolveProjectRoot } from "./monorepo.js";
@@ -847,6 +848,16 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       }
 
       const configuredNames: string[] = [];
+      // Track agents whose MCP config was successfully installed (or
+      // a user-preserved existing config was detected). Only these
+      // agents get an instruction-section write — instruction blocks
+      // tell the assistant to call Glasstrace MCP, so writing them
+      // for agents whose MCP registration was skipped/failed would
+      // misconfigure the project (Codex P1 review of v2). The set
+      // mirrors the pre-Wave-18 per-agent `if (configExists) inject`
+      // gate, but accumulates across the loop for a single hoisted
+      // multi-target dispatch after.
+      const agentsWithMcpReady: DetectedAgent[] = [];
 
       for (const agent of agents) {
         try {
@@ -871,6 +882,12 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
               // marker file still gets written — otherwise nudges would
               // nag the user about MCP setup they consciously preserved.
               anyConfigWritten = true;
+              // The user explicitly preserved their existing MCP
+              // config — they have a working registration. Include
+              // the agent in the instruction-write set so the
+              // assistant-facing block stays in sync with the
+              // user-managed config.
+              agentsWithMcpReady.push(agent);
             }
             continue;
           }
@@ -886,17 +903,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
 
           anyConfigWritten = true;
           anyConfigRewrittenWithBearer = true;
-
-          const sdkVersionForInject =
-            typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
-          const infoContent = generateInfoSection(
-            agent,
-            MCP_ENDPOINT,
-            sdkVersionForInject,
-          );
-          if (infoContent !== "") {
-            await injectInfoSection(agent, infoContent, projectRoot);
-          }
+          agentsWithMcpReady.push(agent);
 
           if (agent.name !== "generic") {
             configuredNames.push(formatAgentName(agent.name));
@@ -904,6 +911,55 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
         } catch (agentErr) {
           warnings.push(
             `Failed to configure MCP for ${agent.name}: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`,
+          );
+        }
+      }
+
+      // Wave 18: hoisted multi-target info-section write per
+      // DISC-1782. The new `injectAllTargets` dispatcher handles
+      // every successfully-configured agent's full target set
+      // (per-agent canonical + AGENTS.md universal companion +
+      // Cursor `.cursorrules` transitional fallback) with cross-
+      // agent AGENTS.md dedup and fail-loud-per-target failure
+      // semantics. Restricted to `agentsWithMcpReady` (not the full
+      // `agents` list) per Codex P1 review of v2: instruction blocks
+      // direct the assistant to call Glasstrace MCP, so writing them
+      // for agents whose MCP registration was skipped or failed
+      // would misconfigure the project.
+      //
+      // Generic gating per Codex P1 review of v3: the always-present
+      // `generic` fallback usually succeeds (its config goes to
+      // `.glasstrace/mcp.json` which doesn't collide with anything),
+      // so `agentsWithMcpReady` can contain ONLY `generic` even when
+      // every detected non-generic agent's MCP config write failed.
+      // In that case writing the universal AGENTS.md still directs
+      // any detected non-generic agent (Claude, Codex, Cursor, etc.)
+      // to call Glasstrace MCP through a registration that wasn't
+      // installed for it — the same misconfiguration class. Filter
+      // generic out unless generic is the SOLE detected agent (i.e.
+      // a project with no per-agent markers at all, where the user
+      // manually points their tooling at `.glasstrace/mcp.json`).
+      const detectedNonGeneric = agents.filter((a) => a.name !== "generic");
+      const nonGenericReady = agentsWithMcpReady.filter(
+        (a) => a.name !== "generic",
+      );
+      const dispatchSet =
+        detectedNonGeneric.length === 0
+          ? agentsWithMcpReady
+          : nonGenericReady;
+      if (dispatchSet.length > 0) {
+        const sdkVersionForInject =
+          typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
+        try {
+          await injectAllTargets(
+            dispatchSet,
+            MCP_ENDPOINT,
+            sdkVersionForInject,
+            projectRoot,
+          );
+        } catch (injectErr) {
+          warnings.push(
+            `Failed to write agent-instruction files: ${injectErr instanceof Error ? injectErr.message : String(injectErr)}`,
           );
         }
       }
