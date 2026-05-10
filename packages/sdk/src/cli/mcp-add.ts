@@ -393,18 +393,37 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
   // both failed would misconfigure the project (e.g. instructions
   // appear telling the assistant to use Glasstrace MCP even though
   // `mcp add` reported failure).
+  //
+  // Generic gating per Codex P1 review of v3: the always-present
+  // `generic` fallback usually succeeds, so `agentsWithMcpReady` can
+  // contain ONLY `generic` even when every detected non-generic
+  // registration failed. Writing the universal AGENTS.md in that
+  // case still directs any detected non-generic agent (Claude,
+  // Codex, Cursor, etc.) to call Glasstrace MCP through a
+  // registration that wasn't installed for it. Filter generic out
+  // unless generic is the SOLE detected agent.
   const successfulAgentNames = new Set(
     results.filter((r) => r.success).map((r) => r.agent),
   );
   const agentsWithMcpReady = targetAgents.filter((a) =>
     successfulAgentNames.has(a.name),
   );
-  if (agentsWithMcpReady.length > 0) {
+  const detectedNonGenericMcpAdd = targetAgents.filter(
+    (a) => a.name !== "generic",
+  );
+  const nonGenericReadyMcpAdd = agentsWithMcpReady.filter(
+    (a) => a.name !== "generic",
+  );
+  const dispatchSetMcpAdd =
+    detectedNonGenericMcpAdd.length === 0
+      ? agentsWithMcpReady
+      : nonGenericReadyMcpAdd;
+  if (dispatchSetMcpAdd.length > 0) {
     const sdkVersion =
       typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
     try {
       await injectAllTargets(
-        agentsWithMcpReady,
+        dispatchSetMcpAdd,
         MCP_ENDPOINT,
         sdkVersion,
         projectRoot,

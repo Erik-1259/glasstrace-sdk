@@ -926,12 +926,33 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       // direct the assistant to call Glasstrace MCP, so writing them
       // for agents whose MCP registration was skipped or failed
       // would misconfigure the project.
-      if (agentsWithMcpReady.length > 0) {
+      //
+      // Generic gating per Codex P1 review of v3: the always-present
+      // `generic` fallback usually succeeds (its config goes to
+      // `.glasstrace/mcp.json` which doesn't collide with anything),
+      // so `agentsWithMcpReady` can contain ONLY `generic` even when
+      // every detected non-generic agent's MCP config write failed.
+      // In that case writing the universal AGENTS.md still directs
+      // any detected non-generic agent (Claude, Codex, Cursor, etc.)
+      // to call Glasstrace MCP through a registration that wasn't
+      // installed for it — the same misconfiguration class. Filter
+      // generic out unless generic is the SOLE detected agent (i.e.
+      // a project with no per-agent markers at all, where the user
+      // manually points their tooling at `.glasstrace/mcp.json`).
+      const detectedNonGeneric = agents.filter((a) => a.name !== "generic");
+      const nonGenericReady = agentsWithMcpReady.filter(
+        (a) => a.name !== "generic",
+      );
+      const dispatchSet =
+        detectedNonGeneric.length === 0
+          ? agentsWithMcpReady
+          : nonGenericReady;
+      if (dispatchSet.length > 0) {
         const sdkVersionForInject =
           typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
         try {
           await injectAllTargets(
-            agentsWithMcpReady,
+            dispatchSet,
             MCP_ENDPOINT,
             sdkVersionForInject,
             projectRoot,
