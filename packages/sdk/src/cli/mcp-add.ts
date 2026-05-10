@@ -382,18 +382,29 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
   }
 
   // Wave 18: hoisted multi-target info-section write per DISC-1782.
-  // The new `injectAllTargets` dispatcher handles every detected
-  // agent's full target set (per-agent canonical + AGENTS.md
-  // universal companion + Cursor `.cursorrules` transitional
-  // fallback) with cross-agent AGENTS.md dedup and fail-loud-per-
-  // target failure semantics. Replaces the prior per-agent
-  // `generateInfoSection` + `injectInfoSection` pair inside the loop.
-  if (targetAgents.length > 0) {
+  // The new `injectAllTargets` dispatcher handles every successfully-
+  // registered agent's full target set (per-agent canonical +
+  // AGENTS.md universal companion + Cursor `.cursorrules`
+  // transitional fallback) with cross-agent AGENTS.md dedup and
+  // fail-loud-per-target failure semantics. Restricted to agents
+  // whose `results` entry is `success: true` per Codex P1 review of
+  // v2: instruction blocks direct the assistant to call Glasstrace
+  // MCP, so writing them for agents whose CLI AND file registration
+  // both failed would misconfigure the project (e.g. instructions
+  // appear telling the assistant to use Glasstrace MCP even though
+  // `mcp add` reported failure).
+  const successfulAgentNames = new Set(
+    results.filter((r) => r.success).map((r) => r.agent),
+  );
+  const agentsWithMcpReady = targetAgents.filter((a) =>
+    successfulAgentNames.has(a.name),
+  );
+  if (agentsWithMcpReady.length > 0) {
     const sdkVersion =
       typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
     try {
       await injectAllTargets(
-        targetAgents,
+        agentsWithMcpReady,
         MCP_ENDPOINT,
         sdkVersion,
         projectRoot,

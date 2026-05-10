@@ -848,6 +848,16 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       }
 
       const configuredNames: string[] = [];
+      // Track agents whose MCP config was successfully installed (or
+      // a user-preserved existing config was detected). Only these
+      // agents get an instruction-section write — instruction blocks
+      // tell the assistant to call Glasstrace MCP, so writing them
+      // for agents whose MCP registration was skipped/failed would
+      // misconfigure the project (Codex P1 review of v2). The set
+      // mirrors the pre-Wave-18 per-agent `if (configExists) inject`
+      // gate, but accumulates across the loop for a single hoisted
+      // multi-target dispatch after.
+      const agentsWithMcpReady: DetectedAgent[] = [];
 
       for (const agent of agents) {
         try {
@@ -872,6 +882,12 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
               // marker file still gets written — otherwise nudges would
               // nag the user about MCP setup they consciously preserved.
               anyConfigWritten = true;
+              // The user explicitly preserved their existing MCP
+              // config — they have a working registration. Include
+              // the agent in the instruction-write set so the
+              // assistant-facing block stays in sync with the
+              // user-managed config.
+              agentsWithMcpReady.push(agent);
             }
             continue;
           }
@@ -887,6 +903,7 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
 
           anyConfigWritten = true;
           anyConfigRewrittenWithBearer = true;
+          agentsWithMcpReady.push(agent);
 
           if (agent.name !== "generic") {
             configuredNames.push(formatAgentName(agent.name));
@@ -900,17 +917,21 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
 
       // Wave 18: hoisted multi-target info-section write per
       // DISC-1782. The new `injectAllTargets` dispatcher handles
-      // every detected agent's full target set (per-agent canonical
-      // + AGENTS.md universal companion + Cursor `.cursorrules`
-      // transitional fallback) with cross-agent AGENTS.md dedup and
-      // fail-loud-per-target failure semantics. Replaces the prior
-      // per-agent `generateInfoSection` + `injectInfoSection` pair.
-      if (agents.length > 0) {
+      // every successfully-configured agent's full target set
+      // (per-agent canonical + AGENTS.md universal companion +
+      // Cursor `.cursorrules` transitional fallback) with cross-
+      // agent AGENTS.md dedup and fail-loud-per-target failure
+      // semantics. Restricted to `agentsWithMcpReady` (not the full
+      // `agents` list) per Codex P1 review of v2: instruction blocks
+      // direct the assistant to call Glasstrace MCP, so writing them
+      // for agents whose MCP registration was skipped or failed
+      // would misconfigure the project.
+      if (agentsWithMcpReady.length > 0) {
         const sdkVersionForInject =
           typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
         try {
           await injectAllTargets(
-            agents,
+            agentsWithMcpReady,
             MCP_ENDPOINT,
             sdkVersionForInject,
             projectRoot,
