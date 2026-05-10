@@ -1,6 +1,8 @@
 /**
  * The text body the SDK injects into a user's agent-instruction file
- * (CLAUDE.md, .cursorrules, codex.md, etc.) between the
+ * (AGENTS.md, CLAUDE.md, GEMINI.md, .cursor/rules/glasstrace.mdc,
+ * .windsurf/rules/glasstrace.md, plus legacy .cursorrules — Wave 18
+ * expanded the canonical set per DISC-1782) between the
  * `<!-- glasstrace:mcp:start v=<sdkVersion> -->` ... `<!-- glasstrace:mcp:end -->`
  * managed-section markers.
  *

@@ -1,0 +1,367 @@
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import type { DetectedAgent } from "./detect.js";
+import {
+  generateInfoSection,
+  generateInfoSectionForCursorMdc,
+  generateInfoSectionForCursorrulesLegacy,
+} from "./configs.js";
+import { findMarkerBoundaries } from "./inject.js";
+
+/**
+ * Wave 18 multi-target write dispatcher.
+ *
+ * Per DISC-1782 (P1 design_correction, 2026-05-09): the SDK's
+ * agent-instruction injection writes the Glasstrace MCP managed
+ * section to deprecated/wrong/missing filenames for nearly every
+ * supported agent except Claude Code, and never writes to the
+ * cross-tool `AGENTS.md` standard governed by the Agentic AI
+ * Foundation under the Linux Foundation. Wave 18 corrects this by
+ * routing every detected agent through this multi-target helper,
+ * which writes to:
+ *
+ *   - Claude Code:  CLAUDE.md (primary)         + AGENTS.md (companion)
+ *   - Codex CLI:    AGENTS.md (sole — `codex.md` retired)
+ *   - Gemini CLI:   GEMINI.md (primary)         + AGENTS.md (companion)
+ *   - Cursor:       .cursor/rules/glasstrace.mdc (canonical)
+ *                   + .cursorrules (transitional fallback, unconditional)
+ *                   + AGENTS.md (companion)
+ *   - Windsurf:     .windsurf/rules/glasstrace.md (workspace-rules)
+ *                   + AGENTS.md (companion — Windsurf reads both)
+ *   - Generic:      AGENTS.md (sole, universal cross-tool fallback)
+ *
+ * AGENTS.md is deduplicated across multi-agent detection: a project
+ * with both `.claude/` and `.cursor/` markers will detect TWO agents
+ * (Claude Code + Cursor) but produce ONE AGENTS.md write, not two.
+ *
+ * **Failure semantics: fail-loud-per-target, non-atomic, all error
+ * classes.** If write-to-target-N fails for any reason — permission
+ * denied (EACCES/EPERM), read-only filesystem (EROFS), disk full
+ * (ENOSPC), path too long (ENAMETOOLONG, common on Windows with
+ * deeply nested project paths), I/O error, etc. — log a per-target
+ * stderr warning naming the target path and the error kind, and
+ * CONTINUE to the remaining targets. This is the broadened
+ * fail-loud policy from the wave's 350-pass adversarial review
+ * (finding 350-O8) — the prior `isPermissionError` path covered only
+ * permission-class errors. Atomic rollback across targets is
+ * explicitly OUT OF SCOPE for Wave 18 (track via closeout-gate).
+ *
+ * **Silent on success.** Successful writes produce no stdout/stderr
+ * output. Only failures emit warnings. The SDK runs at user-runtime
+ * load and verbose per-write logging would constitute log spam
+ * across the user base.
+ *
+ * **Marker contract preserved.** All targets use the SDK-050 /
+ * DISC-1592 / DISC-1602 marker contract for idempotent in-place
+ * replacement on re-runs. Markdown-family destinations (CLAUDE.md,
+ * AGENTS.md, GEMINI.md, .windsurf/rules/glasstrace.md, the body of
+ * .cursor/rules/glasstrace.mdc) use HTML comment markers; the legacy
+ * .cursorrules destination uses hash-prefix markers preserved from
+ * the SDK-050 contract for backward-compat with already-rendered
+ * managed sections.
+ *
+ * @param agents - All detected agents (typically the result of
+ *   `detectAgents()`). The helper iterates each, dispatches to its
+ *   per-agent target set, and dedupes AGENTS.md across the iteration.
+ * @param endpoint - The Glasstrace MCP endpoint URL (currently
+ *   validated for non-emptiness; not inlined in the body).
+ * @param sdkVersion - The SDK semver string for the marker stamp.
+ * @param projectRoot - The project root, used to compute companion
+ *   AGENTS.md path when the per-agent rule didn't already point at it.
+ */
+export async function injectAllTargets(
+  agents: DetectedAgent[],
+  endpoint: string,
+  sdkVersion: string,
+  projectRoot: string,
+): Promise<void> {
+  // Track AGENTS.md paths we've already written to so multi-agent
+  // detection doesn't write the same file twice. Keyed by absolute
+  // path string (already resolved by `detect.ts`).
+  const writtenAgentsMd = new Set<string>();
+
+  for (const agent of agents) {
+    const targets = computeTargets(agent, projectRoot);
+
+    for (const target of targets) {
+      // Skip a duplicate AGENTS.md if another agent in the same
+      // detection already wrote to it.
+      if (target.isAgentsMdCompanion) {
+        if (writtenAgentsMd.has(target.path)) {
+          continue;
+        }
+        writtenAgentsMd.add(target.path);
+      }
+
+      const content =
+        target.kind === "cursor-mdc"
+          ? generateInfoSectionForCursorMdc(endpoint, sdkVersion)
+          : target.kind === "cursorrules-legacy"
+            ? generateInfoSectionForCursorrulesLegacy(endpoint, sdkVersion)
+            : generateInfoSection(agent, endpoint, sdkVersion);
+
+      if (content === "") continue;
+
+      await writeManagedSectionToTarget(target.path, content);
+    }
+  }
+}
+
+interface WriteTarget {
+  path: string;
+  /**
+   * Discriminator the dispatcher uses to pick the right rendering:
+   * - "primary": render via `generateInfoSection(agent, ...)` using
+   *   the agent's existing per-agent format dispatch.
+   * - "agents-md-companion": same content as primary (htmlMarkers)
+   *   but written to a different file; rendered via the agent's own
+   *   dispatch (the configs.ts switch routes Markdown-family agents
+   *   to htmlMarkers, which is correct for AGENTS.md too).
+   * - "cursor-mdc": render via `generateInfoSectionForCursorMdc` to
+   *   prepend YAML frontmatter.
+   * - "cursorrules-legacy": render via
+   *   `generateInfoSectionForCursorrulesLegacy` with hash-prefix
+   *   markers preserved from the SDK-050 contract.
+   */
+  kind: "primary" | "agents-md-companion" | "cursor-mdc" | "cursorrules-legacy";
+  isAgentsMdCompanion: boolean;
+}
+
+function computeTargets(
+  agent: DetectedAgent,
+  projectRoot: string,
+): WriteTarget[] {
+  const targets: WriteTarget[] = [];
+
+  switch (agent.name) {
+    case "claude": {
+      // Primary: CLAUDE.md (per-agent canonical for Claude Code).
+      // Companion: AGENTS.md (cross-tool universal write).
+      if (agent.infoFilePath) {
+        targets.push({
+          path: agent.infoFilePath,
+          kind: "primary",
+          isAgentsMdCompanion: false,
+        });
+      }
+      targets.push({
+        path: join(projectRoot, "AGENTS.md"),
+        kind: "agents-md-companion",
+        isAgentsMdCompanion: true,
+      });
+      return targets;
+    }
+
+    case "codex": {
+      // For Codex, the per-agent canonical IS AGENTS.md (set in
+      // detect.ts AGENT_RULES). No separate companion needed —
+      // dedup logic ensures we don't double-write.
+      if (agent.infoFilePath) {
+        targets.push({
+          path: agent.infoFilePath,
+          kind: "primary",
+          isAgentsMdCompanion: true,
+        });
+      }
+      return targets;
+    }
+
+    case "gemini": {
+      // Primary: GEMINI.md (default Gemini context.fileName).
+      // Companion: AGENTS.md (Gemini supports it via opt-in).
+      if (agent.infoFilePath) {
+        targets.push({
+          path: agent.infoFilePath,
+          kind: "primary",
+          isAgentsMdCompanion: false,
+        });
+      }
+      targets.push({
+        path: join(projectRoot, "AGENTS.md"),
+        kind: "agents-md-companion",
+        isAgentsMdCompanion: true,
+      });
+      return targets;
+    }
+
+    case "cursor": {
+      // Primary: .cursor/rules/glasstrace.mdc (canonical 2026 format).
+      // Transitional: .cursorrules (legacy, written unconditionally
+      //   per Codex P2 review of DISC-1782 v3 — mixed-version Cursor
+      //   scenarios may have Agent mode reading legacy rules
+      //   inconsistently, so a conditional fallback is too narrow).
+      // Companion: AGENTS.md (Cursor reads it as cross-tool standard).
+      if (agent.infoFilePath) {
+        targets.push({
+          path: agent.infoFilePath,
+          kind: "cursor-mdc",
+          isAgentsMdCompanion: false,
+        });
+        // Derive .cursorrules path from the project root portion of
+        // the .cursor/rules/glasstrace.mdc path. The agent rule's
+        // foundDir is the deepest dir we know about.
+        const cursorRulesParent = dirname(dirname(agent.infoFilePath));
+        const projectDir = dirname(cursorRulesParent);
+        targets.push({
+          path: join(projectDir, ".cursorrules"),
+          kind: "cursorrules-legacy",
+          isAgentsMdCompanion: false,
+        });
+      }
+      targets.push({
+        path: join(projectRoot, "AGENTS.md"),
+        kind: "agents-md-companion",
+        isAgentsMdCompanion: true,
+      });
+      return targets;
+    }
+
+    case "windsurf": {
+      // Primary: .windsurf/rules/glasstrace.md (active workspace-rules).
+      // Companion: AGENTS.md (cross-tool parallel mechanism Windsurf
+      //   also reads — NOT a replacement for workspace-rules, per
+      //   windsurf.com/university docs).
+      if (agent.infoFilePath) {
+        targets.push({
+          path: agent.infoFilePath,
+          kind: "primary",
+          isAgentsMdCompanion: false,
+        });
+      }
+      targets.push({
+        path: join(projectRoot, "AGENTS.md"),
+        kind: "agents-md-companion",
+        isAgentsMdCompanion: true,
+      });
+      return targets;
+    }
+
+    case "generic": {
+      // For generic, the infoFilePath set in detect.ts IS AGENTS.md.
+      // Mark as companion so multi-agent dedup applies.
+      if (agent.infoFilePath) {
+        targets.push({
+          path: agent.infoFilePath,
+          kind: "primary",
+          isAgentsMdCompanion: true,
+        });
+      }
+      return targets;
+    }
+
+    default: {
+      const _exhaustive: never = agent.name;
+      throw new Error(`Unknown agent: ${_exhaustive}`);
+    }
+  }
+}
+
+/**
+ * Write the managed section to a single target file with broadened
+ * fail-loud-per-target semantics.
+ *
+ * Mirrors the create-or-replace logic in `inject.ts`'s
+ * `injectInfoSection` but catches ALL write errors (not just
+ * `EACCES`/`EPERM`/`EROFS`) and logs a per-error-class qualifier so
+ * the user can distinguish permission failures from disk-full / path-
+ * too-long / I/O failures.
+ */
+async function writeManagedSectionToTarget(
+  filePath: string,
+  content: string,
+): Promise<void> {
+  let existingContent: string | null = null;
+  try {
+    existingContent = await readFile(filePath, "utf-8");
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      emitTargetWarning(filePath, "read", err);
+      return;
+    }
+  }
+
+  // File does not exist — create with section content
+  if (existingContent === null) {
+    try {
+      await mkdir(dirname(filePath), { recursive: true });
+      await writeFile(filePath, content, "utf-8");
+    } catch (err: unknown) {
+      emitTargetWarning(filePath, "write", err);
+      return;
+    }
+    return;
+  }
+
+  // File exists — check for markers
+  const lines = existingContent.split("\n");
+  const boundaries = findMarkerBoundaries(lines);
+
+  let newContent: string;
+  if (boundaries !== null) {
+    const before = lines.slice(0, boundaries.startIdx);
+    const after = lines.slice(boundaries.endIdx + 1);
+    const contentWithoutTrailingNewline = content.endsWith("\n")
+      ? content.slice(0, -1)
+      : content;
+    newContent = [...before, contentWithoutTrailingNewline, ...after].join(
+      "\n",
+    );
+  } else {
+    const separator = existingContent.endsWith("\n") ? "\n" : "\n\n";
+    newContent = existingContent + separator + content;
+  }
+
+  try {
+    await writeFile(filePath, newContent, "utf-8");
+  } catch (err: unknown) {
+    emitTargetWarning(filePath, "write", err);
+  }
+}
+
+/**
+ * Emit a per-target stderr warning with an error-class qualifier so
+ * users can distinguish failure modes (permission vs disk-full vs
+ * path-too-long etc.). No-op when stderr is unavailable (e.g., a
+ * non-Node runtime, though the SDK is Node-only).
+ */
+function emitTargetWarning(
+  filePath: string,
+  op: "read" | "write",
+  err: unknown,
+): void {
+  const code = (err as NodeJS.ErrnoException).code;
+  let qualifier: string;
+  switch (code) {
+    case "EACCES":
+    case "EPERM":
+      qualifier = "permission denied";
+      break;
+    case "EROFS":
+      qualifier = "filesystem read-only";
+      break;
+    case "ENOSPC":
+      qualifier = "disk full";
+      break;
+    case "ENAMETOOLONG":
+      qualifier = "path too long";
+      break;
+    case "ENOTDIR":
+      qualifier = "not a directory";
+      break;
+    case "EISDIR":
+      qualifier = "is a directory";
+      break;
+    default:
+      qualifier = "I/O error";
+      break;
+  }
+  try {
+    process.stderr.write(
+      `Warning: cannot ${op} info file ${filePath}: ${qualifier}\n`,
+    );
+  } catch {
+    // stderr unavailable — silently swallow per the SDK-050
+    // never-throw-from-instrumentation invariant.
+  }
+}

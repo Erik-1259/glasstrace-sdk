@@ -182,7 +182,20 @@ function hashMarkers(sdkVersion: string): MarkerPair {
  * Generates informational content for an agent's instruction file.
  *
  * This content is designed to be appended to or inserted into agent-specific
- * instruction files (CLAUDE.md, .cursorrules, codex.md). It contains a
+ * instruction files. Wave 18 expanded the canonical set to follow the
+ * 2026 cross-tool standard governed by the Agentic AI Foundation under
+ * the Linux Foundation: `AGENTS.md` is the universal write target,
+ * with per-agent canonical files written alongside it where the agent
+ * has a documented primary file (Claude Code → CLAUDE.md, Gemini CLI
+ * → GEMINI.md, Cursor → `.cursor/rules/glasstrace.mdc` canonical +
+ * `.cursorrules` transitional fallback). Codex / Windsurf / generic
+ * resolve to AGENTS.md alone (Codex retired `codex.md`; Windsurf
+ * supports both AGENTS.md and `.windsurf/rules/glasstrace.md`). The
+ * managed section's content is identical across destinations — only
+ * the marker shape differs (HTML comments for Markdown / `.md` /
+ * `.mdc` targets; `.cursorrules` legacy uses hash-prefix markers
+ * preserved from the SDK-050 contract for backward-compat with
+ * already-rendered managed sections). It contains a
  * tight, agent-facing decision policy + workflow + tool list — no
  * endpoint URL, no auth tokens, no setup instructions (those live in
  * the user's MCP config and the SDK README; the agent reads this file
@@ -246,29 +259,129 @@ export function generateInfoSection(
   const content = buildAgentInstructionBody();
 
   switch (agent.name) {
-    case "claude": {
-      const m = htmlMarkers(sdkVersion);
-      return `${m.start}\n${content}${m.end}\n`;
-    }
-
-    case "codex": {
+    case "claude":
+    case "codex":
+    case "gemini":
+    case "windsurf":
+    case "generic": {
+      // All Markdown-family targets (CLAUDE.md, AGENTS.md, GEMINI.md,
+      // .windsurf/rules/glasstrace.md) use the HTML comment marker
+      // shape that has soaked in production via SDK-050 / DISC-1592 /
+      // DISC-1602 since Wave 17 main / `@glasstrace/sdk@1.10.x`.
       const m = htmlMarkers(sdkVersion);
       return `${m.start}\n${content}${m.end}\n`;
     }
 
     case "cursor": {
-      const m = hashMarkers(sdkVersion);
+      // Wave 18 routes Cursor to the canonical `.cursor/rules/
+      // glasstrace.mdc` destination. `.mdc` is Markdown body + YAML
+      // frontmatter delimited by `---` lines; the SDK's marker
+      // contract carries through unchanged via HTML comments. The
+      // legacy `.cursorrules` write (still produced by the
+      // multi-target write helper as a transitional fallback) is
+      // rendered via {@link generateInfoSectionForCursorrulesLegacy}
+      // using hash-prefix markers preserved from SDK-050 for
+      // backward-compat with already-rendered managed sections.
+      const m = htmlMarkers(sdkVersion);
       return `${m.start}\n${content}${m.end}\n`;
     }
-
-    case "gemini":
-    case "windsurf":
-    case "generic":
-      return "";
 
     default: {
       const _exhaustive: never = agent.name;
       throw new Error(`Unknown agent: ${_exhaustive}`);
     }
   }
+}
+
+/**
+ * Renders the managed section for Cursor's legacy `.cursorrules` file
+ * (transitional fallback companion to the canonical
+ * `.cursor/rules/glasstrace.mdc` write).
+ *
+ * Uses hash-prefix markers preserved from the SDK-050 contract — pre-
+ * Wave-18 SDK versions rendered `.cursorrules` with hash markers, so
+ * the legacy file's already-rendered managed sections need to be
+ * recognized and idempotently replaced by the new SDK. Switching to
+ * HTML markers on `.cursorrules` would break in-place replacement for
+ * existing users (the new SDK wouldn't find the old marker pair) and
+ * append a duplicate section.
+ *
+ * Wave 18 writes `.cursorrules` UNCONDITIONALLY alongside the
+ * `.cursor/rules/glasstrace.mdc` canonical (per Codex P2 review of
+ * DISC-1782 v3 — mixed-version Cursor scenarios may have Agent mode
+ * reading legacy rules inconsistently across versions, so a
+ * conditional fallback is too narrow).
+ */
+export function generateInfoSectionForCursorrulesLegacy(
+  endpoint: string,
+  sdkVersion: string,
+): string {
+  if (!endpoint || endpoint.trim() === "") {
+    throw new Error("endpoint must not be empty");
+  }
+  if (!sdkVersion || sdkVersion.trim() === "") {
+    throw new Error("sdkVersion must not be empty");
+  }
+  if (!SDK_VERSION_STAMP_PATTERN.test(sdkVersion)) {
+    throw new Error(
+      "sdkVersion must match [A-Za-z0-9.+\\-]+ (semver-shaped, no whitespace, no angle brackets)",
+    );
+  }
+
+  const content = buildAgentInstructionBody();
+  const m = hashMarkers(sdkVersion);
+  return `${m.start}\n${content}${m.end}\n`;
+}
+
+/**
+ * Renders the managed section for Cursor's `.cursor/rules/
+ * glasstrace.mdc` canonical destination.
+ *
+ * `.mdc` is Cursor's Markdown-extension format with YAML frontmatter
+ * delimited by `---` lines (per cursor.com/docs/rules — frontmatter
+ * supports `alwaysApply`, `globs`, `description`). The Glasstrace
+ * managed section uses `alwaysApply: true` because it's a global
+ * agent instruction the user's coding agent should consult on every
+ * debugging task. The SDK's idempotent-replacement logic anchors on
+ * the markers and does NOT touch the frontmatter — user
+ * customizations to the frontmatter survive `upgrade-instructions`.
+ *
+ * Recon caveat (Wave 18 impl-time, 2026-05-10): Cursor's official
+ * docs do not address whether `.mdc` parser preserves HTML comments.
+ * This implementation defaults to HTML comment markers (consistent
+ * with the SDK-050 contract for `CLAUDE.md` and other Markdown
+ * targets which have soaked in production). If a Cursor version
+ * strips HTML comments from `.mdc` body content, the marker contract
+ * breaks; track via the wave's closeout-gate items.
+ */
+export function generateInfoSectionForCursorMdc(
+  endpoint: string,
+  sdkVersion: string,
+): string {
+  if (!endpoint || endpoint.trim() === "") {
+    throw new Error("endpoint must not be empty");
+  }
+  if (!sdkVersion || sdkVersion.trim() === "") {
+    throw new Error("sdkVersion must not be empty");
+  }
+  if (!SDK_VERSION_STAMP_PATTERN.test(sdkVersion)) {
+    throw new Error(
+      "sdkVersion must match [A-Za-z0-9.+\\-]+ (semver-shaped, no whitespace, no angle brackets)",
+    );
+  }
+
+  const content = buildAgentInstructionBody();
+  const m = htmlMarkers(sdkVersion);
+  // YAML frontmatter goes ABOVE the managed section. The marker
+  // contract anchors on the `<!-- glasstrace:mcp:start -->` ...
+  // `<!-- glasstrace:mcp:end -->` markers; the frontmatter sits above
+  // the section and is preserved across re-renders.
+  return [
+    "---",
+    "description: Glasstrace MCP runtime debugging tools — runtime evidence the agent reads when source alone cannot resolve a bug",
+    "alwaysApply: true",
+    "---",
+    "",
+    `${m.start}\n${content}${m.end}\n`,
+  ].join("\n");
 }

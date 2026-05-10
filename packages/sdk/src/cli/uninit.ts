@@ -52,12 +52,21 @@ const MCP_CONFIG_FILES = [".mcp.json", ".cursor/mcp.json", ".gemini/settings.jso
 /**
  * Agent info files that may contain glasstrace marker sections.
  * Both HTML-style (`<!-- glasstrace:mcp:start -->`) and hash-style
- * (`# glasstrace:mcp:start`) markers are supported.
+ * (`# glasstrace:mcp:start`) markers are supported. Wave 18
+ * (DISC-1782) expanded the canonical set to follow the 2026
+ * cross-tool standard; uninit removes managed sections from BOTH
+ * canonical 2026 destinations AND legacy destinations so a clean
+ * uninstall doesn't leave stale sections behind.
  */
 const AGENT_INFO_FILES = [
+  "AGENTS.md",
   "CLAUDE.md",
-  "codex.md",
+  "GEMINI.md",
+  ".cursor/rules/glasstrace.mdc",
+  ".windsurf/rules/glasstrace.md",
   ".cursorrules",
+  "codex.md",
+  ".windsurfrules",
 ] as const;
 
 /**
@@ -1046,9 +1055,16 @@ export async function runUninit(options: UninitOptions): Promise<UninitResult> {
     // Handle Windsurf global config at ~/.codeium/windsurf/mcp_config.json
     // Only process if the project has Windsurf markers, to avoid touching
     // global config for non-Windsurf projects
+    // Wave 18 (DISC-1782): recognize all three Windsurf markers — the
+    // legacy single-file `.windsurfrules`, the `.windsurf/` directory
+    // (workspace-rules format), and `AGENTS.md` (cross-tool parallel
+    // mechanism Windsurf also reads). Any of these means the project
+    // is a Windsurf workspace and the global Windsurf MCP config
+    // should be cleaned up on uninit.
     const hasWindsurfMarkers =
       fs.existsSync(path.join(projectRoot, ".windsurfrules")) ||
-      fs.existsSync(path.join(projectRoot, ".windsurf"));
+      fs.existsSync(path.join(projectRoot, ".windsurf")) ||
+      fs.existsSync(path.join(projectRoot, "AGENTS.md"));
     if (hasWindsurfMarkers) {
       const windsurfConfigPath = path.join(
         os.homedir(),

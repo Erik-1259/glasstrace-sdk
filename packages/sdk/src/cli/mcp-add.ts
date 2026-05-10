@@ -17,10 +17,10 @@ import {
   type EffectiveMcpCredential,
 } from "../mcp-runtime.js";
 import { detectAgents } from "../agent-detection/detect.js";
-import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
+import { generateMcpConfig } from "../agent-detection/configs.js";
+import { injectAllTargets } from "../agent-detection/inject-all-targets.js";
 import {
   writeMcpConfig,
-  injectInfoSection,
   updateGitignore,
 } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
@@ -319,18 +319,13 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
   for (const agent of targetAgents) {
     const name = formatAgentName(agent.name);
 
-    const sdkVersion =
-      typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
-
-    // Try CLI registration first (not applicable for generic)
+    // Try CLI registration first (not applicable for generic).
+    // Wave 18: per-agent info-section writes are hoisted out of this
+    // loop into a single `injectAllTargets` call after the loop;
+    // see below.
     if (agent.name !== "generic") {
       const cliSuccess = await registerViaCli(agent, bearer);
       if (cliSuccess) {
-        // Still inject info section if applicable
-        const infoContent = generateInfoSection(agent, MCP_ENDPOINT, sdkVersion);
-        if (infoContent !== "") {
-          await injectInfoSection(agent, infoContent, projectRoot);
-        }
         results.push({
           agent: agent.name,
           success: true,
@@ -349,10 +344,6 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
 
         // Verify the config was written (writeMcpConfig swallows permission errors)
         if (fs.existsSync(agent.mcpConfigPath)) {
-          const infoContent = generateInfoSection(agent, MCP_ENDPOINT, sdkVersion);
-          if (infoContent !== "") {
-            await injectInfoSection(agent, infoContent, projectRoot);
-          }
           results.push({
             agent: agent.name,
             success: true,
@@ -388,6 +379,33 @@ export async function mcpAdd(options?: McpAddOptions): Promise<McpAddResult> {
       method: "skipped",
       message: `${name}: No registration method available`,
     });
+  }
+
+  // Wave 18: hoisted multi-target info-section write per DISC-1782.
+  // The new `injectAllTargets` dispatcher handles every detected
+  // agent's full target set (per-agent canonical + AGENTS.md
+  // universal companion + Cursor `.cursorrules` transitional
+  // fallback) with cross-agent AGENTS.md dedup and fail-loud-per-
+  // target failure semantics. Replaces the prior per-agent
+  // `generateInfoSection` + `injectInfoSection` pair inside the loop.
+  if (targetAgents.length > 0) {
+    const sdkVersion =
+      typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
+    try {
+      await injectAllTargets(
+        targetAgents,
+        MCP_ENDPOINT,
+        sdkVersion,
+        projectRoot,
+      );
+    } catch (injectErr) {
+      // Fail-loud-per-target already emits per-target stderr
+      // warnings inside `injectAllTargets`; this catch handles
+      // unexpected throws from the helper itself (defensive).
+      messages.push(
+        `Warning: Failed to write some agent-instruction files: ${injectErr instanceof Error ? injectErr.message : String(injectErr)}`,
+      );
+    }
   }
 
   // Step 5: Update gitignore

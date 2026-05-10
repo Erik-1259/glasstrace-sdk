@@ -53,7 +53,9 @@ describe("detectAgents", () => {
       expect(agents[0].mcpConfigPath).toBe(
         join(testDir, ".glasstrace", "mcp.json"),
       );
-      expect(agents[0].infoFilePath).toBeNull();
+      // Wave 18: generic fallback now writes the universal AGENTS.md
+      // cross-tool destination (per DISC-1782) instead of nothing.
+      expect(agents[0].infoFilePath).toBe(join(testDir, "AGENTS.md"));
       expect(agents[0].cliAvailable).toBe(false);
       expect(agents[0].registrationCommand).toBeNull();
     });
@@ -79,17 +81,21 @@ describe("detectAgents", () => {
       expect(claude!.infoFilePath).toBe(join(testDir, "CLAUDE.md"));
     });
 
-    it("sets infoFilePath to null when CLAUDE.md does not exist", async () => {
+    it("sets infoFilePath to canonical CLAUDE.md path even when file does not exist (Wave 18 dropped path-exists gate per DISC-1782)", async () => {
       await mkdir(join(testDir, ".claude"));
       const agents = await detectAgents(testDir);
       const claude = agents.find((a) => a.name === "claude");
       expect(claude).toBeDefined();
-      expect(claude!.infoFilePath).toBeNull();
+      // Wave 18: the path-exists gate at detect.ts:210-214 was dropped;
+      // detection now reports the canonical destination unconditionally
+      // and the multi-target write helper creates the file when missing
+      // under the DISC-1592 marker contract.
+      expect(claude!.infoFilePath).toBe(join(testDir, "CLAUDE.md"));
     });
   });
 
   describe("Codex CLI detection", () => {
-    it("detects Codex via codex.md file", async () => {
+    it("detects Codex via legacy codex.md marker (still classifies but writes to canonical AGENTS.md per Wave 18)", async () => {
       await writeFile(join(testDir, "codex.md"), "# codex");
       const agents = await detectAgents(testDir);
       const codex = agents.find((a) => a.name === "codex");
@@ -97,7 +103,18 @@ describe("detectAgents", () => {
       expect(codex!.mcpConfigPath).toBe(
         join(testDir, ".codex", "config.toml"),
       );
-      expect(codex!.infoFilePath).toBe(join(testDir, "codex.md"));
+      // Wave 18: codex.md still works as a detection marker (legacy
+      // projects classify correctly) but the canonical write
+      // destination is AGENTS.md per the 2026 cross-tool standard.
+      expect(codex!.infoFilePath).toBe(join(testDir, "AGENTS.md"));
+    });
+
+    it("detects Codex via canonical AGENTS.md marker (Wave 18 — DISC-1782)", async () => {
+      await writeFile(join(testDir, "AGENTS.md"), "# instructions");
+      const agents = await detectAgents(testDir);
+      const codex = agents.find((a) => a.name === "codex");
+      expect(codex).toBeDefined();
+      expect(codex!.infoFilePath).toBe(join(testDir, "AGENTS.md"));
     });
 
     it("detects Codex via .codex/ directory", async () => {
@@ -109,7 +126,7 @@ describe("detectAgents", () => {
   });
 
   describe("Gemini CLI detection", () => {
-    it("detects Gemini via .gemini/ directory", async () => {
+    it("detects Gemini via .gemini/ directory and points infoFilePath at canonical GEMINI.md (Wave 18 — DISC-1782)", async () => {
       await mkdir(join(testDir, ".gemini"));
       const agents = await detectAgents(testDir);
       const gemini = agents.find((a) => a.name === "gemini");
@@ -117,10 +134,23 @@ describe("detectAgents", () => {
       expect(gemini!.mcpConfigPath).toBe(
         join(testDir, ".gemini", "settings.json"),
       );
-      expect(gemini!.infoFilePath).toBeNull();
+      // Wave 18: Gemini was previously infoFilePath: null (no
+      // instruction injection at all). Now writes to GEMINI.md per
+      // the documented Gemini CLI default context.fileName.
+      expect(gemini!.infoFilePath).toBe(join(testDir, "GEMINI.md"));
     });
 
-    it("does not detect Gemini when .gemini/ is absent", async () => {
+    it("detects Gemini via canonical GEMINI.md marker (Wave 18 — DISC-1782)", async () => {
+      await writeFile(join(testDir, "GEMINI.md"), "# context");
+      const agents = await detectAgents(testDir);
+      const gemini = agents.find((a) => a.name === "gemini");
+      expect(gemini).toBeDefined();
+      expect(gemini!.infoFilePath).toBe(join(testDir, "GEMINI.md"));
+    });
+
+    it("does not detect Gemini when no Gemini markers are present", async () => {
+      // AGENTS.md alone does not classify a project as Gemini —
+      // Gemini-specific markers are .gemini/ or GEMINI.md.
       const agents = await detectAgents(testDir);
       const gemini = agents.find((a) => a.name === "gemini");
       expect(gemini).toBeUndefined();
@@ -139,31 +169,49 @@ describe("detectAgents", () => {
       expect(cursor!.cliAvailable).toBe(false);
     });
 
-    it("detects Cursor via .cursorrules file and sets infoFilePath", async () => {
+    it("detects Cursor via legacy .cursorrules file (still classifies but writes to .cursor/rules/glasstrace.mdc canonical per Wave 18)", async () => {
       await writeFile(join(testDir, ".cursorrules"), "rules");
       const agents = await detectAgents(testDir);
       const cursor = agents.find((a) => a.name === "cursor");
       expect(cursor).toBeDefined();
-      expect(cursor!.infoFilePath).toBe(join(testDir, ".cursorrules"));
+      // Wave 18: .cursorrules still works as a detection marker (legacy
+      // projects classify correctly) but the canonical write destination
+      // is the .cursor/rules/glasstrace.mdc 2026 format. The
+      // .cursorrules file itself continues to be written by the
+      // multi-target helper as a transitional fallback.
+      expect(cursor!.infoFilePath).toBe(
+        join(testDir, ".cursor", "rules", "glasstrace.mdc"),
+      );
     });
 
-    it("sets infoFilePath to null when .cursorrules does not exist", async () => {
+    it("sets infoFilePath to canonical .cursor/rules/glasstrace.mdc path even when file does not exist (Wave 18 dropped path-exists gate)", async () => {
       await mkdir(join(testDir, ".cursor"));
       const agents = await detectAgents(testDir);
       const cursor = agents.find((a) => a.name === "cursor");
       expect(cursor).toBeDefined();
-      expect(cursor!.infoFilePath).toBeNull();
+      // Wave 18: detection points at the canonical destination
+      // unconditionally; multi-target write helper creates the file
+      // when missing under the DISC-1592 marker contract.
+      expect(cursor!.infoFilePath).toBe(
+        join(testDir, ".cursor", "rules", "glasstrace.mdc"),
+      );
     });
   });
 
   describe("Windsurf detection", () => {
-    it("detects Windsurf via .windsurfrules file", async () => {
+    it("detects Windsurf via legacy .windsurfrules file (still classifies but writes to .windsurf/rules/glasstrace.md canonical per Wave 18)", async () => {
       await writeFile(join(testDir, ".windsurfrules"), "rules");
       const agents = await detectAgents(testDir);
       const windsurf = agents.find((a) => a.name === "windsurf");
       expect(windsurf).toBeDefined();
+      // Wave 18: .windsurfrules still works as a detection marker
+      // (legacy projects classify correctly) but the canonical write
+      // destination is .windsurf/rules/glasstrace.md per Windsurf's
+      // own docs at windsurf.com/university (workspace-rules format).
+      // The deprecated single-file .windsurfrules is no longer
+      // written by the SDK.
       expect(windsurf!.infoFilePath).toBe(
-        join(testDir, ".windsurfrules"),
+        join(testDir, ".windsurf", "rules", "glasstrace.md"),
       );
     });
 

@@ -43,17 +43,37 @@ let warningEmitted = false;
 
 /**
  * Hardcoded set of agent instruction filenames to inspect, relative
- * to the supplied project root. Matches the file targets the SDK's
- * own scaffolding writes to (claude/codex/cursor) — see
- * `packages/sdk/src/agent-detection/configs.ts`. Restricting the
- * scan to this set keeps the warning fast and ensures the warning
- * text never interpolates a user-supplied or attacker-supplied
- * filename.
+ * to the supplied project root. Wave 18 (DISC-1782) expanded the
+ * canonical set to follow the 2026 cross-tool standard:
+ *
+ *   - `AGENTS.md`: universal cross-tool fallback (canonical 2026)
+ *   - `CLAUDE.md`: Claude Code primary (canonical, unchanged)
+ *   - `GEMINI.md`: Gemini CLI primary (canonical 2026)
+ *   - `.cursor/rules/glasstrace.mdc`: Cursor canonical 2026
+ *   - `.windsurf/rules/glasstrace.md`: Windsurf workspace-rules
+ *     directory (canonical 2026)
+ *   - `.cursorrules`: Cursor legacy single-file (still scanned to
+ *     surface stale sections from pre-Wave-18 installs; written
+ *     unconditionally as a transitional fallback per DISC-1782)
+ *   - `codex.md`: Codex legacy (no longer the canonical destination;
+ *     scanned to surface stale sections from pre-Wave-18 installs)
+ *   - `.windsurfrules`: Windsurf legacy single-file (no longer
+ *     written by the SDK; scanned for the same stale-section reason)
+ *
+ * Restricting the scan to this hardcoded set keeps the warning fast
+ * and ensures the warning text never interpolates a user-supplied or
+ * attacker-supplied filename. Order: canonical 2026 destinations
+ * first, legacy destinations last.
  */
 const AGENT_INSTRUCTION_FILES = [
+  "AGENTS.md",
   "CLAUDE.md",
-  "codex.md",
+  "GEMINI.md",
+  ".cursor/rules/glasstrace.mdc",
+  ".windsurf/rules/glasstrace.md",
   ".cursorrules",
+  "codex.md",
+  ".windsurfrules",
 ] as const;
 
 /**

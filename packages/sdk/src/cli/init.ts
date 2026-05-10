@@ -22,8 +22,9 @@ import {
 import { buildImportGraph } from "../import-graph.js";
 import { getOrCreateAnonKey, readAnonKey } from "../anon-key.js";
 import { detectAgents } from "../agent-detection/detect.js";
-import { generateMcpConfig, generateInfoSection } from "../agent-detection/configs.js";
-import { writeMcpConfig, injectInfoSection, updateGitignore } from "../agent-detection/inject.js";
+import { generateMcpConfig } from "../agent-detection/configs.js";
+import { injectAllTargets } from "../agent-detection/inject-all-targets.js";
+import { writeMcpConfig, updateGitignore } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
 import { NEXT_CONFIG_NAMES, formatAgentName } from "./constants.js";
 import { resolveProjectRoot } from "./monorepo.js";
@@ -887,23 +888,36 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
           anyConfigWritten = true;
           anyConfigRewrittenWithBearer = true;
 
-          const sdkVersionForInject =
-            typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
-          const infoContent = generateInfoSection(
-            agent,
-            MCP_ENDPOINT,
-            sdkVersionForInject,
-          );
-          if (infoContent !== "") {
-            await injectInfoSection(agent, infoContent, projectRoot);
-          }
-
           if (agent.name !== "generic") {
             configuredNames.push(formatAgentName(agent.name));
           }
         } catch (agentErr) {
           warnings.push(
             `Failed to configure MCP for ${agent.name}: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`,
+          );
+        }
+      }
+
+      // Wave 18: hoisted multi-target info-section write per
+      // DISC-1782. The new `injectAllTargets` dispatcher handles
+      // every detected agent's full target set (per-agent canonical
+      // + AGENTS.md universal companion + Cursor `.cursorrules`
+      // transitional fallback) with cross-agent AGENTS.md dedup and
+      // fail-loud-per-target failure semantics. Replaces the prior
+      // per-agent `generateInfoSection` + `injectInfoSection` pair.
+      if (agents.length > 0) {
+        const sdkVersionForInject =
+          typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
+        try {
+          await injectAllTargets(
+            agents,
+            MCP_ENDPOINT,
+            sdkVersionForInject,
+            projectRoot,
+          );
+        } catch (injectErr) {
+          warnings.push(
+            `Failed to write agent-instruction files: ${injectErr instanceof Error ? injectErr.message : String(injectErr)}`,
           );
         }
       }

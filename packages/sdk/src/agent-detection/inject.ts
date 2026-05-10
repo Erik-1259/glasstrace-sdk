@@ -177,7 +177,7 @@ export async function writeMcpConfig(
  * user's example into the replacement" failure mode that anchoring
  * to the FIRST start would produce.
  */
-function findMarkerBoundaries(
+export function findMarkerBoundaries(
   lines: string[],
 ): { startIdx: number; endIdx: number } | null {
   let startIdx = -1;
