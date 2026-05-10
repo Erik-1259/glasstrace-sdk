@@ -154,11 +154,53 @@ interface WriteTarget {
   isAgentsMdCompanion: boolean;
 }
 
+/**
+ * Derive the agent's `foundDir` (the directory `detectAgents` resolved
+ * the marker in, after walking up to the git root for monorepo
+ * support) from `agent.infoFilePath`. The companion AGENTS.md write
+ * AND the Cursor `.cursorrules` transitional fallback MUST resolve
+ * against this foundDir, not against `projectRoot` — for monorepos
+ * where the SDK is initialized in a subdirectory but the agent
+ * markers live at the git root, `projectRoot` is the wrong parent
+ * (Codex P2 review of v6).
+ *
+ * Returns null when `agent.infoFilePath` is null (defensive — Wave 18
+ * AGENT_RULES wires every agent to a non-null `infoFilePath`, so in
+ * practice this never returns null).
+ */
+function foundDirFromAgent(agent: DetectedAgent): string | null {
+  if (agent.infoFilePath === null) return null;
+  switch (agent.name) {
+    case "claude":
+    case "codex":
+    case "gemini":
+    case "generic":
+      // infoFilePath is `<foundDir>/<canonical-filename>` — one
+      // dirname call gets to foundDir.
+      return dirname(agent.infoFilePath);
+    case "cursor":
+      // infoFilePath is `<foundDir>/.cursor/rules/glasstrace.mdc` —
+      // three dirname calls strip `.cursor/rules/glasstrace.mdc`.
+      return dirname(dirname(dirname(agent.infoFilePath)));
+    case "windsurf":
+      // infoFilePath is `<foundDir>/.windsurf/rules/glasstrace.md` —
+      // three dirname calls strip `.windsurf/rules/glasstrace.md`.
+      return dirname(dirname(dirname(agent.infoFilePath)));
+  }
+}
+
 function computeTargets(
   agent: DetectedAgent,
   projectRoot: string,
 ): WriteTarget[] {
   const targets: WriteTarget[] = [];
+
+  // Resolve the companion AGENTS.md (and Cursor `.cursorrules`
+  // transitional fallback) against the agent's foundDir — the
+  // directory `detectAgents` walked up to. Falls back to projectRoot
+  // only when foundDir cannot be derived (defensive; should not
+  // happen in Wave 18). Codex P2 review of v6.
+  const foundDir = foundDirFromAgent(agent) ?? projectRoot;
 
   switch (agent.name) {
     case "claude": {
@@ -172,7 +214,7 @@ function computeTargets(
         });
       }
       targets.push({
-        path: join(projectRoot, "AGENTS.md"),
+        path: join(foundDir, "AGENTS.md"),
         kind: "agents-md-companion",
         isAgentsMdCompanion: true,
       });
@@ -204,7 +246,7 @@ function computeTargets(
         });
       }
       targets.push({
-        path: join(projectRoot, "AGENTS.md"),
+        path: join(foundDir, "AGENTS.md"),
         kind: "agents-md-companion",
         isAgentsMdCompanion: true,
       });
@@ -224,19 +266,16 @@ function computeTargets(
           kind: "cursor-mdc",
           isAgentsMdCompanion: false,
         });
-        // Derive .cursorrules path from the project root portion of
-        // the .cursor/rules/glasstrace.mdc path. The agent rule's
-        // foundDir is the deepest dir we know about.
-        const cursorRulesParent = dirname(dirname(agent.infoFilePath));
-        const projectDir = dirname(cursorRulesParent);
+        // .cursorrules sits at foundDir — same parent as the
+        // .cursor/rules/ subtree.
         targets.push({
-          path: join(projectDir, ".cursorrules"),
+          path: join(foundDir, ".cursorrules"),
           kind: "cursorrules-legacy",
           isAgentsMdCompanion: false,
         });
       }
       targets.push({
-        path: join(projectRoot, "AGENTS.md"),
+        path: join(foundDir, "AGENTS.md"),
         kind: "agents-md-companion",
         isAgentsMdCompanion: true,
       });
@@ -256,7 +295,7 @@ function computeTargets(
         });
       }
       targets.push({
-        path: join(projectRoot, "AGENTS.md"),
+        path: join(foundDir, "AGENTS.md"),
         kind: "agents-md-companion",
         isAgentsMdCompanion: true,
       });

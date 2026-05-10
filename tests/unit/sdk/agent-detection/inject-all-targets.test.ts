@@ -381,6 +381,45 @@ describe("injectAllTargets — Wave 18 multi-target dispatcher (DISC-1782)", () 
     });
   });
 
+  describe("Codex P2 v6: monorepo companion AGENTS.md resolves against agent foundDir, not projectRoot", () => {
+    it("Claude detected at git root via .claude/ in a monorepo writes companion AGENTS.md at the git root, not at the projectRoot subdirectory", async () => {
+      // Synthetic agent whose infoFilePath points at <gitRoot>/CLAUDE.md
+      // even though the projectRoot is a deeper subdirectory. This
+      // mirrors what `detectAgents` produces when it walks up to find
+      // a marker at the git root in a monorepo init from a package
+      // subdirectory.
+      const gitRoot = testDir;
+      const apiDir = join(gitRoot, "packages", "api");
+      await mkdir(apiDir, { recursive: true });
+
+      const claudeAgent: DetectedAgent = {
+        name: "claude",
+        mcpConfigPath: join(gitRoot, ".mcp.json"),
+        infoFilePath: join(gitRoot, "CLAUDE.md"),
+        cliAvailable: false,
+        registrationCommand: "npx glasstrace mcp add --agent claude",
+      };
+
+      // projectRoot is `packages/api/`, but the agent's foundDir is
+      // the gitRoot. Companion AGENTS.md must land at gitRoot.
+      await injectAllTargets([claudeAgent], ENDPOINT, SDK_VERSION, apiDir);
+
+      const claude = await readFile(join(gitRoot, "CLAUDE.md"), "utf-8");
+      const agentsMdAtGitRoot = await readFile(
+        join(gitRoot, "AGENTS.md"),
+        "utf-8",
+      );
+      expect(claude).toContain("Glasstrace MCP");
+      expect(agentsMdAtGitRoot).toContain("Glasstrace MCP");
+
+      // The wrong location (apiDir) must NOT receive a companion
+      // AGENTS.md — the agent is at gitRoot, so the companion is too.
+      await expect(
+        readFile(join(apiDir, "AGENTS.md"), "utf-8"),
+      ).rejects.toThrow();
+    });
+  });
+
   describe("Codex P2 v4: append to existing .mdc without markers does NOT duplicate YAML frontmatter", () => {
     it("when .cursor/rules/glasstrace.mdc exists with user content but no Glasstrace markers, append-only writes the managed section without injecting a second --- ... --- block mid-file", async () => {
       // Pre-existing .mdc with the user's own frontmatter and prose
