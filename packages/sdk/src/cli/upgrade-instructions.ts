@@ -155,6 +155,14 @@ export async function runUpgradeInstructions(
   const sdkVersion =
     typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-dev";
 
+  // Track opted-in agents by identity (the agent reference itself),
+  // NOT by display path. Multiple agents (notably codex + generic)
+  // share the same canonical destination `AGENTS.md`; if we filtered
+  // by path-collision against `skipped`, a generic skip would
+  // incorrectly remove an opted-in codex from the refresh set
+  // (Codex P1 review of PR #274). Identity-based tracking avoids
+  // the collision.
+  const optedInAgents: DetectedAgent[] = [];
   for (const agent of agents) {
     if (agent.infoFilePath === null) {
       // Detected agent with no canonical infoFilePath — nothing to
@@ -208,21 +216,15 @@ export async function runUpgradeInstructions(
       skipped.push(displayPath);
       continue;
     }
+
+    optedInAgents.push(agent);
   }
 
   // Wave 18: refresh via `injectAllTargets` (multi-target dispatcher).
-  // Detected agents that survive the per-agent opted-in gate above
-  // will have their full Wave 18 destination set written here. The
-  // gate above only filtered the loop into `skipped` for agents with
-  // no managed section anywhere; surviving agents pass through to
-  // this single hoisted dispatch which writes to canonical 2026
-  // destinations + AGENTS.md companion + Cursor `.cursorrules`
-  // transitional fallback, deduplicating AGENTS.md across agents.
-  const optedInAgents = agents.filter(
-    (a) => a.infoFilePath !== null && !skipped.includes(
-      formatPathForOutput(a.infoFilePath, options.projectRoot),
-    ),
-  );
+  // Surviving agents pass through this single hoisted dispatch which
+  // writes to canonical 2026 destinations + AGENTS.md companion +
+  // Cursor `.cursorrules` transitional fallback, deduplicating
+  // AGENTS.md across agents.
   if (optedInAgents.length > 0) {
     try {
       await injectAllTargets(

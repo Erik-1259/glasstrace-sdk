@@ -44,10 +44,17 @@ const AGENT_RULES: AgentRule[] = [
     name: "codex",
     // Codex 2026 default discovery is `AGENTS.override.md` → `AGENTS.md` →
     // opt-in `project_doc_fallback_filenames`; `codex.md` is NOT in the
-    // default fallback list. Recognize legacy markers (`codex.md`,
-    // `.codex`) so projects that haven't migrated still classify as
-    // Codex, but write to AGENTS.md as the canonical destination.
-    markers: ["AGENTS.md", "codex.md", ".codex"],
+    // default fallback list. Detection requires Codex-specific markers
+    // (`codex.md` legacy, `.codex/` config dir) — `AGENTS.md` is NOT
+    // included as a marker because the SDK now writes `AGENTS.md`
+    // broadly via the multi-target dispatcher's companion writes; if
+    // `AGENTS.md` were a Codex marker, every project with the SDK's
+    // own companion AGENTS.md would re-classify as Codex on subsequent
+    // detect runs and trigger unintended `.codex/config.toml` writes
+    // (Codex P1 + Copilot P1 review of Wave 18 PR #274). The canonical
+    // write destination remains AGENTS.md regardless of which marker
+    // classified the project.
+    markers: ["codex.md", ".codex"],
     mcpConfigPath: (dir) => join(dir, ".codex", "config.toml"),
     infoFilePath: (dir) => join(dir, "AGENTS.md"),
     cliBinary: "codex",
@@ -77,10 +84,17 @@ const AGENT_RULES: AgentRule[] = [
     name: "windsurf",
     // Windsurf's current canonical workspace-rules format is
     // `.windsurf/rules/*.md`. AGENTS.md is a parallel cross-tool
-    // mechanism Windsurf also reads. The single-file `.windsurfrules` is
-    // the deprecated legacy form — recognized here as a marker so legacy
-    // projects classify correctly, but the SDK no longer writes to it.
-    markers: ["AGENTS.md", ".windsurf", ".windsurfrules"],
+    // mechanism Windsurf also reads BUT is NOT included as a Windsurf
+    // detection marker — the SDK writes `AGENTS.md` broadly via the
+    // multi-target dispatcher's companion writes, so treating
+    // `AGENTS.md` as a Windsurf marker would re-classify every
+    // SDK-managed project as Windsurf and cause `glasstrace uninit`
+    // to mutate the global `~/.codeium/windsurf/mcp_config.json` for
+    // non-Windsurf projects (Codex P1 + Copilot P1 review of Wave 18
+    // PR #274). The single-file `.windsurfrules` is the deprecated
+    // legacy form — recognized as a marker so legacy projects classify
+    // correctly, but the SDK no longer writes to it.
+    markers: [".windsurf", ".windsurfrules"],
     mcpConfigPath: () =>
       join(homedir(), ".codeium", "windsurf", "mcp_config.json"),
     infoFilePath: (dir) => join(dir, ".windsurf", "rules", "glasstrace.md"),

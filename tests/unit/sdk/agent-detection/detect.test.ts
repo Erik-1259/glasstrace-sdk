@@ -109,12 +109,18 @@ describe("detectAgents", () => {
       expect(codex!.infoFilePath).toBe(join(testDir, "AGENTS.md"));
     });
 
-    it("detects Codex via canonical AGENTS.md marker (Wave 18 — DISC-1782)", async () => {
+    it("does NOT classify a project as Codex via AGENTS.md alone (Codex P1 review of PR #274 — AGENTS.md is too broad as a Codex marker because the SDK writes it as a companion for every detected agent, so its presence cannot signal Codex specifically)", async () => {
       await writeFile(join(testDir, "AGENTS.md"), "# instructions");
       const agents = await detectAgents(testDir);
       const codex = agents.find((a) => a.name === "codex");
-      expect(codex).toBeDefined();
-      expect(codex!.infoFilePath).toBe(join(testDir, "AGENTS.md"));
+      // AGENTS.md alone falls through to the generic fallback (which
+      // writes AGENTS.md as the universal cross-tool destination).
+      // Codex-specific classification still requires `codex.md` or
+      // `.codex/` markers.
+      expect(codex).toBeUndefined();
+      const generic = agents.find((a) => a.name === "generic");
+      expect(generic).toBeDefined();
+      expect(generic!.infoFilePath).toBe(join(testDir, "AGENTS.md"));
     });
 
     it("detects Codex via .codex/ directory", async () => {

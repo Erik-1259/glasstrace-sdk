@@ -1055,16 +1055,19 @@ export async function runUninit(options: UninitOptions): Promise<UninitResult> {
     // Handle Windsurf global config at ~/.codeium/windsurf/mcp_config.json
     // Only process if the project has Windsurf markers, to avoid touching
     // global config for non-Windsurf projects
-    // Wave 18 (DISC-1782): recognize all three Windsurf markers — the
-    // legacy single-file `.windsurfrules`, the `.windsurf/` directory
-    // (workspace-rules format), and `AGENTS.md` (cross-tool parallel
-    // mechanism Windsurf also reads). Any of these means the project
-    // is a Windsurf workspace and the global Windsurf MCP config
-    // should be cleaned up on uninit.
+    // Windsurf-specific markers only. `AGENTS.md` is intentionally
+    // NOT a Windsurf marker here even though Windsurf reads it: the
+    // SDK now writes `AGENTS.md` broadly via the multi-target
+    // dispatcher's companion writes, so treating its presence as a
+    // Windsurf signal would cause `glasstrace uninit` from any
+    // SDK-managed non-Windsurf project to mutate the global
+    // `~/.codeium/windsurf/mcp_config.json` (Codex P1 + Copilot P1
+    // review of Wave 18 PR #274). Restrict to Windsurf-specific
+    // markers (`.windsurf/` workspace-rules dir or legacy
+    // `.windsurfrules`).
     const hasWindsurfMarkers =
       fs.existsSync(path.join(projectRoot, ".windsurfrules")) ||
-      fs.existsSync(path.join(projectRoot, ".windsurf")) ||
-      fs.existsSync(path.join(projectRoot, "AGENTS.md"));
+      fs.existsSync(path.join(projectRoot, ".windsurf"));
     if (hasWindsurfMarkers) {
       const windsurfConfigPath = path.join(
         os.homedir(),
