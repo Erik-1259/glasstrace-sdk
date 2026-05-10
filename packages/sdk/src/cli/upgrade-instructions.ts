@@ -245,6 +245,24 @@ export async function runUpgradeInstructions(
     }
   }
 
+  // Codex P3 review of v4: dedupe `skipped` against `refreshed`. In
+  // a legacy Codex migration, codex (canonical destination AGENTS.md)
+  // and generic (also canonical destination AGENTS.md) share the same
+  // path; codex's legacy `codex.md` carries the managed section so
+  // codex is opted-in and refreshes AGENTS.md, while generic has no
+  // managed section anywhere and is recorded in `skipped`. Without
+  // this dedup the SAME path "AGENTS.md" appears in both `refreshed`
+  // and `skipped`, contradicting itself for users and automation
+  // parsing the lists. Refresh wins (the file was actually written).
+  const refreshedSet = new Set(refreshed);
+  const dedupedSkipped = skipped.filter((p) => !refreshedSet.has(p));
+
   const exitCode = errors.length === 0 ? 0 : 1;
-  return { exitCode, refreshed, skipped, warnings, errors };
+  return {
+    exitCode,
+    refreshed,
+    skipped: dedupedSkipped,
+    warnings,
+    errors,
+  };
 }

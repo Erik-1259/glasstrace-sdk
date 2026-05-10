@@ -93,16 +93,43 @@ export async function injectAllTargets(
         writtenAgentsMd.add(target.path);
       }
 
-      const content =
-        target.kind === "cursor-mdc"
-          ? generateInfoSectionForCursorMdc(endpoint, sdkVersion)
-          : target.kind === "cursorrules-legacy"
-            ? generateInfoSectionForCursorrulesLegacy(endpoint, sdkVersion)
-            : generateInfoSection(agent, endpoint, sdkVersion);
+      // For cursor-mdc, emit the YAML frontmatter ONLY when creating
+      // the file from scratch — appending it verbatim to an existing
+      // mdc that has no markers would produce a duplicate `---` block
+      // mid-file and corrupt the rule shape (Codex P2 review of v4).
+      // The marker contract anchors on the managed-section markers
+      // alone; user-customized frontmatter above the managed section
+      // is preserved across re-renders. The managed section itself
+      // (markers + body, no frontmatter) is identical across all
+      // three file states (create / append / in-place replace), so
+      // the frontmatter is a "create-only prefix" handed to the write
+      // helper separately.
+      let createContent: string;
+      let managedSectionOnly: string;
+      if (target.kind === "cursor-mdc") {
+        createContent = generateInfoSectionForCursorMdc(endpoint, sdkVersion);
+        // Same body but without the frontmatter wrapper — used when
+        // appending to an existing mdc that already has its own
+        // frontmatter.
+        managedSectionOnly = generateInfoSection(agent, endpoint, sdkVersion);
+      } else if (target.kind === "cursorrules-legacy") {
+        createContent = generateInfoSectionForCursorrulesLegacy(
+          endpoint,
+          sdkVersion,
+        );
+        managedSectionOnly = createContent;
+      } else {
+        createContent = generateInfoSection(agent, endpoint, sdkVersion);
+        managedSectionOnly = createContent;
+      }
 
-      if (content === "") continue;
+      if (managedSectionOnly === "") continue;
 
-      await writeManagedSectionToTarget(target.path, content);
+      await writeManagedSectionToTarget(
+        target.path,
+        createContent,
+        managedSectionOnly,
+      );
     }
   }
 }
@@ -265,10 +292,27 @@ function computeTargets(
  * `EACCES`/`EPERM`/`EROFS`) and logs a per-error-class qualifier so
  * the user can distinguish permission failures from disk-full / path-
  * too-long / I/O failures.
+ *
+ * Accepts two content strings to handle the cursor-mdc case cleanly
+ * (Codex P2 review of v4):
+ *
+ *   - `createContent` — used ONLY when the target file does not
+ *     already exist. For cursor-mdc this includes the YAML
+ *     frontmatter wrapper (`--- ... ---`) ABOVE the managed section.
+ *   - `managedSectionOnly` — used when the target file already
+ *     exists, regardless of whether it carries existing markers.
+ *     For cursor-mdc this is the managed section without the
+ *     frontmatter, so appending it to an existing `.mdc` (which
+ *     already has its own frontmatter) does NOT produce a duplicate
+ *     `--- ... ---` block mid-file.
+ *
+ * For non-mdc targets the two strings are identical (the body
+ * IS the full content).
  */
 async function writeManagedSectionToTarget(
   filePath: string,
-  content: string,
+  createContent: string,
+  managedSectionOnly: string,
 ): Promise<void> {
   let existingContent: string | null = null;
   try {
@@ -281,11 +325,13 @@ async function writeManagedSectionToTarget(
     }
   }
 
-  // File does not exist — create with section content
+  // File does not exist — create with the full content (frontmatter
+  // wrapper for cursor-mdc, or the managed section alone for other
+  // targets).
   if (existingContent === null) {
     try {
       await mkdir(dirname(filePath), { recursive: true });
-      await writeFile(filePath, content, "utf-8");
+      await writeFile(filePath, createContent, "utf-8");
     } catch (err: unknown) {
       emitTargetWarning(filePath, "write", err);
       return;
@@ -293,7 +339,10 @@ async function writeManagedSectionToTarget(
     return;
   }
 
-  // File exists — check for markers
+  // File exists — check for markers. For both branches below we use
+  // `managedSectionOnly` (NOT `createContent`) so we don't inject a
+  // second YAML frontmatter block into a cursor-mdc file that
+  // already has one. The user's existing frontmatter is preserved.
   const lines = existingContent.split("\n");
   const boundaries = findMarkerBoundaries(lines);
 
@@ -301,15 +350,15 @@ async function writeManagedSectionToTarget(
   if (boundaries !== null) {
     const before = lines.slice(0, boundaries.startIdx);
     const after = lines.slice(boundaries.endIdx + 1);
-    const contentWithoutTrailingNewline = content.endsWith("\n")
-      ? content.slice(0, -1)
-      : content;
+    const contentWithoutTrailingNewline = managedSectionOnly.endsWith("\n")
+      ? managedSectionOnly.slice(0, -1)
+      : managedSectionOnly;
     newContent = [...before, contentWithoutTrailingNewline, ...after].join(
       "\n",
     );
   } else {
     const separator = existingContent.endsWith("\n") ? "\n" : "\n\n";
-    newContent = existingContent + separator + content;
+    newContent = existingContent + separator + managedSectionOnly;
   }
 
   try {

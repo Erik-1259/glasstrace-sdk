@@ -381,6 +381,60 @@ describe("injectAllTargets — Wave 18 multi-target dispatcher (DISC-1782)", () 
     });
   });
 
+  describe("Codex P2 v4: append to existing .mdc without markers does NOT duplicate YAML frontmatter", () => {
+    it("when .cursor/rules/glasstrace.mdc exists with user content but no Glasstrace markers, append-only writes the managed section without injecting a second --- ... --- block mid-file", async () => {
+      // Pre-existing .mdc with the user's own frontmatter and prose
+      // but NO Glasstrace markers. The wave 18 dispatcher's append
+      // path must NOT inject another full frontmatter block — that
+      // would corrupt the .mdc rule shape.
+      const userMdcPath = join(testDir, ".cursor", "rules", "glasstrace.mdc");
+      await mkdir(join(testDir, ".cursor", "rules"), { recursive: true });
+      const userExisting = [
+        "---",
+        "description: my own rules",
+        "alwaysApply: false",
+        "globs: ['src/**/*.ts']",
+        "---",
+        "",
+        "# My personal rules",
+        "Use double-quotes for all strings.",
+        "",
+      ].join("\n");
+      await writeFile(userMdcPath, userExisting, "utf-8");
+
+      await injectAllTargets(
+        [makeAgent("cursor", testDir)],
+        ENDPOINT,
+        SDK_VERSION,
+        testDir,
+      );
+
+      const after = await readFile(userMdcPath, "utf-8");
+
+      // Exactly ONE `--- ... ---` block in the file (the user's
+      // original frontmatter), not two. The injected managed
+      // section is appended below the existing content with HTML
+      // comment markers but no frontmatter wrapper.
+      const frontmatterDelimiterCount = (after.match(/^---$/gm) ?? []).length;
+      expect(frontmatterDelimiterCount).toBe(2); // opening + closing of user's own frontmatter
+
+      // User's existing content preserved.
+      expect(after).toContain("description: my own rules");
+      expect(after).toContain("# My personal rules");
+      expect(after).toContain("Use double-quotes for all strings.");
+
+      // Managed section appended with markers but no fresh frontmatter.
+      expect(after).toContain("<!-- glasstrace:mcp:start v=");
+      expect(after).toContain("<!-- glasstrace:mcp:end -->");
+      expect(after).toContain("Glasstrace MCP");
+
+      // Crucially: the SDK's own `description: Glasstrace MCP runtime
+      // debugging tools` frontmatter line (which would only appear
+      // inside a duplicate `---` block) does NOT show up.
+      expect(after).not.toContain("description: Glasstrace MCP runtime");
+    });
+  });
+
   describe("DoD-P4: path-exists gate removal regression test", () => {
     it("creates AGENTS.md from scratch when it does not pre-exist (path-exists gate dropped per Wave 18)", async () => {
       // Fresh project — no AGENTS.md, no CLAUDE.md, nothing.
