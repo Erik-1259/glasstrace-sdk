@@ -110,6 +110,13 @@ const LOCALE_REGEX = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/;
 const TIMEZONE_REGEX =
   /^(?:UTC|GMT|[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+){1,3})$/;
 
+// Non-negative integer string for participant-count fields. Tighter
+// than TOKEN_REGEX so misleading non-digit values (`"many"`, `"a few"`,
+// `"1:2"`) are rejected as `raw_payload` rather than recorded as
+// causal evidence. The leading anchor reproduces the TOKEN_REGEX
+// rejection of signed counts (`"-1"`) and rejects empty strings.
+const DIGIT_REGEX = /^[0-9]+$/;
+
 // Unsafe-pattern detectors. Each rejects independently; the first
 // match determines the omission reason. The patterns and the reason
 // mapping are calibrated against the product's
@@ -191,6 +198,9 @@ function passesFieldValidator(
 ): boolean {
   if (key === "locale") return LOCALE_REGEX.test(value);
   if (key === "timezone") return TIMEZONE_REGEX.test(value);
+  if (key === "participantCount" || key === "activeParticipantCount") {
+    return DIGIT_REGEX.test(value);
+  }
   return TOKEN_REGEX.test(value);
 }
 

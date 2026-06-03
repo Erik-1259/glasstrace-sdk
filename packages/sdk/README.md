@@ -526,9 +526,23 @@ operation kind (`email`, `calendar_link`, `webhook`, `external_api`,
 optional execution phase (`request`, `post_response`, `background`,
 `unknown`), and a small set of allowlisted semantic fields:
 `templateKey`, `providerOperation`, `role`, `locale`, `timezone`,
-`status`, `phase`. Each value is bounded to compact tokens — IANA
-timezones, BCP-47 locales, identifier-shaped enum tokens. The
-per-trace operation budget is five.
+`status`, `phase`, `recipientClass`, `participantCount`,
+`activeParticipantCount`. Each value is bounded to compact tokens —
+IANA timezones, BCP-47 locales, identifier-shaped enum tokens, or
+non-negative integer strings for the count fields. The per-span
+operation budget is five.
+
+`recipientClass`, `participantCount`, and `activeParticipantCount`
+let you record concise causal evidence about which recipient class
+was targeted and how many domain entities were included. The two
+count fields validate strictly as non-negative integer strings —
+`"0"`, `"1"`, `"12"` are accepted; `"-1"`, `"1.5"`, `"many"`, or
+any value with a non-digit character is rejected and counted under
+the `raw_payload` omission reason. `recipientClass` uses the
+identifier-shaped compact-token validator and preserves case
+verbatim, so normalize labels at the call site —
+`recipientClass="removed-participant"` (lowercase-kebab) is the
+recommended convention.
 
 What the SDK does not capture: recipient email addresses, sender or
 recipient names, rendered email subjects or bodies, calendar links,
@@ -564,6 +578,9 @@ recordSideEffect({
     role: "invitee",
     locale: "en-US",
     timezone: "Europe/Paris",
+    recipientClass: "removed-participant",
+    participantCount: "2",
+    activeParticipantCount: "1",
   },
 });
 ```

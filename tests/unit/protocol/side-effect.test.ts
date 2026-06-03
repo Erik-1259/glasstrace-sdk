@@ -39,6 +39,9 @@ describe("GLASSTRACE_ATTRIBUTE_NAMES — side-effect entries", () => {
     "SIDE_EFFECT_FIELD_TIMEZONE",
     "SIDE_EFFECT_FIELD_STATUS",
     "SIDE_EFFECT_FIELD_PHASE",
+    "SIDE_EFFECT_FIELD_RECIPIENT_CLASS",
+    "SIDE_EFFECT_FIELD_PARTICIPANT_COUNT",
+    "SIDE_EFFECT_FIELD_ACTIVE_PARTICIPANT_COUNT",
     "SIDE_EFFECT_OMITTED_PII",
     "SIDE_EFFECT_OMITTED_SECRET",
     "SIDE_EFFECT_OMITTED_RAW_PAYLOAD",
@@ -48,7 +51,7 @@ describe("GLASSTRACE_ATTRIBUTE_NAMES — side-effect entries", () => {
     "SIDE_EFFECT_OMITTED_CAPTURE_DISABLED",
   ] as const;
 
-  it("exports exactly the 18 expected SDK-049 keys", () => {
+  it("exports exactly the 21 expected side-effect attribute keys", () => {
     const actual = Object.keys(GLASSTRACE_ATTRIBUTE_NAMES).filter((k) =>
       k.startsWith("SIDE_EFFECT_"),
     );
@@ -99,6 +102,15 @@ describe("GLASSTRACE_ATTRIBUTE_NAMES — side-effect entries", () => {
     expect(GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_PHASE).toBe(
       "glasstrace.side_effect.field.phase",
     );
+    expect(GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_RECIPIENT_CLASS).toBe(
+      "glasstrace.side_effect.field.recipientClass",
+    );
+    expect(GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_PARTICIPANT_COUNT).toBe(
+      "glasstrace.side_effect.field.participantCount",
+    );
+    expect(
+      GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_ACTIVE_PARTICIPANT_COUNT,
+    ).toBe("glasstrace.side_effect.field.activeParticipantCount");
   });
 
   it("omission attributes use the snake_case omission-reason suffix", () => {
@@ -154,7 +166,7 @@ describe("SIDE_EFFECT_OPERATION_KINDS", () => {
 });
 
 describe("SIDE_EFFECT_SEMANTIC_FIELD_KEYS", () => {
-  it("matches the SCHEMA-036 allowlist verbatim", () => {
+  it("matches the side-effect allowlist verbatim", () => {
     expect([...SIDE_EFFECT_SEMANTIC_FIELD_KEYS]).toEqual([
       "templateKey",
       "providerOperation",
@@ -163,12 +175,25 @@ describe("SIDE_EFFECT_SEMANTIC_FIELD_KEYS", () => {
       "timezone",
       "status",
       "phase",
+      "recipientClass",
+      "participantCount",
+      "activeParticipantCount",
     ]);
   });
 
   it("derives a literal-type union usable for record key types", () => {
     const sample: SideEffectSemanticFieldKey = "templateKey";
     expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(sample);
+  });
+
+  it("narrows the type union for each recipient-evidence key", () => {
+    const recipientClass: SideEffectSemanticFieldKey = "recipientClass";
+    const participantCount: SideEffectSemanticFieldKey = "participantCount";
+    const activeParticipantCount: SideEffectSemanticFieldKey =
+      "activeParticipantCount";
+    expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(recipientClass);
+    expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(participantCount);
+    expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(activeParticipantCount);
   });
 });
 
