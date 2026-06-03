@@ -152,6 +152,37 @@ describe("recordSideEffect — capture-config gating", () => {
       attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_TIMEZONE],
     ).toBe("Europe/Paris");
   });
+
+  it("emits recipient-evidence fields on the span when accepted", () => {
+    enableCapture();
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "FinalizeParticipantEmail",
+        status: "succeeded",
+        phase: "request",
+        fields: {
+          templateKey: "EventCanceledEmail",
+          recipientClass: "removed-participant",
+          participantCount: "2",
+          activeParticipantCount: "1",
+        },
+      });
+      span.end();
+    });
+    const attrs = exportedAttributes();
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_RECIPIENT_CLASS],
+    ).toBe("removed-participant");
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_PARTICIPANT_COUNT],
+    ).toBe("2");
+    expect(
+      attrs[
+        GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_ACTIVE_PARTICIPANT_COUNT
+      ],
+    ).toBe("1");
+  });
 });
 
 describe("recordSideEffect — no active span", () => {
@@ -263,6 +294,34 @@ describe("recordSideEffect — semantic-field rejection", () => {
     // Neither rejected key name nor value appears as an attribute.
     expect(attrs["recipient"]).toBeUndefined();
     expect(attrs["subject"]).toBeUndefined();
+  });
+
+  it("still drops keys outside the widened allowlist (e.g. defectSignal)", () => {
+    // Regression guard for the allowlist widening: a key that is
+    // semantically adjacent to the new recipient-evidence fields but
+    // NOT in the allowlist must continue to drop under
+    // unsupported_key. If a future change accidentally widens the
+    // filter to accept arbitrary keys, this test fails.
+    enableCapture();
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "FinalizeParticipantEmail",
+        // @ts-expect-error defectSignal is intentionally not allowlisted
+        fields: { defectSignal: "removed-participant-included" },
+      });
+      span.end();
+    });
+    const attrs = exportedAttributes();
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNSUPPORTED_KEY],
+    ).toBe(1);
+    expect(attrs["defectSignal"]).toBeUndefined();
+    expect(
+      attrs[
+        "glasstrace.side_effect.field.defectSignal"
+      ],
+    ).toBeUndefined();
   });
 
   it("drops unsafe field values and counts them under their reason", () => {

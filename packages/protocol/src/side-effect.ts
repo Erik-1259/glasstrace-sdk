@@ -57,6 +57,9 @@ export const SIDE_EFFECT_SEMANTIC_FIELD_KEYS = [
   "timezone",
   "status",
   "phase",
+  "recipientClass",
+  "participantCount",
+  "activeParticipantCount",
 ] as const;
 
 /**

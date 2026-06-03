@@ -418,6 +418,114 @@ describe("checkSemanticFieldValue — token fields (templateKey, role, etc.)", (
   });
 });
 
+describe("checkSemanticFieldValue — recipient-evidence fields", () => {
+  // The three keys added to the allowlist are not `locale` or
+  // `timezone`, so `passesFieldValidator` falls through to
+  // TOKEN_REGEX. These assertions lock in that routing so a future
+  // regression that adds a per-key branch cannot silently re-route
+  // them to a different validator.
+  it("routes recipientClass through TOKEN_REGEX (compact token)", () => {
+    expect(
+      checkSemanticFieldValue("recipientClass", "removed-participant").accepted,
+    ).toBe(true);
+    expect(
+      checkSemanticFieldValue("recipientClass", "active.participant").accepted,
+    ).toBe(true);
+    expect(
+      checkSemanticFieldValue("recipientClass", "primary_role").accepted,
+    ).toBe(true);
+  });
+
+  it("accepts non-negative integer strings for participantCount and activeParticipantCount", () => {
+    for (const value of ["0", "1", "2", "12", "999"]) {
+      expect(
+        checkSemanticFieldValue("participantCount", value).accepted,
+      ).toBe(true);
+      expect(
+        checkSemanticFieldValue("activeParticipantCount", value).accepted,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects non-digit count values as raw_payload (digit-only validator)", () => {
+    // Strict integer-string shape for the count fields rejects misleading
+    // labels like "many", "a few", or shape-confused values like "1:2"
+    // or "1.5". TOKEN_REGEX would accept some of these; the per-key
+    // digit-only branch in passesFieldValidator catches them and routes
+    // to raw_payload omission instead of emitting bad causal evidence.
+    for (const key of [
+      "participantCount",
+      "activeParticipantCount",
+    ] as const) {
+      for (const value of ["many", "one", "1:2", "1.5", "2k"]) {
+        const outcome = checkSemanticFieldValue(key, value);
+        expect(outcome.accepted).toBe(false);
+        if (!outcome.accepted) expect(outcome.reason).toBe("raw_payload");
+      }
+    }
+  });
+
+  it("preserves case verbatim for recipientClass (no normalization)", () => {
+    const upper = checkSemanticFieldValue(
+      "recipientClass",
+      "REMOVED-PARTICIPANT",
+    );
+    const lower = checkSemanticFieldValue(
+      "recipientClass",
+      "removed-participant",
+    );
+    expect(upper.accepted).toBe(true);
+    expect(lower.accepted).toBe(true);
+    if (upper.accepted) expect(upper.value).toBe("REMOVED-PARTICIPANT");
+    if (lower.accepted) expect(lower.value).toBe("removed-participant");
+  });
+
+  it("rejects negative-encoded counts as raw_payload (TOKEN_REGEX rejects leading hyphen)", () => {
+    for (const value of ["-1", "-12"]) {
+      const outcome = checkSemanticFieldValue("participantCount", value);
+      expect(outcome.accepted).toBe(false);
+      if (!outcome.accepted) expect(outcome.reason).toBe("raw_payload");
+    }
+  });
+
+  it("rejects values with embedded spaces or emoji as raw_payload", () => {
+    for (const key of [
+      "recipientClass",
+      "participantCount",
+      "activeParticipantCount",
+    ] as const) {
+      const space = checkSemanticFieldValue(key, "two participants");
+      expect(space.accepted).toBe(false);
+      if (!space.accepted) expect(space.reason).toBe("raw_payload");
+      const emoji = checkSemanticFieldValue(key, "two 🚫 participants");
+      expect(emoji.accepted).toBe(false);
+      if (!emoji.accepted) expect(emoji.reason).toBe("raw_payload");
+    }
+  });
+
+  it("rejects empty string and non-string values as raw_payload", () => {
+    for (const key of [
+      "recipientClass",
+      "participantCount",
+      "activeParticipantCount",
+    ] as const) {
+      expect(checkSemanticFieldValue(key, "").accepted).toBe(false);
+      for (const value of [123, null, undefined, {}]) {
+        const outcome = checkSemanticFieldValue(key, value);
+        expect(outcome.accepted).toBe(false);
+        if (!outcome.accepted) expect(outcome.reason).toBe("raw_payload");
+      }
+    }
+  });
+
+  it("rejects values exceeding the field budget as value_too_long", () => {
+    const tooLong = "A".repeat(MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH + 1);
+    const outcome = checkSemanticFieldValue("recipientClass", tooLong);
+    expect(outcome.accepted).toBe(false);
+    if (!outcome.accepted) expect(outcome.reason).toBe("value_too_long");
+  });
+});
+
 describe("MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN", () => {
   it("matches the SCHEMA-036 budget", () => {
     expect(MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN).toBe(5);

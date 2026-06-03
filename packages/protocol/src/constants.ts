@@ -172,6 +172,12 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   SIDE_EFFECT_FIELD_TIMEZONE: "glasstrace.side_effect.field.timezone",
   SIDE_EFFECT_FIELD_STATUS: "glasstrace.side_effect.field.status",
   SIDE_EFFECT_FIELD_PHASE: "glasstrace.side_effect.field.phase",
+  SIDE_EFFECT_FIELD_RECIPIENT_CLASS:
+    "glasstrace.side_effect.field.recipientClass",
+  SIDE_EFFECT_FIELD_PARTICIPANT_COUNT:
+    "glasstrace.side_effect.field.participantCount",
+  SIDE_EFFECT_FIELD_ACTIVE_PARTICIPANT_COUNT:
+    "glasstrace.side_effect.field.activeParticipantCount",
 
   // Omission reason attributes — one per allowlisted reason. The
   // attribute value carries an integer count; the rejected value is
