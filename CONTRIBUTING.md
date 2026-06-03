@@ -89,7 +89,7 @@ dependency truly belongs to the root `devDependencies` (build
 tooling shared across the monorepo — `turbo`, `typescript`,
 `vitest`, `eslint`). When in doubt, scope to a workspace.
 
-Two rules to avoid lockfile drift (see DISC-1317):
+Two rules to avoid lockfile drift:
 
 1. **Run from the canonical checkout directory**, not from a git
    worktree. `npm install` falls back to the directory basename
@@ -153,21 +153,34 @@ Minor and patch bumps are grouped; major bumps get individual PRs.
 
 Dependabot regenerates `package-lock.json` in its own runner whose npm
 view differs from this repo's CI runners (`ubuntu-latest` with the
-declared `npm@11.6.1`). The mismatch prunes platform-specific optional
-peer entries (e.g. `@emnapi/core`, `@emnapi/runtime`) from the lockfile
-Dependabot commits, and `npm ci` on Linux CI then rejects the PR with
-`EUSAGE: Missing: <package> from lock file` before the DISC-1317 drift
-guard ever runs.
+declared `npm@11.6.1`). The mismatch leaves the lockfile Dependabot
+commits missing the top-level resolution entries for platform-
+conditional optional peers (e.g. `@emnapi/core`, `@emnapi/runtime`),
+and `npm ci` on Linux CI then rejects the PR with
+`EUSAGE: Missing: <package> from lock file` before the post-install
+lockfile-drift guard in `ci.yml` ever runs.
 
 `.github/workflows/dependabot-lockfile-fixup.yml` triggers on every
 Dependabot pull request (events `opened`, `synchronize`, `reopened`),
 regenerates `package-lock.json` on `ubuntu-latest` under `npm@11.6.1`,
-and pushes a fixup commit back to the Dependabot branch. As a result,
-Dependabot PRs in this repo may carry a second auto-generated commit
-titled `chore(deps): regenerate package-lock.json on Linux runner` —
-this is expected and required for the PR to pass CI. Pushing a new
-commit to the branch (e.g. via Dependabot's "Recreate" or "Rebase"
-comment commands) or reopening a closed PR retriggers the workflow.
+verifies each installed package's signature, sanity-checks the
+resulting diff size, and pushes a fixup commit back to the Dependabot
+branch. As a result, Dependabot PRs in this repo may carry a second
+auto-generated commit titled `chore(deps): regenerate
+package-lock.json on Linux runner` — this is expected and required for
+the PR to pass CI. Pushing a new commit to the branch (e.g. via
+Dependabot's "Recreate" or "Rebase" comment commands) or reopening a
+closed PR retriggers the workflow.
+
+The workflow refuses to auto-push when the regenerated lockfile diff
+exceeds 5000 changed lines — that threshold is well above the
+hundreds-of-lines diffs normal weekly Dependabot regens produce, so
+crossing it suggests either a malicious package introduction or an
+unintended misresolution. Either way the maintainer is paged into the
+review rather than the workflow publishing silently. `npm audit
+signatures` runs on the regenerated `node_modules` and aborts before
+push if any package's signature does not verify against the npmjs.org
+public key.
 
 #### Required repository secret
 
