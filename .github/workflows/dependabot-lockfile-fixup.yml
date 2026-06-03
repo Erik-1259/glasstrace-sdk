@@ -8,21 +8,46 @@ name: Dependabot Lockfile Fixup
 # ---------------
 # Dependabot regenerates `package-lock.json` in its own runner whose npm
 # view differs from this repo's CI runners (`ubuntu-latest` with the
-# declared `npm@11.6.1`). The mismatch prunes platform-specific optional
-# peer entries (for example `@emnapi/core@1.10.0`, `@emnapi/runtime@1.10.0`)
-# from the lockfile Dependabot commits, and `npm ci` on the Linux CI
-# runner then rejects the PR with `EUSAGE: Missing: <package>@<version>
-# from lock file` before the DISC-1317 drift guard ever runs.
+# declared `npm@11.6.1`). The mismatch leaves the lockfile Dependabot
+# commits missing the top-level resolution entries for platform-
+# conditional optional peers (for example `@emnapi/core@1.10.0`,
+# `@emnapi/runtime@1.10.0`), and `npm ci` on the Linux CI runner then
+# rejects the PR with `EUSAGE: Missing: <package>@<version> from lock
+# file` before the post-install lockfile-drift guard in `ci.yml` ever
+# runs.
 #
 # This workflow regenerates the lockfile on the same OS and npm version
 # CI validates against, then force-pushes the corrected lockfile back to
 # the Dependabot branch. After the push, CI sees a Linux-canonical
-# lockfile and proceeds normally. See SDK-038 / DISC-1361 for the full
-# decision rationale.
+# lockfile and proceeds normally.
 #
 # This generalizes the pattern in `update-transitive-dep.yml`
 # (workflow_dispatch-triggered manual lockfile regeneration) to a
 # Dependabot-triggered automated path.
+#
+# REGENERATION STRATEGY
+# ---------------------
+# The regeneration step removes the existing `package-lock.json` and
+# runs `npm install --no-audit --ignore-scripts`, deliberately not
+# `npm install --package-lock-only`. Empirical observation: once npm
+# considers an existing lockfile "consistent" with `package.json`,
+# `--package-lock-only` skips re-resolution and therefore does not
+# add missing top-level resolution entries for optional peers
+# introduced by new platform-conditional native bindings (the failure
+# mode is `npm ci` rejecting the lockfile with `EUSAGE: Missing:
+# @emnapi/core@<version> from lock file` after a new
+# `@rolldown/binding-wasm32-wasi`-style binding enters the graph).
+# Only a full `npm install` walks the resolution thoroughly enough to
+# write those entries; the output is byte-identical on macOS and
+# Linux.
+#
+# Trade-off: full regen pulls in any minor transitive patches that
+# shipped between Dependabot's PR-open and the fixup-workflow run, so
+# this workflow's commit may include resolution drift beyond the
+# package.json edits the Dependabot PR title advertises. For weekly
+# Dependabot cadence, steady-state delta is days, not weeks; the
+# alternative (failed CI on every Dependabot PR that introduces a new
+# optional native binding) is strictly worse.
 #
 # CI RETRIGGER NOTE
 # -----------------
@@ -75,10 +100,18 @@ name: Dependabot Lockfile Fixup
 #   the workflow level), so the elevated scope is granted only to the
 #   regeneration job.
 # - The PR branch's `package.json` scripts are untrusted input. The
-#   workflow runs only `npm install --package-lock-only --no-audit`,
-#   which does not execute lifecycle scripts (per the npm 11.x docs).
-#   It does not run `npm ci`, `npm install` without
-#   `--package-lock-only`, `npm run`, or any code from the PR branch.
+#   regeneration step runs `npm install --no-audit --ignore-scripts`;
+#   `--ignore-scripts` is the load-bearing safety flag that prevents
+#   lifecycle scripts (`preinstall`, `install`, `postinstall`,
+#   `prepare`) from running off the PR branch. The previous
+#   `--package-lock-only` formulation incidentally skipped scripts as
+#   a side effect of its mode; this fix makes the scripts-skipped
+#   property explicit and resolution-complete simultaneously. The
+#   workflow does not run `npm ci`, `npm install` without
+#   `--ignore-scripts`, `npm run`, or any other code from the PR
+#   branch. Node_modules is written to the runner-local workspace as a
+#   side effect of full `npm install`, but no published artifact is
+#   built from it and the runner is ephemeral.
 # - This trigger is `pull_request`, not `pull_request_target`, so the
 #   workflow definition that runs is the one on `main`, not the one on
 #   the PR branch — a Dependabot PR cannot edit this workflow file in
@@ -87,14 +120,41 @@ name: Dependabot Lockfile Fixup
 #   diff is action-version pinning only and is reviewed by a human
 #   before merge.)
 #
-# RELATIONSHIP TO DISC-1317 DRIFT GUARD
-# -------------------------------------
-# This workflow defends against the DISC-1361 failure (committed
-# lockfile is missing platform-optional peers; `npm ci` itself fails).
-# The DISC-1317 drift guard (`git diff --exit-code -- package-lock.json`
-# after `npm ci` in `ci.yml`) defends against post-`npm ci` mutation.
-# The two defenses cover disjoint failure modes and remain
-# belt-and-suspenders. SDK-038 §C5 documents the interaction in detail.
+# SECURITY CONSIDERATIONS
+# -----------------------
+# - `--ignore-scripts` blocks every lifecycle script during `npm
+#   install` (`preinstall`, `install`, `postinstall`, `prepare`,
+#   `prepack`), so no code from the untrusted PR-branch
+#   `package.json` is executed during regeneration. The workflow
+#   does not invoke any binary, build, or test command that would
+#   read the PR's source code.
+# - `npm audit signatures` runs against the regenerated
+#   `node_modules` and verifies each installed package's integrity
+#   and signature against the npmjs.org public key. The workflow
+#   aborts before push if any signature does not verify, defending
+#   against a registry compromise that served substituted tarballs
+#   to the Dependabot runner.
+# - The "Sanity-check lockfile diff size" step refuses to publish a
+#   regenerated lockfile whose total line change exceeds 5000 lines.
+#   Normal Dependabot regens produce diffs of hundreds of lines;
+#   anything larger suggests either a malicious package introduction
+#   or an unintended misresolution, both of which warrant human
+#   review rather than automated publication.
+# - The trigger guard, `pull_request` (not `pull_request_target`),
+#   force-with-lease push, concurrency cancellation, and pre-push
+#   HEAD-equality check are detailed in the CONCURRENCY GUARANTEES
+#   and SCOPE / SAFETY sections above; together they prevent
+#   forks from impersonating Dependabot, prevent clobbering a
+#   concurrent rebase, and bound the elevated `contents: write`
+#   grant to the single regeneration job.
+#
+# RELATIONSHIP TO THE POST-INSTALL DRIFT GUARD
+# --------------------------------------------
+# This workflow defends against a committed lockfile that is missing
+# platform-optional peers, so `npm ci` itself fails. A separate drift
+# guard in `ci.yml` (`git diff --exit-code -- package-lock.json` after
+# `npm ci` succeeds) defends against post-`npm ci` mutation. The two
+# defenses cover disjoint failure modes and remain belt-and-suspenders.
 # =============================================================================
 
 on:
@@ -133,7 +193,7 @@ jobs:
       # defense; the explicit job-level write grant is the documented
       # escape. The repo setting "Allow GitHub Actions to create and
       # approve pull requests" must also be enabled (Settings →
-      # Actions → General). See SDK-038 §O1 Cons for details.
+      # Actions → General).
       contents: write
     steps:
       - name: Checkout PR head
@@ -164,7 +224,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           # Pin to 22.15 to match release.yml and update-transitive-dep.yml,
-          # avoiding Node 22.22.2's broken bundled npm. See DISC-443.
+          # avoiding Node 22.22.2's broken bundled npm (a known upstream
+          # regression where the bundled npm fails to load
+          # `promise-retry`).
           node-version: 22.15
           cache: npm
 
@@ -172,8 +234,9 @@ jobs:
         # The repo's package.json declares `"packageManager":
         # "npm@11.6.1"`. Aligning the workflow's npm with the CI
         # runner's npm is the load-bearing step — it eliminates the
-        # cross-npm-version optional-peer-pruning failure that
-        # DISC-1361 documents.
+        # cross-npm-version optional-peer-pruning failure mode where
+        # a lockfile generated under one npm version is missing
+        # platform-conditional entries another npm version requires.
         run: npm install -g npm@11.6.1
 
       - name: Capture checkout SHA
@@ -189,12 +252,40 @@ jobs:
           echo "Checked out SHA: $sha"
 
       - name: Regenerate lockfile
-        # `--package-lock-only` updates package-lock.json without
-        # writing to node_modules and without running lifecycle
-        # scripts. `--no-audit` skips the audit pass; the CI run that
-        # follows on the corrected branch performs `npm audit
-        # --audit-level=high` separately.
-        run: npm install --package-lock-only --no-audit
+        # Remove the existing lockfile so npm re-resolves the full
+        # dependency tree from scratch. `--package-lock-only` was used
+        # previously but cannot add missing top-level resolution
+        # entries for platform-conditional optional peers once it
+        # considers the lockfile "consistent" — only a full
+        # `npm install` walks the resolution thoroughly enough to add
+        # them. See the REGENERATION STRATEGY section in this file's
+        # header for the full rationale. The output is byte-identical
+        # on macOS and Linux.
+        #
+        # `--ignore-scripts` blocks lifecycle scripts from running off
+        # the PR branch; see the SCOPE / SAFETY section in this file's
+        # header for the threat-model rationale. `--no-audit` skips
+        # the audit pass; the CI run that follows on the corrected
+        # branch performs `npm audit --audit-level=high` separately.
+        run: |
+          rm -f package-lock.json
+          npm install --no-audit --ignore-scripts
+
+      - name: Verify package signatures
+        # `npm audit signatures` (npm 10+) verifies each installed
+        # package's integrity and signature against the npmjs.org
+        # public key. Belt-and-suspenders against a compromised
+        # registry that served substituted tarballs to the Dependabot
+        # runner: the lockfile's recorded `sha512` integrity hashes
+        # would already protect later `npm ci` runs, but verifying
+        # signatures here catches a substitution before the bot
+        # publishes the lockfile rather than after.
+        #
+        # This step runs against the populated `node_modules` the
+        # previous step produced. It does not run any code from the
+        # PR branch — the audit walks the local install tree and
+        # compares hashes/signatures against registry metadata.
+        run: npm audit signatures
 
       - name: Detect lockfile diff
         id: diff
@@ -214,6 +305,41 @@ jobs:
             git diff --stat -- package-lock.json
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Sanity-check lockfile diff size
+        id: sanity
+        if: steps.diff.outputs.changed == 'true'
+        # Refuse to auto-publish a regenerated lockfile whose total
+        # line change exceeds 5000 lines. Normal Dependabot regens
+        # produce diffs of hundreds of lines; anything an order of
+        # magnitude larger suggests either a malicious package
+        # introduction or an unintended misresolution and warrants
+        # human review before publication. The threshold is wide
+        # enough to absorb a full-regen on this repo (~1100 lines as
+        # of this writing) plus growth headroom.
+        #
+        # `git diff --numstat` emits `<adds>\t<dels>\t<path>` per
+        # changed file, so summing the first two columns is robust
+        # against locale and stat-line wording changes.
+        #
+        # Emits a `safe_size` output (`true`/`false`) before any
+        # `exit 1` so the summary step can attribute a failed run to
+        # the diff-size guard rather than to remote-tip advance.
+        env:
+          MAX_LINES: 5000
+        run: |
+          set -euo pipefail
+          numstat=$(git diff --numstat -- package-lock.json | head -n1)
+          adds=$(printf '%s' "$numstat" | awk '{print $1+0}')
+          dels=$(printf '%s' "$numstat" | awk '{print $2+0}')
+          total=$((adds + dels))
+          echo "Lockfile diff: +$adds / -$dels (total $total lines)"
+          if [ "$total" -gt "$MAX_LINES" ]; then
+            echo "safe_size=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Lockfile diff ($total lines) exceeds the $MAX_LINES-line safety threshold. Refusing to auto-publish — a maintainer should regenerate locally and inspect the change before pushing."
+            exit 1
+          fi
+          echo "safe_size=true" >> "$GITHUB_OUTPUT"
 
       - name: Verify remote tip has not advanced
         id: verify
@@ -280,15 +406,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package-lock.json
           # Build the commit message via printf so YAML / shell
-          # indentation does not leak into the message body. The
-          # trailing reference to SDK-038 and DISC-1361 lets a future
-          # auditor trace the commit back to the brief and discovery
-          # without checking out this workflow file.
+          # indentation does not leak into the message body.
           commit_message=$(printf '%s\n\n%s\n%s\n%s\n' \
             'chore(deps): regenerate package-lock.json on Linux runner' \
             'Auto-generated by .github/workflows/dependabot-lockfile-fixup.yml' \
             'to canonicalize the lockfile under the declared packageManager' \
-            '(npm@11.6.1) on ubuntu-latest. See SDK-038 / DISC-1361.')
+            '(npm@11.6.1) on ubuntu-latest.')
           git commit -m "$commit_message"
           git push \
             --force-with-lease="refs/heads/${HEAD_REF}:${EXPECTED_SHA}" \
@@ -300,6 +423,7 @@ jobs:
         if: always()
         env:
           DIFF_CHANGED: ${{ steps.diff.outputs.changed }}
+          SAFE_SIZE: ${{ steps.sanity.outputs.safe_size }}
           SAFE_TO_PUSH: ${{ steps.verify.outputs.safe_to_push }}
           PUSHED: ${{ steps.push.outputs.pushed }}
           PAT_SET: ${{ secrets.DEPENDABOT_LOCKFILE_TOKEN != '' }}
@@ -307,6 +431,10 @@ jobs:
           set -euo pipefail
           if [ "${DIFF_CHANGED:-}" != "true" ]; then
             echo "No lockfile change required; nothing pushed."
+            exit 0
+          fi
+          if [ "${SAFE_SIZE:-}" = "false" ]; then
+            echo "::error::Lockfile diff exceeded the size-sanity threshold; push refused. A maintainer should regenerate locally and inspect the change before pushing."
             exit 0
           fi
           if [ "${SAFE_TO_PUSH:-}" != "true" ]; then
