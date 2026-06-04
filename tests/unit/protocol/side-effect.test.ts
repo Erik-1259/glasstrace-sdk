@@ -15,12 +15,16 @@ import {
   GLASSTRACE_ATTRIBUTE_NAMES,
   DEFAULT_CAPTURE_CONFIG,
   SIDE_EFFECT_OPERATION_KINDS,
-  SIDE_EFFECT_SEMANTIC_FIELD_KEYS,
+  SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS,
+  SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN,
+  MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH,
+  isSideEffectSemanticFieldKey,
   SIDE_EFFECT_OMISSION_REASONS,
   SIDE_EFFECT_OPERATION_STATUSES,
   SIDE_EFFECT_OPERATION_PHASES,
   type SideEffectOperationKind,
   type SideEffectSemanticFieldKey,
+  type SideEffectSemanticFieldStableCoreKey,
   type SideEffectOmissionReason,
   type SideEffectOperationStatus,
   type SideEffectOperationPhase,
@@ -165,9 +169,9 @@ describe("SIDE_EFFECT_OPERATION_KINDS", () => {
   });
 });
 
-describe("SIDE_EFFECT_SEMANTIC_FIELD_KEYS", () => {
-  it("matches the side-effect allowlist verbatim", () => {
-    expect([...SIDE_EFFECT_SEMANTIC_FIELD_KEYS]).toEqual([
+describe("SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS", () => {
+  it("contains exactly the 7 stable-core keys in canonical order", () => {
+    expect([...SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS]).toEqual([
       "templateKey",
       "providerOperation",
       "role",
@@ -175,25 +179,119 @@ describe("SIDE_EFFECT_SEMANTIC_FIELD_KEYS", () => {
       "timezone",
       "status",
       "phase",
-      "recipientClass",
-      "participantCount",
-      "activeParticipantCount",
     ]);
   });
 
-  it("derives a literal-type union usable for record key types", () => {
-    const sample: SideEffectSemanticFieldKey = "templateKey";
-    expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(sample);
+  it("derives a narrower literal-type union for stable-core autocomplete", () => {
+    const sample: SideEffectSemanticFieldStableCoreKey = "templateKey";
+    expect(SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS).toContain(sample);
+  });
+});
+
+describe("SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN", () => {
+  it("matches lowerCamelCase keys ending in one of the four canonical suffixes", () => {
+    for (const key of [
+      "recipientClass",
+      "attachmentClass",
+      "severityClass",
+      "participantCount",
+      "attemptCount",
+      "activeParticipantCount",
+      "notificationKind",
+      "channelKind",
+      "actorRole",
+      "recipientRole",
+    ]) {
+      expect(SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN.test(key)).toBe(true);
+    }
   });
 
-  it("narrows the type union for each recipient-evidence key", () => {
-    const recipientClass: SideEffectSemanticFieldKey = "recipientClass";
-    const participantCount: SideEffectSemanticFieldKey = "participantCount";
-    const activeParticipantCount: SideEffectSemanticFieldKey =
-      "activeParticipantCount";
-    expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(recipientClass);
-    expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(participantCount);
-    expect(SIDE_EFFECT_SEMANTIC_FIELD_KEYS).toContain(activeParticipantCount);
+  it("rejects non-matching keys (snake_case, uppercase lead, no canonical suffix)", () => {
+    for (const key of [
+      "random_field", // snake_case + no canonical suffix
+      "recipient_class", // snake_case
+      "RecipientClass", // uppercase lead
+      "messageId", // no canonical suffix
+      "payloadHash", // no canonical suffix
+      "bookingPhase", // Phase is NOT a canonical suffix
+      "", // empty
+      "Count", // no lowerCamel prefix
+    ]) {
+      expect(SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN.test(key)).toBe(false);
+    }
+  });
+});
+
+describe("isSideEffectSemanticFieldKey runtime guard", () => {
+  it("admits all 7 stable-core keys", () => {
+    for (const key of SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS) {
+      expect(isSideEffectSemanticFieldKey(key)).toBe(true);
+    }
+  });
+
+  it("admits pattern keys via the open-pattern regex", () => {
+    for (const key of [
+      "recipientClass",
+      "attemptCount",
+      "notificationKind",
+      "actorRole",
+    ]) {
+      expect(isSideEffectSemanticFieldKey(key)).toBe(true);
+    }
+  });
+
+  it("rejects non-stable-core, non-pattern-matching keys", () => {
+    for (const key of [
+      "random_field",
+      "RecipientClass",
+      "recipient_class",
+      "messageId",
+      "bookingPhase",
+    ]) {
+      expect(isSideEffectSemanticFieldKey(key)).toBe(false);
+    }
+  });
+
+  it("rejects pattern keys longer than MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH", () => {
+    // Length cap is part of the admission contract — the protocol
+    // guard must match the SDK's emission decision. A consumer
+    // calling the runtime guard sees the same answer as
+    // `recordSideEffect()`'s admission check.
+    const atCap =
+      "a".repeat(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH - 5) + "Class";
+    expect(atCap.length).toBe(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH);
+    expect(isSideEffectSemanticFieldKey(atCap)).toBe(true);
+
+    const overCap =
+      "a".repeat(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH - 4) + "Class";
+    expect(overCap.length).toBe(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH + 1);
+    expect(isSideEffectSemanticFieldKey(overCap)).toBe(false);
+
+    // Pathological 100k-char key — would inflate OTel attribute
+    // payloads if the guard let it through.
+    const pathological = "a".repeat(100_000) + "Class";
+    expect(isSideEffectSemanticFieldKey(pathological)).toBe(false);
+  });
+});
+
+describe("SideEffectSemanticFieldKey type narrowing posture", () => {
+  it("type widens to (stable-core | string) — string subsumes the literal arm", () => {
+    // Compile-time assertion: stable-core literal narrows; pattern keys
+    // assign as `string`. Runtime admission is enforced by
+    // `isSideEffectSemanticFieldKey`. This test exercises both arms.
+    const stableCore: SideEffectSemanticFieldKey = "templateKey";
+    const patternKey: SideEffectSemanticFieldKey = "attachmentClass";
+    expect(isSideEffectSemanticFieldKey(stableCore)).toBe(true);
+    expect(isSideEffectSemanticFieldKey(patternKey)).toBe(true);
+  });
+
+  it("DISC-1853-era keys continue to admit (regression guard for backward-compat asymmetry)", () => {
+    // recipientClass/participantCount/activeParticipantCount keep their
+    // GLASSTRACE_ATTRIBUTE_NAMES constants but are now admitted via the
+    // pattern regex rather than as closed-literal members.
+    expect(isSideEffectSemanticFieldKey("recipientClass")).toBe(true);
+    expect(isSideEffectSemanticFieldKey("participantCount")).toBe(true);
+    expect(isSideEffectSemanticFieldKey("activeParticipantCount")).toBe(true);
   });
 });
 
@@ -253,7 +351,7 @@ describe("Cross-tuple uniqueness", () => {
   it("each tuple's members are unique", () => {
     const tuples: ReadonlyArray<readonly string[]> = [
       SIDE_EFFECT_OPERATION_KINDS,
-      SIDE_EFFECT_SEMANTIC_FIELD_KEYS,
+      SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS,
       SIDE_EFFECT_OMISSION_REASONS,
       SIDE_EFFECT_OPERATION_STATUSES,
       SIDE_EFFECT_OPERATION_PHASES,

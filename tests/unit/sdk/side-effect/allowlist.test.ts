@@ -18,6 +18,7 @@ import {
   MAX_SIDE_EFFECT_OPERATION_LABEL_LENGTH,
   MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN,
 } from "../../../../packages/sdk/src/side-effect/allowlist.js";
+import { MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH } from "../../../../packages/protocol/src/index.js";
 
 describe("checkOperationKind", () => {
   it("accepts every v1 allowlisted kind", () => {
@@ -72,6 +73,38 @@ describe("checkOperationStatus / checkOperationPhase", () => {
     expect(checkOperationStatus(1)).toBe(false);
     expect(checkOperationPhase("startup")).toBe(false);
     expect(checkOperationPhase(null)).toBe(false);
+  });
+});
+
+describe("checkSemanticFieldKey — pattern key-name length cap", () => {
+  // The open-pattern regex has no length bound on its own. Without an
+  // explicit key-name cap, a producer that derived a key from
+  // request/provider metadata could pass a giant string ending in
+  // Class/Count/Kind/Role and inflate emitted attribute payloads.
+  // The SDK enforces MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH at the
+  // admission boundary; oversized keys are rejected and routed to
+  // the unsupported_key omission counter (same as any other
+  // non-admissible key).
+  it("admits pattern keys at exactly the length cap", () => {
+    // 80-char *Class key: 75 a's + "Class" = 80 chars total
+    const atCap = "a".repeat(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH - 5) + "Class";
+    expect(atCap.length).toBe(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH);
+    expect(checkSemanticFieldKey(atCap)).toBe(true);
+  });
+
+  it("rejects pattern keys one character over the cap", () => {
+    const overCap =
+      "a".repeat(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH - 4) + "Class";
+    expect(overCap.length).toBe(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH + 1);
+    expect(checkSemanticFieldKey(overCap)).toBe(false);
+  });
+
+  it("rejects pathological oversized keys (regression guard for unbounded regex)", () => {
+    // The pattern regex alone admits any-length match; the cap is the
+    // load-bearing defense against producer-derived metadata inflating
+    // attribute payloads.
+    const pathological = "a".repeat(100_000) + "Class";
+    expect(checkSemanticFieldKey(pathological)).toBe(false);
   });
 });
 
@@ -418,12 +451,14 @@ describe("checkSemanticFieldValue — token fields (templateKey, role, etc.)", (
   });
 });
 
-describe("checkSemanticFieldValue — recipient-evidence fields", () => {
-  // The three keys added to the allowlist are not `locale` or
-  // `timezone`, so `passesFieldValidator` falls through to
-  // TOKEN_REGEX. These assertions lock in that routing so a future
-  // regression that adds a per-key branch cannot silently re-route
-  // them to a different validator.
+describe("checkSemanticFieldValue — suffix-routed pattern keys", () => {
+  // Pattern admission generalizes the DISC-1853 per-key DIGIT_REGEX
+  // branch to suffix routing: `*Count` keys → DIGIT_REGEX; `*Class` /
+  // `*Kind` / `*Role` keys → TOKEN_REGEX. Stable-core specialized
+  // validators (locale, timezone) win over the default routing.
+  // These assertions lock the new suffix routing in so a future
+  // regression that re-introduces a key-name-list branch cannot
+  // silently re-route them.
   it("routes recipientClass through TOKEN_REGEX (compact token)", () => {
     expect(
       checkSemanticFieldValue("recipientClass", "removed-participant").accepted,
@@ -489,15 +524,29 @@ describe("checkSemanticFieldValue — recipient-evidence fields", () => {
   });
 
   it("rejects values with embedded spaces or emoji as raw_payload", () => {
-    for (const key of [
+    // *Class uses the 80-char field-value cap and TOKEN_REGEX.
+    const classSpace = checkSemanticFieldValue(
       "recipientClass",
+      "two participants",
+    );
+    expect(classSpace.accepted).toBe(false);
+    if (!classSpace.accepted) expect(classSpace.reason).toBe("raw_payload");
+    const classEmoji = checkSemanticFieldValue(
+      "recipientClass",
+      "two 🚫 participants",
+    );
+    expect(classEmoji.accepted).toBe(false);
+    if (!classEmoji.accepted) expect(classEmoji.reason).toBe("raw_payload");
+    // *Count uses the tighter 16-char cap; use strings short enough to
+    // pass the length check so the digit-only regex is the rejector.
+    for (const key of [
       "participantCount",
       "activeParticipantCount",
     ] as const) {
-      const space = checkSemanticFieldValue(key, "two participants");
+      const space = checkSemanticFieldValue(key, "two parts");
       expect(space.accepted).toBe(false);
       if (!space.accepted) expect(space.reason).toBe("raw_payload");
-      const emoji = checkSemanticFieldValue(key, "two 🚫 participants");
+      const emoji = checkSemanticFieldValue(key, "2🚫");
       expect(emoji.accepted).toBe(false);
       if (!emoji.accepted) expect(emoji.reason).toBe("raw_payload");
     }
@@ -523,6 +572,147 @@ describe("checkSemanticFieldValue — recipient-evidence fields", () => {
     const outcome = checkSemanticFieldValue("recipientClass", tooLong);
     expect(outcome.accepted).toBe(false);
     if (!outcome.accepted) expect(outcome.reason).toBe("value_too_long");
+  });
+
+  it("routes any *Class / *Kind / *Role pattern key through TOKEN_REGEX", () => {
+    // Suffix routing — not key-name lookup. ANY pattern key matching
+    // the open-pattern regex routes to TOKEN_REGEX (except *Count).
+    expect(
+      checkSemanticFieldValue("attachmentClass", "no-timezone-ics").accepted,
+    ).toBe(true);
+    expect(
+      checkSemanticFieldValue("severityClass", "critical").accepted,
+    ).toBe(true);
+    expect(
+      checkSemanticFieldValue("notificationKind", "transactional").accepted,
+    ).toBe(true);
+    expect(
+      checkSemanticFieldValue("actorRole", "operator").accepted,
+    ).toBe(true);
+  });
+
+  it("routes any *Count pattern key through DIGIT_REGEX (not key-name list)", () => {
+    // Generalization of the DISC-1853 deviation: a *Count key NOT in
+    // the original participantCount/activeParticipantCount list should
+    // also route through DIGIT_REGEX. This locks in suffix routing.
+    expect(
+      checkSemanticFieldValue("attemptCount", "3").accepted,
+    ).toBe(true);
+    expect(
+      checkSemanticFieldValue("retryCount", "0").accepted,
+    ).toBe(true);
+    const bad = checkSemanticFieldValue("attemptCount", "many");
+    expect(bad.accepted).toBe(false);
+    if (!bad.accepted) expect(bad.reason).toBe("raw_payload");
+    const decimal = checkSemanticFieldValue("retryCount", "1.5");
+    expect(decimal.accepted).toBe(false);
+    if (!decimal.accepted) expect(decimal.reason).toBe("raw_payload");
+  });
+
+  it("enforces the tighter *Count value-length cap (16 chars)", () => {
+    // *Count values are non-negative integer strings, so they get a
+    // tighter cap than the default 80-char field-value length.
+    const sixteenDigits = "1234567890123456"; // 16 chars, all digits
+    const seventeenDigits = sixteenDigits + "7";
+    expect(
+      checkSemanticFieldValue("attemptCount", sixteenDigits).accepted,
+    ).toBe(true);
+    const tooLong = checkSemanticFieldValue("attemptCount", seventeenDigits);
+    expect(tooLong.accepted).toBe(false);
+    if (!tooLong.accepted) expect(tooLong.reason).toBe("value_too_long");
+  });
+
+  it("stable-core specialized validators win over default suffix routing", () => {
+    // locale and timezone are stable-core; even though they don't
+    // match the suffix family, they use specialized validators.
+    expect(checkSemanticFieldValue("locale", "en-US").accepted).toBe(true);
+    expect(checkSemanticFieldValue("locale", "Europe/Paris").accepted).toBe(
+      false,
+    );
+    expect(checkSemanticFieldValue("timezone", "Europe/Paris").accepted).toBe(
+      true,
+    );
+    expect(checkSemanticFieldValue("timezone", "en-US").accepted).toBe(false);
+  });
+});
+
+describe("checkSemanticFieldValue — §5.4.10 examples-table coverage", () => {
+  // This describe block walks the canonical examples table from the
+  // component design v6 §5.4.10 verbatim. Each entry asserts the
+  // expected admission outcome. This is the single highest-leverage
+  // round-trip-coverage assertion against the canonical contract; a
+  // breakage here means the SDK's behavior has drifted from the
+  // documented contract.
+  it("admits templateKey (stable-core)", () => {
+    expect(checkSemanticFieldKey("templateKey")).toBe(true);
+  });
+  it("admits locale (stable-core + specialized validator)", () => {
+    expect(checkSemanticFieldKey("locale")).toBe(true);
+  });
+  it("admits recipientClass (pattern: *Class)", () => {
+    expect(checkSemanticFieldKey("recipientClass")).toBe(true);
+  });
+  it("admits attachmentClass (pattern: *Class — was DISC-1876 trigger)", () => {
+    expect(checkSemanticFieldKey("attachmentClass")).toBe(true);
+  });
+  it("admits participantCount with value '2' (pattern: *Count, valid digits)", () => {
+    const outcome = checkSemanticFieldValue("participantCount", "2");
+    expect(outcome.accepted).toBe(true);
+  });
+  it("rejects participantCount with value 'abc' (pattern: *Count, non-digit)", () => {
+    const outcome = checkSemanticFieldValue("participantCount", "abc");
+    expect(outcome.accepted).toBe(false);
+    if (!outcome.accepted) expect(outcome.reason).toBe("raw_payload");
+  });
+  it("rejects participantCount with value '-1' (pattern: *Count, leading hyphen)", () => {
+    const outcome = checkSemanticFieldValue("participantCount", "-1");
+    expect(outcome.accepted).toBe(false);
+    if (!outcome.accepted) expect(outcome.reason).toBe("raw_payload");
+  });
+  it("admits notificationKind=transactional (pattern: *Kind)", () => {
+    expect(checkSemanticFieldKey("notificationKind")).toBe(true);
+    expect(
+      checkSemanticFieldValue("notificationKind", "transactional").accepted,
+    ).toBe(true);
+  });
+  it("admits actorRole=operator (pattern: *Role)", () => {
+    expect(checkSemanticFieldKey("actorRole")).toBe(true);
+    expect(checkSemanticFieldValue("actorRole", "operator").accepted).toBe(
+      true,
+    );
+  });
+  it("admits severityClass=critical (pattern: *Class; future producer)", () => {
+    expect(checkSemanticFieldKey("severityClass")).toBe(true);
+    expect(checkSemanticFieldValue("severityClass", "critical").accepted).toBe(
+      true,
+    );
+  });
+  it("rejects random_field (no canonical suffix, not stable-core)", () => {
+    expect(checkSemanticFieldKey("random_field")).toBe(false);
+  });
+  it("rejects RecipientClass (uppercase lead violates lowerCamelCase)", () => {
+    expect(checkSemanticFieldKey("RecipientClass")).toBe(false);
+  });
+  it("rejects recipient_class (snake_case, not lowerCamelCase)", () => {
+    expect(checkSemanticFieldKey("recipient_class")).toBe(false);
+  });
+  it("rejects messageId (identifier shape, no canonical suffix)", () => {
+    expect(checkSemanticFieldKey("messageId")).toBe(false);
+  });
+  it("rejects payloadHash (hash shape, no canonical suffix)", () => {
+    expect(checkSemanticFieldKey("payloadHash")).toBe(false);
+  });
+  it("admits userRole at the regex layer (shadow rule is PR-review-only)", () => {
+    // userRole matches the *Role suffix syntactically. The component
+    // design §5.4.4 documents that this is the one syntactically
+    // ambiguous case (shadows stable-core `role`). Shadow detection
+    // is NOT runtime-enforced; PR review catches it.
+    expect(checkSemanticFieldKey("userRole")).toBe(true);
+  });
+  it("rejects bookingPhase (Phase is NOT a canonical suffix)", () => {
+    // v6 §5.4.10 fixed this example from v5: bookingPhase is rejected
+    // outright by the regex (Phase ≠ Class/Count/Kind/Role).
+    expect(checkSemanticFieldKey("bookingPhase")).toBe(false);
   });
 });
 

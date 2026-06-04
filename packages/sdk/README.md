@@ -522,27 +522,55 @@ flag.
 What the SDK captures: a compact, normalized operation label, the
 operation kind (`email`, `calendar_link`, `webhook`, `external_api`,
 `queue`, `after_callback`), an optional lifecycle status
-(`scheduled`, `started`, `succeeded`, `failed`, `unknown`), an
+(`scheduled`, `started`, `succeeded`, `failed`, `unknown`), and an
 optional execution phase (`request`, `post_response`, `background`,
-`unknown`), and a small set of allowlisted semantic fields:
-`templateKey`, `providerOperation`, `role`, `locale`, `timezone`,
-`status`, `phase`, `recipientClass`, `participantCount`,
-`activeParticipantCount`. Each value is bounded to compact tokens —
-IANA timezones, BCP-47 locales, identifier-shaped enum tokens, or
-non-negative integer strings for the count fields. The per-span
-operation budget is five.
+`unknown`). Per-span operation budget is five.
 
-`recipientClass`, `participantCount`, and `activeParticipantCount`
-let you record concise causal evidence about which recipient class
-was targeted and how many domain entities were included. The two
-count fields validate strictly as non-negative integer strings —
-`"0"`, `"1"`, `"12"` are accepted; `"-1"`, `"1.5"`, `"many"`, or
-any value with a non-digit character is rejected and counted under
-the `raw_payload` omission reason. `recipientClass` uses the
-identifier-shaped compact-token validator and preserves case
-verbatim, so normalize labels at the call site —
-`recipientClass="removed-participant"` (lowercase-kebab) is the
-recommended convention.
+Semantic fields are admitted by **named-pattern admission**: a
+stable-core literal set plus an open suffix family. Both halves are
+valid; specialized validators on stable-core keys win over the
+default suffix routing.
+
+**Stable core** (7 keys, specialized validators): `templateKey`,
+`providerOperation`, `role`, `locale`, `timezone`, `status`, `phase`.
+Values are bounded to identifier-shaped compact tokens, with
+specialized BCP-47 validation for `locale` and IANA validation for
+`timezone`.
+
+**Open pattern** (4 canonical suffixes): keys matching
+`^[a-z][A-Za-z0-9]*(Class|Count|Kind|Role)$` are admitted alongside
+the stable core. Value shapes are suffix-routed:
+
+| Suffix | Value shape | Max length | Casing convention | Examples |
+|---|---|---|---|---|
+| `*Class` | identifier-shaped compact token | 80 | lowercase-kebab | `recipientClass=removed-participant`, `attachmentClass=no-timezone-ics` |
+| `*Count` | non-negative integer string | 16 | digits only (no `-`, `.`, or letters) | `participantCount="2"`, `attemptCount="3"` |
+| `*Kind` | identifier-shaped compact token | 80 | lowerCamel or `UPPERCASE-CONST` | `notificationKind=transactional` |
+| `*Role` | identifier-shaped compact token | 80 | lowercase-kebab | `actorRole=operator` |
+
+Value casing is preserved verbatim; normalize at the call site so
+cross-trace comparisons collapse to the same identity. Non-digit
+`*Count` values (`"many"`, `"1.5"`, `"-1"`) are rejected and counted
+under the `raw_payload` omission reason. Keys that don't match the
+pattern (snake_case, uppercase lead, no canonical suffix) are
+rejected and counted under `unsupported_key`.
+
+Forbidden values, regardless of suffix: identifiers (UUIDs,
+account/request/message IDs), bearer tokens, API keys, secrets,
+hashes, version strings, raw payloads, recipient PII (emails, names,
+phone numbers), URLs, and free-form prose. The compact-token regex
+admits these shapes syntactically; the SDK's privacy filter
+(`detectUnsafePattern`) rejects email-shaped and bearer-shaped
+values at the runtime layer, but semantic violations (a UUID-shaped
+value passing the unsafe-pattern check) are the caller's
+responsibility to avoid. Coerce sensitive shapes to a normalized
+`*Class` vocabulary instead (e.g., `payloadClass=non-empty` rather
+than `payloadHash=abc123`).
+
+For compile-time autocomplete on the stable-core subset, import the
+narrower type `SideEffectSemanticFieldStableCoreKey`. For runtime
+validation of producer-supplied key names, use the exported guard
+`isSideEffectSemanticFieldKey(key: string): boolean`.
 
 What the SDK does not capture: recipient email addresses, sender or
 recipient names, rendered email subjects or bodies, calendar links,
@@ -574,13 +602,20 @@ recordSideEffect({
   status: "succeeded",
   phase: "request",
   fields: {
+    // Stable core
     templateKey: "EventCanceledEmail",
     role: "invitee",
     locale: "en-US",
     timezone: "Europe/Paris",
+    // Pattern: *Class
     recipientClass: "removed-participant",
+    // Pattern: *Count (non-negative integer string)
     participantCount: "2",
     activeParticipantCount: "1",
+    // Pattern: *Kind
+    notificationKind: "transactional",
+    // Pattern: *Role
+    actorRole: "system-bot",
   },
 });
 ```

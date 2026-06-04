@@ -125,9 +125,13 @@ const OMISSION_ATTRIBUTE_BY_REASON: Readonly<
     GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_CAPTURE_DISABLED,
 };
 
-const FIELD_ATTRIBUTE_BY_KEY: Readonly<
-  Record<SideEffectSemanticFieldKey, string>
-> = {
+// Stable-core + DISC-1853 keys keep explicit attribute-name constants
+// for backward compatibility with consumers that imported them. New
+// pattern-admitted keys (any `*Class`/`*Count`/`*Kind`/`*Role` matching
+// the open-pattern regex) derive their attribute name at emission via
+// `glasstrace.side_effect.field.${key}` — see `resolveFieldAttribute`
+// below.
+const FIELD_ATTRIBUTE_BY_KEY: Readonly<Record<string, string>> = {
   templateKey: GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_TEMPLATE_KEY,
   providerOperation:
     GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_PROVIDER_OPERATION,
@@ -142,6 +146,23 @@ const FIELD_ATTRIBUTE_BY_KEY: Readonly<
   activeParticipantCount:
     GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_ACTIVE_PARTICIPANT_COUNT,
 };
+
+/**
+ * Resolve the OTel attribute name for a semantic field key. Keys in
+ * the explicit `FIELD_ATTRIBUTE_BY_KEY` map (stable-core + the three
+ * DISC-1853 keys) use the existing `GLASSTRACE_ATTRIBUTE_NAMES`
+ * constants for backward compatibility. Pattern-admitted keys
+ * derive `glasstrace.side_effect.field.${key}` at emission. Callers
+ * MUST verify the key is admissible (via `checkSemanticFieldKey` or
+ * `isSideEffectSemanticFieldKey`) before calling this function; the
+ * regex restricts pattern keys to `[a-zA-Z0-9]` so the derived
+ * attribute name is always a safe identifier.
+ */
+function resolveFieldAttribute(key: string): string {
+  const explicit = FIELD_ATTRIBUTE_BY_KEY[key];
+  if (explicit !== undefined) return explicit;
+  return `glasstrace.side_effect.field.${key}`;
+}
 
 /**
  * Outcome of attempting to attach an operation summary. The
@@ -216,7 +237,7 @@ export function attachField(
   key: SideEffectSemanticFieldKey,
   value: string,
 ): void {
-  const attribute = FIELD_ATTRIBUTE_BY_KEY[key];
+  const attribute = resolveFieldAttribute(key);
   try {
     span.setAttribute(attribute, value);
   } catch {

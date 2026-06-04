@@ -185,6 +185,132 @@ describe("recordSideEffect — capture-config gating", () => {
   });
 });
 
+describe("recordSideEffect — pattern-admitted keys (SDK-053)", () => {
+  it("emits pattern-admitted attributes under derived attribute names", () => {
+    // Pattern-admitted keys with NO explicit FIELD_ATTRIBUTE_BY_KEY
+    // entry derive their attribute name at emission time as
+    // `glasstrace.side_effect.field.${key}`. The four-suffix family
+    // (Class/Count/Kind/Role) is exercised here with one key per
+    // suffix that did NOT exist before SDK-053.
+    enableCapture();
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        status: "succeeded",
+        phase: "request",
+        fields: {
+          templateKey: "TestPatternProof",
+          attachmentClass: "no-timezone-ics",
+          attemptCount: "1",
+          notificationKind: "transactional",
+          actorRole: "operator",
+        },
+      });
+      span.end();
+    });
+    const attrs = exportedAttributes();
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_TEMPLATE_KEY],
+    ).toBe("TestPatternProof");
+    // Derived attribute names for the four new pattern keys.
+    expect(attrs["glasstrace.side_effect.field.attachmentClass"]).toBe(
+      "no-timezone-ics",
+    );
+    expect(attrs["glasstrace.side_effect.field.attemptCount"]).toBe("1");
+    expect(attrs["glasstrace.side_effect.field.notificationKind"]).toBe(
+      "transactional",
+    );
+    expect(attrs["glasstrace.side_effect.field.actorRole"]).toBe("operator");
+  });
+
+  it("drops non-pattern-matching keys and counts them under unsupported_key", () => {
+    enableCapture();
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: {
+          templateKey: "TestPatternProof",
+          // @ts-expect-error random_field is not pattern-admitted
+          random_field: "should-drop",
+        },
+      });
+      span.end();
+    });
+    const attrs = exportedAttributes();
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_TEMPLATE_KEY],
+    ).toBe("TestPatternProof");
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNSUPPORTED_KEY],
+    ).toBe(1);
+    expect(attrs["glasstrace.side_effect.field.random_field"]).toBeUndefined();
+    expect(attrs["random_field"]).toBeUndefined();
+  });
+
+  it("rejects malformed *Count values via DIGIT_REGEX on suffix-routed validator", () => {
+    // Generalization of the DISC-1853 deviation — a *Count key that
+    // didn't exist when DISC-1853 shipped (`attemptCount`) is rejected
+    // when given a non-digit value, proving suffix routing not
+    // key-name list routing.
+    enableCapture();
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: {
+          templateKey: "TestPatternProof",
+          attemptCount: "many",
+        },
+      });
+      span.end();
+    });
+    const attrs = exportedAttributes();
+    expect(attrs["glasstrace.side_effect.field.attemptCount"]).toBeUndefined();
+    // attemptCount fell through to raw_payload because DIGIT_REGEX
+    // rejected it.
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("DISC-1853 keys continue to emit under their explicit attribute-name constants (backward-compat asymmetry)", () => {
+    // recipientClass/participantCount/activeParticipantCount were
+    // added as closed-allowlist members in DISC-1853 with explicit
+    // GLASSTRACE_ATTRIBUTE_NAMES constants. SDK-053 admits them via
+    // the open-pattern regex (not as closed-allowlist members), but
+    // the explicit constants persist for backward compatibility —
+    // removing them would be a wire-breaking change for any consumer
+    // that imported the constant.
+    enableCapture();
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: {
+          recipientClass: "removed-participant",
+          participantCount: "2",
+          activeParticipantCount: "1",
+        },
+      });
+      span.end();
+    });
+    const attrs = exportedAttributes();
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_RECIPIENT_CLASS],
+    ).toBe("removed-participant");
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_PARTICIPANT_COUNT],
+    ).toBe("2");
+    expect(
+      attrs[
+        GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_FIELD_ACTIVE_PARTICIPANT_COUNT
+      ],
+    ).toBe("1");
+  });
+});
+
 describe("recordSideEffect — no active span", () => {
   it("is a silent no-op when no span is active", () => {
     enableCapture();
