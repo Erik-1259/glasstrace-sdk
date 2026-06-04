@@ -494,21 +494,53 @@ describe("generateInfoSection", () => {
           expect(info).toMatch(/statically obvious from source/);
         });
 
-        it("renders the Workflow with find_trace_candidates as the entry point", () => {
+        it("renders the Workflow step 1 as a symptom-keyed decision tree", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
             ENDPOINT,
             SDK_VERSION,
           );
           expect(info).toContain("### Workflow");
-          // Workflow §1 names find_trace_candidates first.
           const workflowIdx = info.indexOf("### Workflow");
-          const findIdx = info.indexOf("`find_trace_candidates`", workflowIdx);
-          const stepOnePrefixIdx = info.indexOf("1. Start with", workflowIdx);
-          expect(findIdx).toBeGreaterThan(-1);
-          expect(stepOnePrefixIdx).toBeGreaterThan(-1);
-          // §1 must reference find_trace_candidates.
-          expect(stepOnePrefixIdx).toBeLessThan(findIdx + 200);
+          // Step 1 is now a decision-tree header that routes to one of
+          // three first calls by symptom (active failure /
+          // known-route / historical exploration).
+          const stepOneIdx = info.indexOf(
+            "1. Pick the first call by symptom:",
+            workflowIdx,
+          );
+          expect(stepOneIdx).toBeGreaterThan(-1);
+          // All three first-call branches present and named.
+          const stepOneSlice = info.slice(stepOneIdx, stepOneIdx + 1500);
+          expect(stepOneSlice).toContain("Active failure");
+          expect(stepOneSlice).toContain("`get_latest_error`");
+          expect(stepOneSlice).toContain("Known route or procedure");
+          expect(stepOneSlice).toContain("`find_trace_candidates`");
+          expect(stepOneSlice).toContain("tight time window");
+          expect(stepOneSlice).toContain("Historical exploration");
+          expect(stepOneSlice).toContain("open window");
+        });
+
+        it("preserves the SDK-050 cost-aware framing alongside the decision-tree §1", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          // The decision tree is additive — the SDK-050 cost-aware
+          // sections (Call Glasstrace FIRST when / SKIP Glasstrace
+          // when) must remain present alongside the new Workflow §1
+          // so the agent has both the symptom-class router (which
+          // tool to pick first) and the cost-vs-skip guidance
+          // (whether to call Glasstrace at all).
+          expect(info).toContain("### Call Glasstrace FIRST when:");
+          expect(info).toContain("### SKIP Glasstrace when:");
+          // Both must appear BEFORE the Workflow section so an agent
+          // reading top-to-bottom evaluates "should I call?" before
+          // "which tool?".
+          const firstWhenIdx = info.indexOf("### Call Glasstrace FIRST when:");
+          const workflowIdx = info.indexOf("### Workflow");
+          expect(firstWhenIdx).toBeLessThan(workflowIdx);
         });
 
         it("references the empty-result envelope contract (closeMatches / recentRoutesSample / windowActivity / humanReadable / recoveryActions / diagnosticValue / recommendedNextStep / notAbsenceProof)", () => {
