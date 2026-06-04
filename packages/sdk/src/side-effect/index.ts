@@ -32,10 +32,162 @@ import {
 import {
   attachField,
   attachOperation,
+  hasExplicitFieldAttribute,
   recordOmission,
   recordOmissionOnActiveSpan,
 } from "./emit.js";
 import { getActiveConfig } from "../init-client.js";
+
+// ---------------------------------------------------------------------------
+// Vocabulary-governance signals (DISC-1878 + DISC-1879)
+// ---------------------------------------------------------------------------
+
+/**
+ * Verbose flag, set by `registerGlasstrace()` from the resolved
+ * `GlasstraceOptions.verbose`. Gates the pattern-key proliferation
+ * warn so it stays opt-in for operator debugging. Defaults to `false`
+ * when `registerGlasstrace()` has not been called (e.g., direct
+ * `recordSideEffect` calls in tests).
+ */
+let _verbose = false;
+
+/**
+ * Setter for the verbose flag. Called from `registerGlasstrace()`
+ * after `resolveConfig()` runs. Not exposed from the public package
+ * barrel — internal coordination only.
+ */
+export function setSideEffectVerboseFlag(verbose: boolean): void {
+  _verbose = verbose;
+}
+
+/**
+ * Distinct casing-patterns observed per `*Class` / `*Role` key, used
+ * to dedup the value-casing warn so a given (key, casing-pattern)
+ * pair warns at most once per process lifetime.
+ */
+const _casingWarnSeen = new Map<string, Set<string>>();
+
+/**
+ * Distinct pattern-admitted field keys observed this process,
+ * excluding explicitly-mapped keys (stable-core + DISC-1853-era).
+ * Used as the input to the proliferation warn threshold check.
+ */
+const _patternKeysSeen = new Set<string>();
+
+/**
+ * Bounded queue of the most-recent pattern-admitted keys, used to
+ * name a small sample in the proliferation warn message. Capped at
+ * `_RECENT_KEYS_IN_WARN` entries.
+ */
+const _recentPatternKeys: string[] = [];
+
+/**
+ * Whether the proliferation warn has already fired this process. The
+ * warn is one-shot — once threshold is crossed and the warn fires,
+ * no further proliferation warns emit for the remainder of the
+ * process lifetime.
+ */
+let _proliferationWarned = false;
+
+/**
+ * Threshold for the proliferation warn: 50 distinct pattern-admitted
+ * keys this process. Rationale: 5× the per-operation field cap (10),
+ * leaving room for moderate vocabulary expansion across operations
+ * before signaling that producer-side vocabulary review is warranted.
+ */
+const _PROLIFERATION_THRESHOLD = 50;
+
+/** Maximum number of recent keys to name in the proliferation warn. */
+const _RECENT_KEYS_IN_WARN = 5;
+
+/**
+ * Suffixes whose values follow the lowercase-kebab convention per the
+ * v4 vocabulary contract. `*Count` (digit-only) and `*Kind` (no
+ * casing convention enforced) are excluded.
+ */
+function shouldCheckCasingConvention(key: string): boolean {
+  return key.endsWith("Class") || key.endsWith("Role");
+}
+
+/**
+ * Compute a coarse casing-pattern bucket for a value. Used as the
+ * dedup key for the casing warn so each distinct deviation from
+ * lowercase warns once.
+ */
+function casingPattern(value: string): "uppercase" | "mixed" {
+  return value === value.toUpperCase() ? "uppercase" : "mixed";
+}
+
+/**
+ * DISC-1878 — warn once per (`*Class`/`*Role` key, casing-pattern)
+ * pair when a value deviates from the lowercase-kebab convention.
+ * Emission still succeeds; the warn surfaces producer-side
+ * normalization opportunities. Warn message contains the key name
+ * only (no value) for PII safety. The `[glasstrace]` prefix routes
+ * past the SDK's own console-capture machinery.
+ */
+function maybeWarnMixedCasing(key: string, value: string): void {
+  if (!shouldCheckCasingConvention(key)) return;
+  if (value === value.toLowerCase()) return;
+  const pattern = casingPattern(value);
+  let seenPatterns = _casingWarnSeen.get(key);
+  if (!seenPatterns) {
+    seenPatterns = new Set();
+    _casingWarnSeen.set(key, seenPatterns);
+  }
+  if (seenPatterns.has(pattern)) return;
+  seenPatterns.add(pattern);
+  console.warn(
+    `[glasstrace] side-effect field "${key}" value has ${pattern} casing; ` +
+      `convention is lowercase-kebab. Producer should normalize.`,
+  );
+}
+
+/**
+ * DISC-1879 — proliferation soft-cap. Counts distinct
+ * pattern-admitted keys (those without an explicit
+ * `FIELD_ATTRIBUTE_BY_KEY` entry) seen this process. When verbose
+ * is on and the count crosses `_PROLIFERATION_THRESHOLD`, emits a
+ * one-shot warn naming the most-recent `_RECENT_KEYS_IN_WARN` keys.
+ * Stable-core and DISC-1853-era keys never count.
+ */
+function maybeWarnPatternKeyProliferation(key: string): void {
+  if (!_verbose) return;
+  if (_proliferationWarned) return;
+  if (hasExplicitFieldAttribute(key)) return;
+  if (_patternKeysSeen.has(key)) return;
+  _patternKeysSeen.add(key);
+  _recentPatternKeys.push(key);
+  if (_recentPatternKeys.length > _RECENT_KEYS_IN_WARN) {
+    _recentPatternKeys.shift();
+  }
+  if (_patternKeysSeen.size >= _PROLIFERATION_THRESHOLD) {
+    _proliferationWarned = true;
+    console.warn(
+      `[glasstrace] side-effect emission has used ${_patternKeysSeen.size} ` +
+        `distinct pattern-admitted field keys this process; recent: ` +
+        `${_recentPatternKeys.join(", ")}. ` +
+        `Consider producer-side vocabulary review (lowercase-kebab convention; ` +
+        `Class/Count/Kind/Role suffixes).`,
+    );
+  }
+}
+
+/**
+ * Test-only state reset for the vocabulary-governance counters. Not
+ * exposed from the public package barrel. Tests for the warn paths
+ * must call this in `beforeEach` to ensure dedup state does not leak
+ * across describe blocks.
+ *
+ * @internal
+ */
+export function _resetSideEffectVocabState(): void {
+  _verbose = false;
+  _casingWarnSeen.clear();
+  _patternKeysSeen.clear();
+  _recentPatternKeys.length = 0;
+  _proliferationWarned = false;
+}
 
 /**
  * Input shape for {@link recordSideEffect}.
@@ -227,6 +379,8 @@ function runRecordSideEffect(input: unknown): void {
         recordOmission(outcome.span, valueOutcome.reason);
         continue;
       }
+      maybeWarnMixedCasing(rawKey, valueOutcome.value);
+      maybeWarnPatternKeyProliferation(rawKey);
       attachField(outcome.span, rawKey, valueOutcome.value);
     }
   }
