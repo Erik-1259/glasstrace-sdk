@@ -67,6 +67,47 @@ npx changeset
 
 Follow the prompts to describe the change and its semver impact.
 
+## Release Sequencing
+
+The release workflow has an ordering dependency that's worth knowing about
+before you trigger a canary publish: **trigger the canary
+`workflow_dispatch` BEFORE merging the auto-opened Version Packages PR.**
+
+After your implementation PR merges to `main`, the `changesets/action`
+opens a Version Packages PR that bumps `package.json` versions and clears
+the `.changeset/*.md` files. The canary publish path requires at least
+one changeset in `.changeset/` so `changeset version --snapshot canary`
+produces a real snapshot version; if the Version Packages PR has already
+consumed the changesets, the canary workflow fails on the
+`Guard — require changesets for canary` step with:
+
+```
+::error::Canary mode requires at least one changeset in .changeset/.
+::error::Without one, 'changeset version --snapshot' is a no-op and
+'publish --tag canary' would publish the current stable semver under
+the canary tag.
+```
+
+The documented order:
+
+1. Implementation PR merges to `main`.
+2. `changesets/action` auto-opens the Version Packages PR. **Do NOT merge
+   it yet.**
+3. Trigger `release.yml` `workflow_dispatch` with `mode: canary`. The
+   canary publishes from the current `main` state (changesets still
+   present in `.changeset/`).
+4. Validate the canary build against any downstream consumer that needs
+   pre-stable verification.
+5. Merge the Version Packages PR. This consumes the changesets, bumps
+   `package.json` versions, and updates `CHANGELOG.md` files.
+6. Trigger `release.yml` `workflow_dispatch` with `mode: stable`. The
+   stable publishes from the bumped state.
+
+Stable-direct (skipping canary) is supported by the workflow but loses
+the pre-stable validation gate. The recommended path is canary →
+validate → stable, in that order, with the Version Packages PR merged
+between steps 4 and 5.
+
 ## Modifying Dependencies
 
 When you intentionally add, remove, or upgrade a package, use

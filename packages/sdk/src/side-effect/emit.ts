@@ -165,6 +165,17 @@ function resolveFieldAttribute(key: string): string {
 }
 
 /**
+ * Returns `true` when the key has an explicit entry in
+ * `FIELD_ATTRIBUTE_BY_KEY` (stable-core keys or DISC-1853-era keys).
+ * Returns `false` for pattern-admitted keys that derive their
+ * attribute name at emission. Used by vocabulary-governance signals
+ * to distinguish explicitly-mapped keys from pattern-only ones.
+ */
+export function hasExplicitFieldAttribute(key: string): boolean {
+  return FIELD_ATTRIBUTE_BY_KEY[key] !== undefined;
+}
+
+/**
  * Outcome of attempting to attach an operation summary. The
  * `over_budget` and `no_active_span` discriminants let the public API
  * route the call's bookkeeping (omission count vs. silent drop)

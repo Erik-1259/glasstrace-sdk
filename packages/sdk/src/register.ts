@@ -15,6 +15,7 @@ import { collectHealthReport, _resetHealthForTesting } from "./health-collector.
 import { startHeartbeat, _resetHeartbeatForTesting } from "./heartbeat.js";
 import { initLifecycle, setCoreState, CoreState, getCoreState, initAuthState, AuthState, setAuthState, emitLifecycleEvent, registerSignalHandlers, resetLifecycleForTesting } from "./lifecycle.js";
 import { setCoexistenceState } from "./signal-handler.js";
+import { setSideEffectVerboseFlag } from "./side-effect/index.js";
 import { startRuntimeStateWriter, _resetRuntimeStateForTesting } from "./runtime-state.js";
 import { isProxyTracerProvider, isProxyTracer } from "./proxy-detection.js";
 import { maybeWarnStaleAgentInstructions, _resetUpgradeNoticeForTesting } from "./agent-detection/upgrade-notice.js";
@@ -115,6 +116,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     // Resolve config
     const config = resolveConfig(options);
+    setSideEffectVerboseFlag(config.verbose);
     if (config.verbose) {
       console.info("[glasstrace] Config resolved.");
     }
