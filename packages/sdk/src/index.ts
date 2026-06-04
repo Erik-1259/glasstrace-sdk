@@ -217,8 +217,10 @@ export type {
   SideEffectOperationStatus,
   SideEffectOperationPhase,
   SideEffectSemanticFieldKey,
+  SideEffectSemanticFieldStableCoreKey,
   SideEffectOmissionReason,
 } from "@glasstrace/protocol";
+export { isSideEffectSemanticFieldKey } from "@glasstrace/protocol";
 
 /**
  * Public option shape for {@link import("./middleware/index.js").tracedRequestMiddleware}

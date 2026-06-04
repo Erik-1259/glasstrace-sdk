@@ -18,6 +18,7 @@
   "isAnonymousMode",
   "isProductionDisabled",
   "isReady",
+  "isSideEffectSemanticFieldKey",
   "loadCachedConfig",
   "performInit",
   "readAnonKey",

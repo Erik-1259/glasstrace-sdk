@@ -38,11 +38,11 @@ import type {
   SideEffectSemanticFieldKey,
 } from "@glasstrace/protocol";
 import {
+  isSideEffectSemanticFieldKey,
   SIDE_EFFECT_OMISSION_REASONS,
   SIDE_EFFECT_OPERATION_KINDS,
   SIDE_EFFECT_OPERATION_PHASES,
   SIDE_EFFECT_OPERATION_STATUSES,
-  SIDE_EFFECT_SEMANTIC_FIELD_KEYS,
 } from "@glasstrace/protocol";
 
 /**
@@ -54,9 +54,21 @@ export const MAX_SIDE_EFFECT_OPERATION_LABEL_LENGTH = 96;
 
 /**
  * Maximum length, in characters, of a side-effect semantic field
- * value. Mirrors `AGENT_EVIDENCE_MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH`.
+ * value for stable-core keys (other than `locale` / `timezone`,
+ * which use specialized validators) and for pattern-admitted
+ * `*Class` / `*Kind` / `*Role` keys. Mirrors
+ * `AGENT_EVIDENCE_MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH`.
  */
 export const MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH = 80;
+
+/**
+ * Maximum length, in characters, of a pattern-admitted `*Count`
+ * value. Tighter than the default field-value length because count
+ * values are non-negative integer strings, not free-form tokens.
+ * Mirrors `AGENT_EVIDENCE_MAX_SIDE_EFFECT_FIELD_COUNT_VALUE_LENGTH`.
+ */
+export const MAX_SIDE_EFFECT_FIELD_COUNT_VALUE_LENGTH = 16;
+
 
 /**
  * Maximum number of side-effect operations recorded on a single span
@@ -68,9 +80,6 @@ export const MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN = 5;
 
 const OPERATION_KIND_SET: ReadonlySet<string> = new Set(
   SIDE_EFFECT_OPERATION_KINDS,
-);
-const SEMANTIC_FIELD_KEY_SET: ReadonlySet<string> = new Set(
-  SIDE_EFFECT_SEMANTIC_FIELD_KEYS,
 );
 const OPERATION_STATUS_SET: ReadonlySet<string> = new Set(
   SIDE_EFFECT_OPERATION_STATUSES,
@@ -191,6 +200,15 @@ function detectUnsafePattern(value: string): SideEffectOmissionReason | null {
  * is the caller's responsibility — by the time this runs the value
  * is known to be a non-empty string within the per-field length
  * budget and free of unsafe patterns.
+ *
+ * Routing order matters: stable-core specialized validators
+ * (`locale`, `timezone`) win over the default suffix routing, so
+ * stable-core admission is checked first. Pattern-admitted keys
+ * route by suffix: `*Count` → digit-only; `*Class` / `*Kind` /
+ * `*Role` → compact token. Non-stable-core, non-pattern-matching
+ * keys never reach this function (Layer-1 admission via
+ * {@link isSideEffectSemanticFieldKey} rejects them and routes to
+ * the `unsupported_key` omission counter).
  */
 function passesFieldValidator(
   key: SideEffectSemanticFieldKey,
@@ -198,7 +216,7 @@ function passesFieldValidator(
 ): boolean {
   if (key === "locale") return LOCALE_REGEX.test(value);
   if (key === "timezone") return TIMEZONE_REGEX.test(value);
-  if (key === "participantCount" || key === "activeParticipantCount") {
+  if (typeof key === "string" && key.endsWith("Count")) {
     return DIGIT_REGEX.test(value);
   }
   return TOKEN_REGEX.test(value);
@@ -252,7 +270,14 @@ export function checkSemanticFieldValue(
   if (typeof value !== "string" || value.length === 0) {
     return { accepted: false, reason: "raw_payload" };
   }
-  if (value.length > MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH) {
+  // *Count keys use a tighter length budget than the default
+  // field-value cap (integer strings are not free-form tokens).
+  // Routing here mirrors the suffix routing in passesFieldValidator.
+  const maxLength =
+    typeof key === "string" && key.endsWith("Count")
+      ? MAX_SIDE_EFFECT_FIELD_COUNT_VALUE_LENGTH
+      : MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH;
+  if (value.length > maxLength) {
     return { accepted: false, reason: "value_too_long" };
   }
   const unsafe = detectUnsafePattern(value);
@@ -273,7 +298,7 @@ export function checkSemanticFieldValue(
 export function checkSemanticFieldKey(
   key: unknown,
 ): key is SideEffectSemanticFieldKey {
-  return typeof key === "string" && SEMANTIC_FIELD_KEY_SET.has(key);
+  return typeof key === "string" && isSideEffectSemanticFieldKey(key);
 }
 
 /**
