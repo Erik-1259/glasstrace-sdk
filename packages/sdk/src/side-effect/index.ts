@@ -66,8 +66,26 @@ export function setSideEffectVerboseFlag(verbose: boolean): void {
  * Distinct casing-patterns observed per `*Class` / `*Role` key, used
  * to dedup the value-casing warn so a given (key, casing-pattern)
  * pair warns at most once per process lifetime.
+ *
+ * Bounded by `_CASING_DEDUP_MAX_KEYS` to prevent unbounded memory
+ * growth when a producer emits high-cardinality pattern keys (e.g.,
+ * per-provider `provider1Class`, `provider2Class`, ...). Once the
+ * cap is reached, new keys are silently skipped — no warn, no map
+ * growth. Existing keys in the cap continue to dedup correctly.
+ * For the high-cardinality-producer scenario the proliferation warn
+ * (DISC-1879, verbose-gated) is the operator-facing signal; this
+ * cap is just a memory bound.
  */
 const _casingWarnSeen = new Map<string, Set<string>>();
+
+/**
+ * Cap on the casing-warn dedup map. 100 = bounded memory budget
+ * (~10KB worst case: 100 keys × 2 casing patterns × ~50 bytes
+ * per entry) while leaving room for legitimate producer vocabularies
+ * to warn on real deviations. Producers exceeding this cap are
+ * surfaced via the proliferation warn instead.
+ */
+const _CASING_DEDUP_MAX_KEYS = 100;
 
 /**
  * Distinct pattern-admitted field keys observed this process,
@@ -134,6 +152,12 @@ function maybeWarnMixedCasing(key: string, value: string): void {
   const pattern = casingPattern(value);
   let seenPatterns = _casingWarnSeen.get(key);
   if (!seenPatterns) {
+    // Cap the dedup map to prevent unbounded growth under a
+    // high-cardinality producer. Once we hit the cap, new keys are
+    // silently skipped — better to lose late-arriving warns than to
+    // grow the map without bound. Existing tracked keys continue to
+    // dedup correctly.
+    if (_casingWarnSeen.size >= _CASING_DEDUP_MAX_KEYS) return;
     seenPatterns = new Set();
     _casingWarnSeen.set(key, seenPatterns);
   }

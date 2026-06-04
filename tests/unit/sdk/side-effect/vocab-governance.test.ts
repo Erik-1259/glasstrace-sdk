@@ -252,6 +252,37 @@ describe("recordSideEffect — DISC-1878 value-casing warn", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it("caps the dedup map at 100 keys; new keys are silently skipped past the cap", () => {
+    // High-cardinality producer scenario: emit 150 distinct *Class
+    // keys, each with uppercase values. The first 100 should each
+    // warn once; keys 101-150 should be silently skipped (no warn,
+    // no map growth). This bounds the dedup memory budget.
+    for (let i = 0; i < 150; i++) {
+      tracer.startActiveSpan(`t-${i}`, (s) => {
+        recordSideEffect({
+          kind: "email",
+          operation: "email.send",
+          fields: { [`k${i}Class`]: "UPPERCASE-VALUE" },
+        });
+        s.end();
+      });
+    }
+    // Filter to casing warns only (proliferation warn is gated on
+    // verbose=false here, so only casing warns should appear).
+    const casingWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[0] === "string" &&
+        (call[0] as string).includes("unexpected casing") ||
+        (typeof call[0] === "string" &&
+          (call[0] as string).includes("lowercase-kebab")),
+    );
+    // Exactly 100 warns — one per tracked key, capped at 100
+    expect(casingWarns.length).toBe(100);
+    // All 150 spans should still have their attributes attached
+    const spans = exporter.getFinishedSpans();
+    expect(spans.length).toBe(150);
+  });
+
   it("emission still succeeds even when console.warn throws", () => {
     // Defense-in-depth: a host that replaces console.warn with a
     // throwing implementation must not be able to disrupt the emit
