@@ -183,6 +183,48 @@ describe("recordSideEffect — DISC-1878 value-casing warn", () => {
     expect(warnSpy.mock.calls[1]?.[0]).toContain("mixed");
   });
 
+  it("warns once when a *Role value uses uppercase casing", () => {
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: { actorRole: "INVITEE" },
+      });
+      span.end();
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const warnArg = warnSpy.mock.calls[0]?.[0] as string;
+    expect(warnArg).toContain("actorRole");
+    expect(warnArg).toContain("uppercase");
+    // PII safety — value must not appear in the warn message
+    expect(warnArg).not.toContain("INVITEE");
+  });
+
+  it("warns separately for the same casing across *Class and *Role keys", () => {
+    // Each key has its own dedup map, so the same casing-pattern on
+    // a different key warns separately. This regression test ensures
+    // the *Role suffix path is wired independently of *Class.
+    tracer.startActiveSpan("t1", (s) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: { recipientClass: "ALL-UPPERCASE" },
+      });
+      s.end();
+    });
+    tracer.startActiveSpan("t2", (s) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: { actorRole: "ALL-UPPERCASE" },
+      });
+      s.end();
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("recipientClass");
+    expect(warnSpy.mock.calls[1]?.[0]).toContain("actorRole");
+  });
+
   it("does NOT warn on *Count keys (digit-only convention)", () => {
     tracer.startActiveSpan("test", (span) => {
       recordSideEffect({
@@ -208,6 +250,30 @@ describe("recordSideEffect — DISC-1878 value-casing warn", () => {
       span.end();
     });
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("emission still succeeds even when console.warn throws", () => {
+    // Defense-in-depth: a host that replaces console.warn with a
+    // throwing implementation must not be able to disrupt the emit
+    // path. The contract is "accepted side-effect fields land on
+    // the span even when the governance signal can't be delivered".
+    warnSpy.mockImplementation(() => {
+      throw new Error("host replaced console.warn with a throwing impl");
+    });
+    tracer.startActiveSpan("test", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: { recipientClass: "REMOVED-PARTICIPANT" },
+      });
+      span.end();
+    });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.length).toBe(1);
+    const attrs = spans[0].attributes as Record<string, unknown>;
+    expect(attrs["glasstrace.side_effect.field.recipientClass"]).toBe(
+      "REMOVED-PARTICIPANT",
+    );
   });
 
   it("emission still attaches the field to the span when the warn fires", () => {

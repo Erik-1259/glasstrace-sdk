@@ -55,6 +55,8 @@ let _verbose = false;
  * Setter for the verbose flag. Called from `registerGlasstrace()`
  * after `resolveConfig()` runs. Not exposed from the public package
  * barrel — internal coordination only.
+ *
+ * @internal
  */
 export function setSideEffectVerboseFlag(verbose: boolean): void {
   _verbose = verbose;
@@ -379,8 +381,17 @@ function runRecordSideEffect(input: unknown): void {
         recordOmission(outcome.span, valueOutcome.reason);
         continue;
       }
-      maybeWarnMixedCasing(rawKey, valueOutcome.value);
-      maybeWarnPatternKeyProliferation(rawKey);
+      // Vocabulary-governance signals are diagnostic-only. Wrap in a
+      // try/catch so a host that replaces `console.warn` with a
+      // throwing implementation cannot disrupt the emission path —
+      // the contract is "emission still succeeds even when the
+      // governance signal can't be delivered".
+      try {
+        maybeWarnMixedCasing(rawKey, valueOutcome.value);
+        maybeWarnPatternKeyProliferation(rawKey);
+      } catch {
+        // Intentionally silent — warn deliverability is best-effort.
+      }
       attachField(outcome.span, rawKey, valueOutcome.value);
     }
   }
