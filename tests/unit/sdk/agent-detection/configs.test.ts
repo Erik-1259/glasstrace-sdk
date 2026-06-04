@@ -537,10 +537,17 @@ describe("generateInfoSection", () => {
           expect(info).toContain("### SKIP Glasstrace when:");
           // Both must appear BEFORE the Workflow section so an agent
           // reading top-to-bottom evaluates "should I call?" before
-          // "which tool?".
+          // "which tool?". Pin both section positions so a future
+          // content edit can't silently drift either one below the
+          // Workflow header.
           const firstWhenIdx = info.indexOf("### Call Glasstrace FIRST when:");
+          const skipWhenIdx = info.indexOf("### SKIP Glasstrace when:");
           const workflowIdx = info.indexOf("### Workflow");
           expect(firstWhenIdx).toBeLessThan(workflowIdx);
+          expect(skipWhenIdx).toBeLessThan(workflowIdx);
+          // Conventional ordering: Call FIRST before SKIP, both
+          // before Workflow.
+          expect(firstWhenIdx).toBeLessThan(skipWhenIdx);
         });
 
         it("references the empty-result envelope contract (closeMatches / recentRoutesSample / windowActivity / humanReadable / recoveryActions / diagnosticValue / recommendedNextStep / notAbsenceProof)", () => {
