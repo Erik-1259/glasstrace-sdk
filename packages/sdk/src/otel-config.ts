@@ -147,6 +147,30 @@ async function tryImport(moduleId: string): Promise<Record<string, unknown> | nu
 }
 
 /**
+ * Emits a verbose-only diagnostic when `@prisma/instrumentation` could not be
+ * registered, so developers can see why Prisma query spans are missing instead
+ * of getting a silent skip (DISC-1308).
+ *
+ * Default-quiet by design: the SDK cannot know whether the consuming app uses
+ * Prisma, so an unconditional warning would be noise for the majority of apps
+ * that do not. It fires only when the caller opted into `verbose` mode — the
+ * same gate the OTel diagnostic logger below uses.
+ *
+ * @param verbose - Whether verbose diagnostics are enabled (`config.verbose`).
+ * @param detail - Why registration was skipped (e.g. "could not be loaded").
+ */
+function warnPrismaInstrumentationUnavailable(verbose: boolean, detail: string): void {
+  if (!verbose) return;
+  sdkLog(
+    "warn",
+    `[glasstrace] @prisma/instrumentation ${detail}; Prisma query spans will ` +
+      `not be captured. If you use Prisma and expect database spans, add ` +
+      `@prisma/instrumentation as a direct dependency (some package managers, ` +
+      `e.g. pnpm, do not expose transitive copies).`,
+  );
+}
+
+/**
  * Configures OpenTelemetry with the GlasstraceExporter.
  *
  * Detection flow (per sdk-otel-coexistence.md v8+):
@@ -419,7 +443,14 @@ async function runRegistrationPath(
         (new () => unknown) | undefined;
       if (PrismaInstrumentation) {
         otelConfig.instrumentations = [new PrismaInstrumentation()];
+      } else {
+        warnPrismaInstrumentationUnavailable(
+          config.verbose,
+          "was loaded but did not export PrismaInstrumentation",
+        );
       }
+    } else {
+      warnPrismaInstrumentationUnavailable(config.verbose, "could not be loaded");
     }
 
     (vercelOtel.registerOTel as (opts: Record<string, unknown>) => void)(otelConfig);
@@ -523,10 +554,26 @@ async function runRegistrationPath(
         const inst = new PrismaInstrumentation();
         inst.setTracerProvider(provider);
         inst.enable();
-      } catch {
-        // Prisma instrumentation is optional — failure is not fatal
+      } catch (err) {
+        // Prisma instrumentation is optional — failure is not fatal. Surface
+        // it in verbose mode so a silent skip is debuggable (DISC-1308).
+        if (config.verbose) {
+          sdkLog(
+            "warn",
+            `[glasstrace] @prisma/instrumentation failed to initialize: ${
+              err instanceof Error ? err.message : String(err)
+            }. Prisma query spans will not be captured.`,
+          );
+        }
       }
+    } else {
+      warnPrismaInstrumentationUnavailable(
+        config.verbose,
+        "was loaded but did not export PrismaInstrumentation",
+      );
     }
+  } else {
+    warnPrismaInstrumentationUnavailable(config.verbose, "could not be loaded");
   }
 
   setOtelState(OtelState.OWNS_PROVIDER);
