@@ -30,9 +30,7 @@
  *
  * See `CONTRIBUTING.md` ("Synchronous `require("node:*")` discipline")
  * for the exhaustive guidance and DISC-1555 for the failure-mode
- * analysis. The Wave 10 10G audit (`audit-DISC-1563.md` in the same PR
- * that introduced this rule) classifies every sync `require("node:*")`
- * call site shipping at the rule's introduction.
+ * analysis.
  *
  * @type {import("eslint").Rule.RuleModule}
  */

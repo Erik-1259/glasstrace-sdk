@@ -2,10 +2,8 @@
  * Unit tests for the custom ESLint rule
  * `glasstrace/no-unguarded-node-require`. Covers the four call shapes
  * the rule classifies (positive cases) and the surrounding shapes the
- * rule deliberately leaves alone (negative cases). The accompanying
- * audit (`audit-DISC-1563.md`) lists each shipped call site and its
- * justification; this file is the regression guard for the rule
- * itself.
+ * rule deliberately leaves alone (negative cases); this file is the
+ * regression guard for the rule itself.
  *
  * Vitest hosts the test runner; ESLint's `RuleTester` does the
  * harness work.
