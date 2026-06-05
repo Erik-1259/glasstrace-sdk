@@ -371,10 +371,9 @@ common Next.js setups (`next dev` with Turbopack, `next start` with
 the production Node server). Under ESM, tsup's bundled CJS-
 compatibility shim cannot resolve `require()` from an ESM scope and
 throws at the call site. DISC-1555 documented the failure mode and the
-fix landed in `runtime-state.ts`; the Wave 10 10G audit
-(`audit-DISC-1563.md` in the same PR that introduced this rule)
-classified every other call site shipping at the time and confirmed
-each one was guarded.
+fix landed in `runtime-state.ts`; every other synchronous
+`require("node:*")` call site shipping at the time was audited and
+confirmed guarded.
 
 The custom ESLint rule `glasstrace/no-unguarded-node-require` flags
 new synchronous `require("node:*")` calls (and the chained

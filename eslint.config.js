@@ -4,8 +4,8 @@ import noUnguardedNodeRequire from "./eslint-rules/no-unguarded-node-require.js"
 
 /**
  * Custom plugin scoped to the `glasstrace` namespace. The single rule
- * `no-unguarded-node-require` enforces the DISC-1555 / Wave 10 10G
- * discipline: every synchronous `require("node:*")` call site in the
+ * `no-unguarded-node-require` enforces the DISC-1555 discipline:
+ * every synchronous `require("node:*")` call site in the
  * SDK source must be reviewed for ESM-loader compatibility and
  * suppressed with a reasoned `eslint-disable-next-line` directive. See
  * `CONTRIBUTING.md` and `eslint-rules/no-unguarded-node-require.js`.

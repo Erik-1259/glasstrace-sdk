@@ -308,7 +308,7 @@ describe("runtime-state partial-load resilience (node:fs ok, node:path fails)", 
 });
 
 describe("heartbeat checkShutdownMarker without node:fs", () => {
-  // Wave 10 10G audit (DISC-1563) regression guard. The other three
+  // ESM-reachability audit (DISC-1563) regression guard. The other three
   // ESM-reachable sync `require("node:*")` sites in SDK source —
   // `init-client.loadFsSyncOrNull`, `nudge.markerFileExists`, and
   // `atomic-write.loadFsSync` (via `isSyncFsAvailable`) — already had
