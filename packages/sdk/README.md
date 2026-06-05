@@ -363,6 +363,49 @@ A future SDK release may extend the auto-attach detection to recognize
 additional Next 16 provider shapes; until that ships, the manual path
 above is the production-supported integration.
 
+## Database query spans (Prisma)
+
+When Glasstrace manages the OpenTelemetry provider — the default when
+your app does not already run its own OpenTelemetry or Sentry setup — it
+automatically instruments [Prisma](https://www.prisma.io/) queries.
+Install
+[`@prisma/instrumentation`](https://www.npmjs.com/package/@prisma/instrumentation)
+(an optional peer dependency, Prisma 4–7) and query spans appear once the
+package is reachable; no extra wiring is required.
+
+If Glasstrace instead detects a provider you already registered (Sentry,
+a custom OpenTelemetry SDK, and similar), it attaches its exporter to
+that provider rather than taking over instrumentation — so it does not
+add Prisma instrumentation itself, and the diagnostic below does not
+apply. Register `@prisma/instrumentation` on your own provider;
+Glasstrace exports the spans it produces.
+
+Prisma ORM versions **4.2.0 through 6.1.0** additionally require enabling
+the `tracing`
+[preview feature](https://www.prisma.io/docs/orm/prisma-client/observability-and-logging/opentelemetry-tracing)
+in your schema's `generator` block — `previewFeatures = ["tracing"]` —
+before any tracing spans are emitted. Later Prisma versions need no flag.
+
+**Missing Prisma query spans?** On Prisma 4.2.0–6.1.0, first confirm the
+`tracing` preview feature above is enabled. Otherwise, the usual cause is
+a package manager that does not expose transitive copies of optional
+peers. Under pnpm's
+strict, isolated `node_modules`, `@prisma/instrumentation` can sit in
+the virtual store (pulled in by another dependency) without being
+linked into your app's `node_modules/@prisma/` — so the SDK's optional
+import resolves to nothing and Prisma spans are silently skipped. Add it
+as a **direct dependency** of your app:
+
+```bash
+npm install @prisma/instrumentation
+# pnpm add @prisma/instrumentation
+```
+
+To confirm whether it was loaded, enable verbose mode
+(`registerGlasstrace({ verbose: true })`): when
+`@prisma/instrumentation` cannot be loaded, the SDK logs a diagnostic
+noting that Prisma query spans will not be captured.
+
 ## Capturing error response bodies
 
 When debugging a 4xx or 5xx, the response body is often the most useful

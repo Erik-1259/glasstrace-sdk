@@ -442,4 +442,36 @@ describe("configureOtel()", () => {
     });
   });
 
+  describe("Prisma instrumentation diagnostic (DISC-1308)", () => {
+    // The default test environment has no @prisma/instrumentation installed,
+    // so the bare (Scenario A) registration path's tryImport resolves null —
+    // exactly the silent-skip condition DISC-1308 reported. The diagnostic is
+    // verbose-gated, so it must fire only when the caller opts in.
+    it("warns in verbose mode when @prisma/instrumentation is unavailable", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig({ verbose: true }), sessionManager);
+
+      const prismaWarn = warnSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((m) => m.includes("@prisma/instrumentation"));
+      expect(prismaWarn).toBeDefined();
+      expect(prismaWarn).toContain("Prisma query spans will");
+      expect(prismaWarn).toContain(
+        "add @prisma/instrumentation as a direct dependency",
+      );
+    });
+
+    it("stays silent about Prisma when verbose is false", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await configureOtel(createTestConfig({ verbose: false }), sessionManager);
+
+      const prismaWarn = warnSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((m) => m.includes("@prisma/instrumentation"));
+      expect(prismaWarn).toBeUndefined();
+    });
+  });
+
 });
