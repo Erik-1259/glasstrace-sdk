@@ -580,9 +580,9 @@ Values are bounded to identifier-shaped compact tokens, with
 specialized BCP-47 validation for `locale` and IANA validation for
 `timezone`.
 
-**Open pattern** (4 canonical suffixes): keys matching
-`^[a-z][A-Za-z0-9]*(Class|Count|Kind|Role)$` are admitted alongside
-the stable core. Value shapes are suffix-routed:
+**Open pattern** (5 canonical suffixes): keys matching
+`^[a-z][A-Za-z0-9]*(Class|Count|Kind|Role|Holds)$` are admitted
+alongside the stable core. Value shapes are suffix-routed:
 
 | Suffix | Value shape | Max length | Casing convention | Examples |
 |---|---|---|---|---|
@@ -590,6 +590,7 @@ the stable core. Value shapes are suffix-routed:
 | `*Count` | non-negative integer string | 16 | digits only (no `-`, `.`, or letters) | `participantCount="2"`, `attemptCount="3"` |
 | `*Kind` | identifier-shaped compact token | 80 | lowerCamel or `UPPERCASE-CONST` | `notificationKind=transactional` |
 | `*Role` | identifier-shaped compact token | 80 | lowercase-kebab | `actorRole=operator` |
+| `*Holds` | boolean-literal string | 5 | `"true"` / `"false"` only | `timezonePreservedHolds="false"` (see [Boolean relations](#boolean-relations-holds)) |
 
 Value casing is preserved verbatim; normalize at the call site so
 cross-trace comparisons collapse to the same identity. Non-digit
@@ -726,6 +727,46 @@ Pseudonymize identifiers with **`hashId`** (HMAC-SHA256, fixed-shape
 `gthid_<hex>`, fail-closed — returns `null` without a key), which ships on
 the Node-only `@glasstrace/sdk/node` subpath because it uses
 `node:crypto`. At most 16 scalars are recorded per operation.
+
+### Boolean relations (`*Holds`)
+
+When the decisive evidence is a *relationship* between values rather than
+the values themselves, emit it as a boolean **relation** on the
+categorical field channel. `recordSideEffect()` accepts a `relations` map
+of `boolean`s keyed by camelCase names ending in `Holds`; values are
+coerced to `"true"`/`"false"`:
+
+> **Availability:** the SDK emits `*Holds` relations now, but the Glasstrace
+> backend admits them only once a coordinated release lands; until then a
+> `*Holds` field is dropped at ingestion (like any unrecognized key) and is
+> not yet surfaced in traces. Capture is also gated by the account
+> `sideEffectEvidence` flag.
+
+```ts
+import { recordSideEffect, invariant, isNullInvariant } from "@glasstrace/sdk";
+
+recordSideEffect({
+  kind: "calendar_link",
+  operation: "invite.create",
+  relations: {
+    // Did the emitted duration match what was declared?
+    durationMatchesHolds: invariant(emittedMinutes, "eq", declaredMinutes),
+    // Was the timezone preserved (not silently dropped)?
+    timezonePreservedHolds: invariant(emittedTz, "eq", declaredTz),
+    recipientMissingHolds: isNullInvariant(recipient),
+  },
+});
+```
+
+`invariant(left, op, right)` evaluates one of `eq` / `neq` / `lt` / `lte`
+/ `gt` / `gte` and returns the boolean; `isNullInvariant(value)` is the
+unary `null`/`undefined` check. Both are pure and edge-safe (root barrel).
+
+A relation key not ending in `Holds`, a non-boolean value, or a key
+already attached by `fields` (a same-channel collision — `fields` takes
+precedence) is dropped and recorded only as an integer omission count.
+Relations count against the same product-side per-operation field budget
+as `fields` (enforced at projection).
 
 ## Source maps
 

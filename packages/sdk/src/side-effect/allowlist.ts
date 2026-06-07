@@ -130,6 +130,14 @@ const TIMEZONE_REGEX =
 // rejection of signed counts (`"-1"`) and rejects empty strings.
 const DIGIT_REGEX = /^[0-9]+$/;
 
+// Boolean-literal string for `*Holds` relation fields. The value is the
+// stringified producer boolean (`"true"`/`"false"`); coercion to a real
+// boolean happens at projection/read time, not on the wire. The product
+// admits `*Holds` and a matching boolean value-schema in a coordinated
+// co-merge (not yet shipped); this regex is the SDK-side enforcement
+// that pairs with it.
+const BOOL_REGEX = /^(?:true|false)$/;
+
 // Unsafe-pattern detectors. Each rejects independently; the first
 // match determines the omission reason. The patterns and the reason
 // mapping are calibrated against the product's
@@ -222,6 +230,9 @@ function passesFieldValidator(
   if (key === "timezone") return TIMEZONE_REGEX.test(value);
   if (typeof key === "string" && key.endsWith("Count")) {
     return DIGIT_REGEX.test(value);
+  }
+  if (typeof key === "string" && key.endsWith("Holds")) {
+    return BOOL_REGEX.test(value);
   }
   return TOKEN_REGEX.test(value);
 }

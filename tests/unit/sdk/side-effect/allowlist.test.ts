@@ -976,3 +976,41 @@ describe("checkScalarField — boundary conditions", () => {
     });
   });
 });
+
+describe("checkSemanticFieldValue — *Holds relation fields", () => {
+  it("admits a boolean-literal string on a *Holds key", () => {
+    expect(checkSemanticFieldValue("timezonePreservedHolds", "true")).toEqual({
+      accepted: true,
+      value: "true",
+    });
+    expect(checkSemanticFieldValue("durationMatchesHolds", "false")).toEqual({
+      accepted: true,
+      value: "false",
+    });
+  });
+
+  it("rejects a non-boolean-literal value on a *Holds key", () => {
+    for (const v of ["maybe", "TRUE", "1", "yes", ""]) {
+      const outcome = checkSemanticFieldValue("timezonePreservedHolds", v);
+      expect(outcome.accepted).toBe(false);
+      if (!outcome.accepted) expect(outcome.reason).toBe("raw_payload");
+    }
+  });
+
+  it("keeps the *Holds branch suffix-scoped (does not affect other suffixes)", () => {
+    // A *Class key still routes to the compact-token validator, where a
+    // boolean-literal is a valid token — regression guard that the Holds
+    // branch did not become a global rule.
+    expect(checkSemanticFieldValue("severityClass", "true")).toEqual({
+      accepted: true,
+      value: "true",
+    });
+  });
+
+  it("rejects an over-length *Holds value as value_too_long (length before bool-shape)", () => {
+    const long = "x".repeat(MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH + 1);
+    const outcome = checkSemanticFieldValue("timezonePreservedHolds", long);
+    expect(outcome.accepted).toBe(false);
+    if (!outcome.accepted) expect(outcome.reason).toBe("value_too_long");
+  });
+});
