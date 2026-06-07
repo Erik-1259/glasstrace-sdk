@@ -15,23 +15,26 @@
  * input.
  */
 
-import type {
-  SideEffectOperationKind,
-  SideEffectOperationPhase,
-  SideEffectOperationStatus,
-  SideEffectSemanticFieldKey,
+import {
+  MAX_SIDE_EFFECT_SCALARS_PER_OPERATION,
+  type SideEffectOperationKind,
+  type SideEffectOperationPhase,
+  type SideEffectOperationStatus,
+  type SideEffectSemanticFieldKey,
 } from "@glasstrace/protocol";
 import {
   checkOperationKind,
   checkOperationLabel,
   checkOperationPhase,
   checkOperationStatus,
+  checkScalarField,
   checkSemanticFieldKey,
   checkSemanticFieldValue,
 } from "./allowlist.js";
 import {
   attachField,
   attachOperation,
+  attachScalar,
   hasExplicitFieldAttribute,
   recordOmission,
   recordOmissionOnActiveSpan,
@@ -261,6 +264,26 @@ export interface RecordSideEffectInput {
    * omission counter.
    */
   fields?: Partial<Record<SideEffectSemanticFieldKey, string>>;
+
+  /**
+   * Optional value-fidelity scalars emitted on the off-summary
+   * `glasstrace.side_effect.scalar.*` channel. Keys must be camelCase
+   * ending in `Ms` / `Amount` / `Bytes` / `Ratio` / `Id` / `Value` /
+   * `Flag` (`Count` routes to the categorical `fields` channel instead).
+   * Values are native `number` / `boolean` / `string`.
+   *
+   * Under the default `strict` capture posture the SDK rejects raw
+   * wall-clock timestamps (a `Date`, or a raw epoch on a `*Ms` key) and
+   * unhashed `*Id` values at emit time — send bounded deltas as numbers,
+   * and pre-hash identifiers with `hashId` (`@glasstrace/sdk/node`). At
+   * most
+   * {@link MAX_SIDE_EFFECT_SCALARS_PER_OPERATION} scalars are recorded
+   * per call; rejected values route to the matching omission counter and
+   * the raw value never reaches the wire. The same key may also appear
+   * in `fields` — the two channels are distinct (selected by attribute
+   * prefix), so a categorical and a scalar facet can share a name.
+   */
+  scalars?: Record<string, unknown>;
 }
 
 /**
@@ -304,6 +327,11 @@ export interface RecordSideEffectInput {
  *     role: "invitee",
  *     locale: "en-US",
  *     timezone: "Europe/Paris",
+ *   },
+ *   scalars: {
+ *     // Bounded delta (not a wall-clock epoch) and a boolean flag.
+ *     renderMs: 42,
+ *     hadAttachmentFlag: false,
  *   },
  * });
  * ```
@@ -417,6 +445,35 @@ function runRecordSideEffect(input: unknown): void {
         // Intentionally silent — warn deliverability is best-effort.
       }
       attachField(outcome.span, rawKey, valueOutcome.value);
+    }
+  }
+
+  // Process value-fidelity scalars on the off-summary `scalar.*`
+  // channel. Enforced in `strict` mode at emit: raw wall-clock
+  // timestamps and unhashed `*Id` values never reach the wire. The
+  // `full` relaxation (which lets raw values through) requires the
+  // server-pushed `captureFidelity` AND a producer opt-in, and the
+  // ingestion-side sanitizer that re-enforces it — none of which ship in
+  // this slice — so the emitter is unconditionally `strict` here and the
+  // raw path stays unreachable until that co-wave lands (fail-closed).
+  const scalars = candidate.scalars;
+  if (scalars && typeof scalars === "object") {
+    let scalarCount = 0;
+    for (const [rawKey, rawValue] of Object.entries(scalars)) {
+      if (scalarCount >= MAX_SIDE_EFFECT_SCALARS_PER_OPERATION) {
+        // Per-operation scalar budget exhausted. Record a single
+        // count (mirroring the operation over-budget path) and stop;
+        // no rejected value is echoed.
+        recordOmission(outcome.span, "value_too_long");
+        break;
+      }
+      scalarCount += 1;
+      const scalarOutcome = checkScalarField(rawKey, rawValue);
+      if (!scalarOutcome.accepted) {
+        recordOmission(outcome.span, scalarOutcome.reason);
+        continue;
+      }
+      attachScalar(outcome.span, rawKey, scalarOutcome.value);
     }
   }
 }

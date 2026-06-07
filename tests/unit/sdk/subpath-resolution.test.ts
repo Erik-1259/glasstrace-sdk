@@ -24,7 +24,7 @@ import * as nodeSubpath from "../../../packages/sdk/src/node-subpath.js";
  * (a consumer that imports a removed type fails `tsc` with TS2307).
  */
 describe("@glasstrace/sdk/node subpath contents (SDK-030)", () => {
-  it("exports the 10 Node-only value symbols", () => {
+  it("exports the 11 Node-only value symbols", () => {
     const actual = Object.keys(nodeSubpath).sort();
     expect(actual).toEqual([
       "PRESIGNED_THRESHOLD_BYTES",
@@ -34,6 +34,7 @@ describe("@glasstrace/sdk/node subpath contents (SDK-030)", () => {
       "discoverSourceMapFiles",
       "discoverTestFiles",
       "extractImports",
+      "hashId",
       "uploadSourceMaps",
       "uploadSourceMapsAuto",
       "uploadSourceMapsPresigned",
@@ -57,6 +58,7 @@ describe("@glasstrace/sdk/node subpath contents (SDK-030)", () => {
       "discoverSourceMapFiles",
       "discoverTestFiles",
       "extractImports",
+      "hashId",
       "uploadSourceMaps",
       "uploadSourceMapsAuto",
       "uploadSourceMapsPresigned",

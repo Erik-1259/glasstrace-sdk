@@ -24,8 +24,28 @@ export const CaptureConfigSchema = z.object({
    * storage-time filter as defense-in-depth.
    */
   sideEffectEvidence: z.boolean().optional().default(false),
+  /**
+   * Per-account value-fidelity capture posture (server-pushed).
+   *
+   * `strict` (default) is fail-closed: the SDK rejects raw wall-clock
+   * timestamps and unhashed identifiers from the `scalar.*` channel at
+   * emit time. `full` relaxes those rejections so raw magnitudes can be
+   * surfaced — but only in conjunction with an explicit producer opt-in
+   * (so a `full`-configured account still emits strict-shaped scalars
+   * unless the producer also opts in). The operator owns this flag; it
+   * is never derived from producer or request input. Absent on the wire
+   * ⇒ `strict`.
+   */
+  captureFidelity: z.enum(["strict", "full"]).optional().default("strict"),
 });
 export type CaptureConfig = z.infer<typeof CaptureConfigSchema>;
+
+/**
+ * Value-fidelity capture posture (`strict` | `full`). Exported as the
+ * single source of truth so the SDK's scalar validator binds to the same
+ * domain as the wire config rather than re-declaring the literal union.
+ */
+export type CaptureFidelity = CaptureConfig["captureFidelity"];
 
 /**
  * Cached config returned on SDK init.

@@ -39,6 +39,7 @@ function makeInitResponse(overrides?: Partial<SdkInitResponse>): SdkInitResponse
       consoleErrors: false,
       errorResponseBodies: false,
       sideEffectEvidence: false,
+      captureFidelity: "strict",
     },
     subscriptionStatus: "anonymous",
     minimumSdkVersion: "0.0.0",

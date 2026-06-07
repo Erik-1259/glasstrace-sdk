@@ -194,6 +194,16 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
     "glasstrace.side_effect.omitted.not_emitted",
   SIDE_EFFECT_OMITTED_CAPTURE_DISABLED:
     "glasstrace.side_effect.omitted.capture_disabled",
+
+  // Value-fidelity scalar-channel omission reasons. Counts only; the
+  // rejected raw value (timestamp, unhashed id, non-finite number) is
+  // never echoed. Mirror the product omission enum verbatim.
+  SIDE_EFFECT_OMITTED_RAW_TIMESTAMP:
+    "glasstrace.side_effect.omitted.raw_timestamp",
+  SIDE_EFFECT_OMITTED_UNHASHED_ID:
+    "glasstrace.side_effect.omitted.unhashed_id",
+  SIDE_EFFECT_OMITTED_NON_FINITE:
+    "glasstrace.side_effect.omitted.non_finite",
 } as const;
 
 /** Default SDK capture config (conservative defaults). */
@@ -206,6 +216,7 @@ export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
   consoleErrors: false,
   errorResponseBodies: false,
   sideEffectEvidence: false,
+  captureFidelity: "strict",
 };
 
 // --- Source map upload limits ---

@@ -20,6 +20,11 @@ import {
   MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH,
   isSideEffectSemanticFieldKey,
   SIDE_EFFECT_OMISSION_REASONS,
+  SIDE_EFFECT_SCALAR_KEY_PATTERN,
+  SIDE_EFFECT_SCALAR_PREFIX,
+  MAX_SIDE_EFFECT_SCALARS_PER_OPERATION,
+  isSideEffectScalarKey,
+  SIDE_EFFECT_HASHED_ID_PREFIX,
   SIDE_EFFECT_OPERATION_STATUSES,
   SIDE_EFFECT_OPERATION_PHASES,
   type SideEffectOperationKind,
@@ -53,9 +58,12 @@ describe("GLASSTRACE_ATTRIBUTE_NAMES — side-effect entries", () => {
     "SIDE_EFFECT_OMITTED_VALUE_TOO_LONG",
     "SIDE_EFFECT_OMITTED_NOT_EMITTED",
     "SIDE_EFFECT_OMITTED_CAPTURE_DISABLED",
+    "SIDE_EFFECT_OMITTED_RAW_TIMESTAMP",
+    "SIDE_EFFECT_OMITTED_UNHASHED_ID",
+    "SIDE_EFFECT_OMITTED_NON_FINITE",
   ] as const;
 
-  it("exports exactly the 21 expected side-effect attribute keys", () => {
+  it("exports exactly the 24 expected side-effect attribute keys", () => {
     const actual = Object.keys(GLASSTRACE_ATTRIBUTE_NAMES).filter((k) =>
       k.startsWith("SIDE_EFFECT_"),
     );
@@ -139,12 +147,25 @@ describe("GLASSTRACE_ATTRIBUTE_NAMES — side-effect entries", () => {
     expect(
       GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_CAPTURE_DISABLED,
     ).toBe("glasstrace.side_effect.omitted.capture_disabled");
+    expect(
+      GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_TIMESTAMP,
+    ).toBe("glasstrace.side_effect.omitted.raw_timestamp");
+    expect(
+      GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID,
+    ).toBe("glasstrace.side_effect.omitted.unhashed_id");
+    expect(
+      GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NON_FINITE,
+    ).toBe("glasstrace.side_effect.omitted.non_finite");
   });
 });
 
-describe("DEFAULT_CAPTURE_CONFIG — sideEffectEvidence", () => {
+describe("DEFAULT_CAPTURE_CONFIG — conservative defaults", () => {
   it("defaults sideEffectEvidence to false", () => {
     expect(DEFAULT_CAPTURE_CONFIG.sideEffectEvidence).toBe(false);
+  });
+
+  it("defaults captureFidelity to strict (fail-closed)", () => {
+    expect(DEFAULT_CAPTURE_CONFIG.captureFidelity).toBe("strict");
   });
 });
 
@@ -305,12 +326,68 @@ describe("SIDE_EFFECT_OMISSION_REASONS", () => {
       "value_too_long",
       "not_emitted",
       "capture_disabled",
+      "raw_timestamp",
+      "unhashed_id",
+      "non_finite",
     ]);
   });
 
   it("derives a literal-type union", () => {
     const sample: SideEffectOmissionReason = "pii";
     expect(SIDE_EFFECT_OMISSION_REASONS).toContain(sample);
+  });
+});
+
+describe("value-fidelity scalar contract", () => {
+  it("scalar key pattern mirrors the product regex verbatim", () => {
+    // Byte-identical to product SideEffectScalarSchema key regex
+    // (shared/types/agent-evidence.ts). Pinned so drift is caught here.
+    expect(SIDE_EFFECT_SCALAR_KEY_PATTERN.source).toBe(
+      "^[a-z][A-Za-z0-9]*(Ms|Amount|Bytes|Ratio|Id|Value|Flag)$",
+    );
+  });
+
+  it("admits each magnitude/identity suffix", () => {
+    for (const key of [
+      "elapsedMs",
+      "totalAmount",
+      "payloadBytes",
+      "hitRatio",
+      "scoreValue",
+      "enabledFlag",
+      "actorId",
+    ]) {
+      expect(SIDE_EFFECT_SCALAR_KEY_PATTERN.test(key)).toBe(true);
+      expect(isSideEffectScalarKey(key)).toBe(true);
+    }
+  });
+
+  it("excludes *Count (it routes to the categorical channel) and malformed keys", () => {
+    for (const key of [
+      "participantCount", // Count is deliberately not a scalar suffix
+      "Capitalized",
+      "noSuffix",
+      "trailingMsExtra",
+      "",
+    ]) {
+      expect(SIDE_EFFECT_SCALAR_KEY_PATTERN.test(key)).toBe(false);
+      expect(isSideEffectScalarKey(key)).toBe(false);
+    }
+  });
+
+  it("rejects an over-length scalar key via the shared cap", () => {
+    const longKey = `${"a".repeat(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH)}Ms`;
+    expect(SIDE_EFFECT_SCALAR_KEY_PATTERN.test(longKey)).toBe(true);
+    expect(isSideEffectScalarKey(longKey)).toBe(false);
+  });
+
+  it("pins the scalar channel prefix and hashed-id prefix", () => {
+    expect(SIDE_EFFECT_SCALAR_PREFIX).toBe("glasstrace.side_effect.scalar.");
+    expect(SIDE_EFFECT_HASHED_ID_PREFIX).toBe("gthid_");
+  });
+
+  it("pins the per-operation scalar ceiling", () => {
+    expect(MAX_SIDE_EFFECT_SCALARS_PER_OPERATION).toBe(16);
   });
 });
 

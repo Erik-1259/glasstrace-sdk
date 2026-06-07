@@ -31,6 +31,7 @@
  */
 
 import type {
+  CaptureFidelity,
   SideEffectOmissionReason,
   SideEffectOperationKind,
   SideEffectOperationPhase,
@@ -38,7 +39,10 @@ import type {
   SideEffectSemanticFieldKey,
 } from "@glasstrace/protocol";
 import {
+  isSideEffectScalarKey,
   isSideEffectSemanticFieldKey,
+  SIDE_EFFECT_HASHED_ID_HEX_LENGTH,
+  SIDE_EFFECT_HASHED_ID_PREFIX,
   SIDE_EFFECT_OMISSION_REASONS,
   SIDE_EFFECT_OPERATION_KINDS,
   SIDE_EFFECT_OPERATION_PHASES,
@@ -286,6 +290,151 @@ export function checkSemanticFieldValue(
   }
   if (!passesFieldValidator(key, value)) {
     return { accepted: false, reason: "raw_payload" };
+  }
+  return { accepted: true, value };
+}
+
+// ---------------------------------------------------------------------------
+// Value-fidelity scalar channel
+// ---------------------------------------------------------------------------
+
+// Fixed-shape hashed-identifier regex the SDK admits under `strict` —
+// exactly the shape `hashId` emits (`gthid_` + N lowercase-hex). This is
+// stronger than the product validator's length-agnostic
+// `^gthid_[0-9a-f]+$`: pinning the length closes a smuggling vector
+// (arbitrary hex-encoded data behind `gthid_`) and bounds attribute
+// size. The length comes from the shared protocol constant so the
+// validator and `hashId` cannot drift.
+const GTHID_STRICT_REGEX = new RegExp(
+  `^${SIDE_EFFECT_HASHED_ID_PREFIX}[0-9a-f]{${SIDE_EFFECT_HASHED_ID_HEX_LENGTH}}$`,
+);
+
+// Minimum value (milliseconds) treated as a wall-clock epoch on a
+// timestamp-shaped (`*Ms`) key. 1e12 ms ≈ year 2001; a duration in ms
+// below ~31.7 years stays under this bound, so a raw `Date.now()`
+// (~1.7e12 today) is caught while realistic durations are not. The
+// heuristic cannot distinguish a >31-year duration from an epoch — such
+// a producer should use `captureFidelity: "full"` or a coarser unit.
+const SCALAR_EPOCH_MS_MIN = 1e12;
+
+/** A `*Ms` scalar carries milliseconds, where a raw epoch can leak. */
+function isTimestampShapedScalarKey(key: string): boolean {
+  return key.endsWith("Ms");
+}
+
+/**
+ * Outcome of scalar-channel enforcement on a single value. The accepted
+ * value is the native `number` / `boolean` / `string` (no stringify) —
+ * the product validator rejects numeric- and boolean-shaped strings, so
+ * the emitter must attach the native type.
+ */
+export type ScalarOutcome =
+  | { accepted: true; value: number | boolean | string }
+  | { accepted: false; reason: SideEffectOmissionReason };
+
+/**
+ * Check a value for the `glasstrace.side_effect.scalar.*` channel.
+ *
+ * The key suffix declares the value type, and this validator enforces it:
+ *
+ *  - `*Ms` / `*Amount` / `*Bytes` / `*Ratio` / `*Value` → finite `number`
+ *  - `*Flag` → `boolean`
+ *  - `*Id` → a pseudonymized `gthid_` string (categorical string enums
+ *    belong on the `fields` channel, not here)
+ *
+ * A value whose type does not match its suffix is dropped rather than
+ * emitted, so downstream consumers never see a `*Ms` boolean or a
+ * `*Flag` number. The omission reason is `raw_payload` for the numeric
+ * and `*Flag` suffixes, and `unhashed_id` for a non-string (or, under
+ * `strict`, non-`gthid_`) `*Id`.
+ *
+ * `mode` is the **effective** fidelity (the conjunction of the
+ * server-pushed `CaptureConfig.captureFidelity` and the producer opt-in,
+ * resolved by the caller). Under `strict` (the default and — until the
+ * ingestion sanitizer ships — the only mode the emitter passes) raw
+ * wall-clock timestamps (a `Date`, or a raw epoch on a `*Ms` key) and
+ * unhashed identifiers are rejected at emit so they never reach the wire.
+ * `full` relaxes only those timestamp/id privacy rejections; the
+ * suffix-type, length, PII, and non-finite checks apply in both modes.
+ *
+ * Note: epoch screening covers only `*Ms` keys (the sole time-typed
+ * suffix). A wall-clock value placed on another numeric suffix is not
+ * detected here and relies on the server-side sanitizer as the backstop;
+ * producers should keep wall-clock magnitudes off non-`*Ms` keys.
+ *
+ * Channel selection is by attribute prefix, never key suffix; this
+ * function presumes the caller routed the value to the scalar channel.
+ */
+export function checkScalarField(
+  key: string,
+  value: unknown,
+  mode: CaptureFidelity = "strict",
+): ScalarOutcome {
+  if (typeof key !== "string" || !isSideEffectScalarKey(key)) {
+    return { accepted: false, reason: "unsupported_key" };
+  }
+
+  // A `Date` is unambiguously a wall-clock value and is never an emittable
+  // scalar (OTel cannot carry a `Date`); classify it by intent in both
+  // modes — the producer should send a bounded delta number instead.
+  if (value instanceof Date) {
+    return { accepted: false, reason: "raw_timestamp" };
+  }
+
+  // `*Id`: a pseudonymized identifier string. Under `strict` it must be
+  // the fixed-shape `gthid_<hex>` output of `hashId`; under `full` a raw
+  // id string is allowed, still guarded for PII and length.
+  if (key.endsWith("Id")) {
+    if (typeof value !== "string") {
+      return { accepted: false, reason: "unhashed_id" };
+    }
+    if (mode === "strict") {
+      if (!GTHID_STRICT_REGEX.test(value)) {
+        return { accepted: false, reason: "unhashed_id" };
+      }
+      return { accepted: true, value };
+    }
+    // `full`: a raw (non-`gthid_`) id is allowed here, but note the
+    // product `SideEffectScalarSchema` requires `gthid_` for `*Id`
+    // unconditionally — so this shape is NOT yet product-valid. The
+    // emitter never passes `full` today (it is hard-wired `strict`); when
+    // the `full` path is wired, the product schema must gain matching
+    // fidelity-awareness first. (Guarded by the strict-only emit call.)
+    if (value.length === 0) {
+      return { accepted: false, reason: "raw_payload" };
+    }
+    const unsafe = detectUnsafePattern(value);
+    if (unsafe) {
+      return { accepted: false, reason: unsafe };
+    }
+    if (value.length > MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH) {
+      return { accepted: false, reason: "value_too_long" };
+    }
+    return { accepted: true, value };
+  }
+
+  // `*Flag`: boolean only.
+  if (key.endsWith("Flag")) {
+    if (typeof value !== "boolean") {
+      return { accepted: false, reason: "raw_payload" };
+    }
+    return { accepted: true, value };
+  }
+
+  // All remaining valid suffixes (`Ms` / `Amount` / `Bytes` / `Ratio` /
+  // `Value`) are numeric magnitudes.
+  if (typeof value !== "number") {
+    return { accepted: false, reason: "raw_payload" };
+  }
+  if (!Number.isFinite(value)) {
+    return { accepted: false, reason: "non_finite" };
+  }
+  if (
+    mode === "strict" &&
+    isTimestampShapedScalarKey(key) &&
+    value >= SCALAR_EPOCH_MS_MIN
+  ) {
+    return { accepted: false, reason: "raw_timestamp" };
   }
   return { accepted: true, value };
 }

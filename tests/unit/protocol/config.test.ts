@@ -73,6 +73,47 @@ describe("CaptureConfigSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("defaults captureFidelity to strict (fail-closed) when omitted", () => {
+    const result = CaptureConfigSchema.safeParse({
+      requestBodies: false,
+      queryParamValues: false,
+      envVarValues: false,
+      fullConsoleOutput: false,
+      importGraph: false,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.captureFidelity).toBe("strict");
+    }
+  });
+
+  it("accepts captureFidelity: full when the operator opts in", () => {
+    const result = CaptureConfigSchema.safeParse({
+      requestBodies: false,
+      queryParamValues: false,
+      envVarValues: false,
+      fullConsoleOutput: false,
+      importGraph: false,
+      captureFidelity: "full",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.captureFidelity).toBe("full");
+    }
+  });
+
+  it("rejects an unknown captureFidelity value", () => {
+    const result = CaptureConfigSchema.safeParse({
+      requestBodies: false,
+      queryParamValues: false,
+      envVarValues: false,
+      fullConsoleOutput: false,
+      importGraph: false,
+      captureFidelity: "lax",
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("rejects missing required fields", () => {
     const result = CaptureConfigSchema.safeParse({
       requestBodies: false,
