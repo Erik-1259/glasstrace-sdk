@@ -11,6 +11,7 @@ import {
   checkOperationLabel,
   checkOperationPhase,
   checkOperationStatus,
+  checkScalarField,
   checkSemanticFieldKey,
   checkSemanticFieldValue,
   isKnownOmissionReason,
@@ -719,5 +720,259 @@ describe("checkSemanticFieldValue — §5.4.10 examples-table coverage", () => {
 describe("MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN", () => {
   it("matches the SCHEMA-036 budget", () => {
     expect(MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN).toBe(5);
+  });
+});
+
+const GTHID_32 = `gthid_${"a1b2c3d4".repeat(4)}`; // gthid_ + 32 lowercase hex
+
+describe("checkScalarField — strict (default)", () => {
+  it("accepts suffix-typed values: numbers, a boolean Flag, and a gthid_ Id", () => {
+    expect(checkScalarField("renderMs", 42)).toEqual({
+      accepted: true,
+      value: 42,
+    });
+    expect(checkScalarField("totalAmount", 19.99)).toEqual({
+      accepted: true,
+      value: 19.99,
+    });
+    expect(checkScalarField("payloadBytes", 0)).toEqual({
+      accepted: true,
+      value: 0,
+    });
+    expect(checkScalarField("hadAttachmentFlag", false)).toEqual({
+      accepted: true,
+      value: false,
+    });
+    expect(checkScalarField("actorId", GTHID_32)).toEqual({
+      accepted: true,
+      value: GTHID_32,
+    });
+  });
+
+  it("accepts a long-but-bounded duration in ms (not an epoch)", () => {
+    // ~83 days in ms, well below the 1e12 epoch threshold.
+    expect(checkScalarField("elapsedMs", 7_200_000_000)).toEqual({
+      accepted: true,
+      value: 7_200_000_000,
+    });
+  });
+
+  it("rejects keys that do not match the scalar pattern (Count routes elsewhere)", () => {
+    for (const key of ["participantCount", "randomKey", "Capitalized", ""]) {
+      expect(checkScalarField(key, 1)).toEqual({
+        accepted: false,
+        reason: "unsupported_key",
+      });
+    }
+  });
+
+  it("enforces the value type declared by the key suffix (raw_payload on mismatch)", () => {
+    // Boolean on a numeric-suffix key.
+    expect(checkScalarField("latencyMs", true)).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+    // Number on a *Flag key.
+    expect(checkScalarField("retriedFlag", 1)).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+    // Strings are not scalars (except the *Id gthid form) — they belong
+    // on the categorical fields channel.
+    expect(checkScalarField("regionValue", "us-east-1")).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+    expect(checkScalarField("totalAmount", "42")).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+    expect(checkScalarField("enabledFlag", "true")).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+  });
+
+  it("rejects non-finite numbers as non_finite", () => {
+    expect(checkScalarField("scoreValue", Number.NaN)).toEqual({
+      accepted: false,
+      reason: "non_finite",
+    });
+    expect(checkScalarField("scoreValue", Number.POSITIVE_INFINITY)).toEqual({
+      accepted: false,
+      reason: "non_finite",
+    });
+  });
+
+  it("rejects unhashed, wrong-length, or non-string *Id values as unhashed_id", () => {
+    expect(checkScalarField("actorId", "user_12345")).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+    // Uppercase hex is not the lowercase gthid_ shape.
+    expect(checkScalarField("actorId", "gthid_ABCDEF")).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+    // Correct charset but wrong length — strict requires the fixed shape.
+    expect(checkScalarField("actorId", "gthid_a1b2")).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+    expect(checkScalarField("actorId", 12345)).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+  });
+
+  it("rejects raw wall-clock timestamps as raw_timestamp", () => {
+    // A Date object on any key.
+    expect(checkScalarField("startedValue", new Date(0))).toEqual({
+      accepted: false,
+      reason: "raw_timestamp",
+    });
+    // A numeric epoch-ms on a *Ms key.
+    expect(checkScalarField("createdMs", 1_700_000_000_000)).toEqual({
+      accepted: false,
+      reason: "raw_timestamp",
+    });
+  });
+
+  it("rejects non-scalar types as raw_payload", () => {
+    expect(checkScalarField("noteValue", null)).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+    expect(checkScalarField("noteValue", { a: 1 })).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+  });
+});
+
+describe("checkScalarField — full (privacy relaxations only)", () => {
+  it("allows raw epochs and raw id strings under full", () => {
+    expect(checkScalarField("createdMs", 1_700_000_000_000, "full")).toEqual({
+      accepted: true,
+      value: 1_700_000_000_000,
+    });
+    expect(checkScalarField("actorId", "raw-actor-12345", "full")).toEqual({
+      accepted: true,
+      value: "raw-actor-12345",
+    });
+  });
+
+  it("still enforces suffix-type, Date, PII, length, and non-finite under full", () => {
+    // Suffix-type is a contract, not a privacy rule — enforced in both modes.
+    expect(checkScalarField("latencyMs", true, "full")).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+    expect(checkScalarField("retriedFlag", 1, "full")).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+    // A Date object is never an emittable scalar, even under full.
+    expect(checkScalarField("createdMs", new Date(0), "full")).toEqual({
+      accepted: false,
+      reason: "raw_timestamp",
+    });
+    expect(checkScalarField("scoreValue", Number.NaN, "full")).toEqual({
+      accepted: false,
+      reason: "non_finite",
+    });
+    expect(checkScalarField("actorId", 12345, "full")).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+    // PII guard still applies to a raw id string under full.
+    expect(checkScalarField("actorId", "a" + "@" + "b.co", "full")).toEqual({
+      accepted: false,
+      reason: "pii",
+    });
+    // Over-length raw id string under full.
+    const long = "x".repeat(MAX_SIDE_EFFECT_FIELD_VALUE_LENGTH + 1);
+    expect(checkScalarField("actorId", long, "full")).toEqual({
+      accepted: false,
+      reason: "value_too_long",
+    });
+  });
+
+  it("still blocks secret/credential-shaped raw ids under full", () => {
+    // detectUnsafePattern routes UUID/bearer/account-key shapes to secret.
+    expect(
+      checkScalarField(
+        "sessionId",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "full",
+      ),
+    ).toEqual({ accepted: false, reason: "secret" });
+  });
+});
+
+describe("checkScalarField — boundary conditions", () => {
+  it("treats the 1e12 epoch threshold as inclusive on *Ms (>=)", () => {
+    // Exactly the threshold is rejected; one below is an accepted delta.
+    expect(checkScalarField("createdMs", 1e12)).toEqual({
+      accepted: false,
+      reason: "raw_timestamp",
+    });
+    expect(checkScalarField("createdMs", 1e12 - 1)).toEqual({
+      accepted: true,
+      value: 1e12 - 1,
+    });
+  });
+
+  it("checks non-finite before the epoch comparison on *Ms", () => {
+    // Infinity >= 1e12 is true, but non_finite must win.
+    expect(checkScalarField("createdMs", Number.POSITIVE_INFINITY)).toEqual({
+      accepted: false,
+      reason: "non_finite",
+    });
+  });
+
+  it("requires the exact gthid hex length under strict (31/32/33)", () => {
+    const hex = (n: number) => `gthid_${"a".repeat(n)}`;
+    expect(checkScalarField("actorId", hex(31))).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+    expect(checkScalarField("actorId", hex(32))).toEqual({
+      accepted: true,
+      value: hex(32),
+    });
+    expect(checkScalarField("actorId", hex(33))).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+  });
+
+  it("rejects a date STRING as a type mismatch (raw_payload), not raw_timestamp", () => {
+    // After the suffix-typing refactor, only a Date instance / numeric
+    // epoch is raw_timestamp; a datetime string on a numeric key is a
+    // wrong-typed value. Pins the resolved doc/code contract.
+    expect(checkScalarField("createdMs", "2026-03-08T10:00:00Z")).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+  });
+
+  it("diverges the empty-string *Id reason by mode", () => {
+    expect(checkScalarField("actorId", "", "strict")).toEqual({
+      accepted: false,
+      reason: "unhashed_id",
+    });
+    expect(checkScalarField("actorId", "", "full")).toEqual({
+      accepted: false,
+      reason: "raw_payload",
+    });
+  });
+
+  it("rejects an over-length but pattern-valid scalar key as unsupported_key", () => {
+    const overLongKey = `${"a".repeat(MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH)}Ms`;
+    expect(checkScalarField(overLongKey, 1)).toEqual({
+      accepted: false,
+      reason: "unsupported_key",
+    });
   });
 });

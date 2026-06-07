@@ -12,6 +12,7 @@
 import * as otelApi from "@opentelemetry/api";
 import {
   GLASSTRACE_ATTRIBUTE_NAMES,
+  SIDE_EFFECT_SCALAR_PREFIX,
   type SideEffectOmissionReason,
   type SideEffectOperationKind,
   type SideEffectOperationPhase,
@@ -123,6 +124,10 @@ const OMISSION_ATTRIBUTE_BY_REASON: Readonly<
   not_emitted: GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NOT_EMITTED,
   capture_disabled:
     GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_CAPTURE_DISABLED,
+  raw_timestamp:
+    GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_TIMESTAMP,
+  unhashed_id: GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID,
+  non_finite: GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NON_FINITE,
 };
 
 // Stable-core + DISC-1853 keys keep explicit attribute-name constants
@@ -251,6 +256,28 @@ export function attachField(
   const attribute = resolveFieldAttribute(key);
   try {
     span.setAttribute(attribute, value);
+  } catch {
+    // Slot exhaustion — ignore.
+  }
+}
+
+/**
+ * Attach a single value-fidelity scalar to the span on the
+ * `glasstrace.side_effect.scalar.*` channel. The caller has already
+ * routed the key and value through {@link checkScalarField}; this
+ * function writes the **native** `number` / `boolean` / `string` value
+ * (no stringify — the product validator rejects numeric- and
+ * boolean-shaped strings). The scalar key matched
+ * `SIDE_EFFECT_SCALAR_KEY_PATTERN`, restricting it to `[A-Za-z0-9]`, so
+ * the derived attribute name is always a safe identifier.
+ */
+export function attachScalar(
+  span: otelApi.Span,
+  key: string,
+  value: number | boolean | string,
+): void {
+  try {
+    span.setAttribute(`${SIDE_EFFECT_SCALAR_PREFIX}${key}`, value);
   } catch {
     // Slot exhaustion — ignore.
   }

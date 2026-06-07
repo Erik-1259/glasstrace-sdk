@@ -670,6 +670,63 @@ ingestion service before persistence. This is intentional
 defense-in-depth: the SDK is the first gate; the product receiver
 is the second.
 
+### Value-fidelity scalars
+
+Beyond the categorical `fields` channel, `recordSideEffect()` accepts an
+optional `scalars` map for type-aware magnitudes emitted on a separate
+`glasstrace.side_effect.scalar.*` channel. The key suffix declares the
+value type:
+
+- `*Ms` / `*Amount` / `*Bytes` / `*Ratio` / `*Value` → a finite `number`
+- `*Flag` → a `boolean`
+- `*Id` → a pseudonymized `gthid_` string (see `hashId` below)
+
+(`Count` stays on the categorical `fields` channel; free-form string
+enums belong there too, not on the scalar channel.)
+
+```ts
+import { recordSideEffect } from "@glasstrace/sdk";
+import { hashId } from "@glasstrace/sdk/node";
+
+recordSideEffect({
+  kind: "external_api",
+  operation: "charge.create",
+  status: "succeeded",
+  scalars: {
+    latencyMs: 142, // bounded delta — not a wall-clock epoch
+    amountValue: 1999, // a magnitude
+    retriedFlag: false, // a boolean condition
+    // Identifiers must be pseudonymized; raw ids are rejected.
+    customerId: hashId(rawCustomerId, process.env.GLASSTRACE_ATTR_HMAC_KEY!),
+  },
+});
+```
+
+Scalars are validated at emit time under a **fail-closed `strict`**
+posture. (An account-level `captureFidelity` setting that can relax the
+timestamp/identifier rejections is part of the wire contract but is **not
+active in this release** — scalars are always validated as `strict`
+here.) Under `strict` the SDK rejects values that would leak raw,
+high-cardinality data before they reach the wire, recording only an
+integer omission count:
+
+| Rejected value | Omission reason |
+|---|---|
+| A `Date`, or a raw epoch on a `*Ms` key | `raw_timestamp` |
+| A non-`gthid_` value on an `*Id` key | `unhashed_id` |
+| `NaN` / `±Infinity` | `non_finite` |
+| A value whose type doesn't match its key suffix (e.g. a string or boolean on `*Ms`) | `raw_payload` |
+| A key not matching the scalar pattern | `unsupported_key` |
+| More than 16 scalars in one call (the excess are dropped) | `value_too_long` |
+
+Send **bounded deltas as numbers** (e.g. `latencyMs: 142`), not absolute
+timestamps. Note that raw-epoch screening applies only to `*Ms` keys (the
+time-typed suffix) — keep wall-clock values off other numeric suffixes.
+Pseudonymize identifiers with **`hashId`** (HMAC-SHA256, fixed-shape
+`gthid_<hex>`, fail-closed — returns `null` without a key), which ships on
+the Node-only `@glasstrace/sdk/node` subpath because it uses
+`node:crypto`. At most 16 scalars are recorded per operation.
+
 ## Source maps
 
 Glasstrace uploads server-side source maps at build time and resolves
@@ -841,7 +898,7 @@ without a deprecation cycle. Rely on the static file.
 
 ## Subpath exports
 
-`@glasstrace/sdk` ships four public entries:
+`@glasstrace/sdk` ships six public entries:
 
 - **`@glasstrace/sdk`** — primary import site. Use from
   `instrumentation.ts` (runtime instrumentation) and `next.config.ts`
@@ -853,14 +910,19 @@ without a deprecation cycle. Rely on the static file.
   runtimes; workloads running strictly on workerd or Vercel Edge
   should import from the internal edge-entry bundle — not currently
   exposed as a public entry — or ask for a public `/edge` subpath.
-- **`@glasstrace/sdk/node`** — Node-only build-time tooling
-  (source-map uploading, import-graph construction). Use from
-  `next.config.ts` / build scripts. Resolves only under the Node
-  condition; non-Node runtimes (workerd, edge-light) fail cleanly at
-  module resolution rather than at evaluation.
+- **`@glasstrace/sdk/node`** — Node-only helpers: build-time tooling
+  (source-map uploading, import-graph construction) plus the request-time
+  `hashId` identifier-pseudonymization helper for value-fidelity scalars.
+  Resolves only under the Node condition; non-Node runtimes (workerd,
+  edge-light) fail cleanly at module resolution rather than at
+  evaluation.
 - **`@glasstrace/sdk/drizzle`** — Drizzle ORM adapter.
 - **`@glasstrace/sdk/trpc`** — tRPC middleware-chain instrumentation.
   See "tRPC middleware instrumentation" below.
+- **`@glasstrace/sdk/middleware`** — request-middleware tracing wrapper
+  (`tracedRequestMiddleware`).
+- **`@glasstrace/sdk/async-context`** — async causality propagation
+  (`withAsyncCausality`).
 
 The source-map and import-graph helpers previously reachable from the
 `@glasstrace/sdk` root specifier have moved to `@glasstrace/sdk/node`
@@ -906,11 +968,15 @@ and the recommended call site.
 | `discoverTestFiles` | function | `node:fs`, `node:path` | — (call from a build script / CI job) |
 | `extractImports` | function | — (pure string processing) | — (kept under `/node` for API cohesion with `buildImportGraph`) |
 | `buildImportGraph` | function | `node:fs`, `node:path`, `node:crypto` | — (call from a build script / CI job) |
+| `hashId` | function | `node:crypto` | — (call from the request handler that records the side effect) |
 
 Type exports erase at runtime and are technically safe to import from
 edge code, but every runtime function that produces or consumes them is
-Node-only, so the practical signal is the same: reach for these from
-your build pipeline, not from a request handler.
+Node-only, so the practical signal is the same: reach for the source-map
+and import-graph helpers from your build pipeline, not from a request
+handler. `hashId` is the exception — it is a request-time helper for
+pseudonymizing identifiers before `recordSideEffect()`, Node-only only
+because it uses `node:crypto`.
 
 #### Why is X Node-only?
 

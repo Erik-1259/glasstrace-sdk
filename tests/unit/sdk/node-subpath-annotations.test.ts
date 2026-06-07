@@ -31,7 +31,7 @@ const nodeSubpathFile = path.join(
   "packages/sdk/src/node-subpath.ts",
 );
 
-const EXPECTED_NODE_EXPORT_COUNT = 14;
+const EXPECTED_NODE_EXPORT_COUNT = 15;
 const NODE_ONLY_MARKER = "Node-only.";
 
 /**
@@ -141,9 +141,9 @@ describe("SDK-032 /node surface JSDoc marker", () => {
   const { annotations, valueCount, typeCount } =
     collectNodeSubpathAnnotations();
 
-  it("covers exactly 14 /node exports (10 values + 4 types)", () => {
+  it("covers exactly 15 /node exports (11 values + 4 types)", () => {
     expect(annotations.size).toBe(EXPECTED_NODE_EXPORT_COUNT);
-    expect(valueCount).toBe(10);
+    expect(valueCount).toBe(11);
     expect(typeCount).toBe(4);
   });
 

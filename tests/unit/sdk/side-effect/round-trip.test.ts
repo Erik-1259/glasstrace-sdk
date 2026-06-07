@@ -26,7 +26,11 @@ import {
 } from "../../../../packages/sdk/src/init-client.js";
 import { installContextManager } from "../../../../packages/sdk/src/context-manager.js";
 import type { SdkInitResponse } from "../../../../packages/protocol/src/wire.js";
-import { GLASSTRACE_ATTRIBUTE_NAMES } from "../../../../packages/protocol/src/index.js";
+import {
+  GLASSTRACE_ATTRIBUTE_NAMES,
+  MAX_SIDE_EFFECT_SCALARS_PER_OPERATION,
+  SIDE_EFFECT_SCALAR_PREFIX,
+} from "../../../../packages/protocol/src/index.js";
 
 // Install the AsyncLocalStorage context manager so `startActiveSpan`
 // propagates the span into `otelApi.trace.getActiveSpan()`.
@@ -55,6 +59,9 @@ const ALLOWLISTED_WIRE_KEYS: ReadonlyArray<string> = [
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG,
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NOT_EMITTED,
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_CAPTURE_DISABLED,
+  GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_TIMESTAMP,
+  GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID,
+  GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NON_FINITE,
 ];
 
 beforeEach(() => {
@@ -230,5 +237,128 @@ describe("recordSideEffect — round trip", () => {
       })),
     );
     expect(serialized).not.toContain("abc.def.ghi");
+  });
+});
+
+describe("recordSideEffect — scalar channel round trip", () => {
+  it("emits accepted scalars as native-typed attributes and counts rejections", () => {
+    const rawId = "user_" + "999";
+    tracer.startActiveSpan("scalar-round-trip", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        fields: { templateKey: "Welcome" },
+        scalars: {
+          renderMs: 42, // accepted number
+          hadAttachmentFlag: true, // accepted boolean
+          attemptValue: 3, // accepted number
+          createdMs: 1_700_000_000_000, // rejected: raw epoch
+          actorId: rawId, // rejected: unhashed id
+          scoreValue: Number.NaN, // rejected: non-finite
+        },
+      });
+      span.end();
+    });
+
+    const span = exporter.getFinishedSpans()[0];
+    const attrs = span.attributes as Record<string, unknown>;
+
+    // Accepted scalars carry NATIVE types (the product validator rejects
+    // numeric-/boolean-shaped strings, so stringify would break parity).
+    expect(attrs[`${SIDE_EFFECT_SCALAR_PREFIX}renderMs`]).toBe(42);
+    expect(typeof attrs[`${SIDE_EFFECT_SCALAR_PREFIX}renderMs`]).toBe("number");
+    expect(attrs[`${SIDE_EFFECT_SCALAR_PREFIX}hadAttachmentFlag`]).toBe(true);
+    expect(typeof attrs[`${SIDE_EFFECT_SCALAR_PREFIX}hadAttachmentFlag`]).toBe(
+      "boolean",
+    );
+    expect(attrs[`${SIDE_EFFECT_SCALAR_PREFIX}attemptValue`]).toBe(3);
+    expect(typeof attrs[`${SIDE_EFFECT_SCALAR_PREFIX}attemptValue`]).toBe(
+      "number",
+    );
+
+    // Rejected scalars never reach the wire.
+    expect(attrs[`${SIDE_EFFECT_SCALAR_PREFIX}createdMs`]).toBeUndefined();
+    expect(attrs[`${SIDE_EFFECT_SCALAR_PREFIX}actorId`]).toBeUndefined();
+
+    // Each rejection bumped its omission counter (integer count only).
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_TIMESTAMP],
+    ).toBe(1);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
+    ).toBe(1);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NON_FINITE],
+    ).toBe(1);
+
+    // Closed-world invariant: every `glasstrace.side_effect.*` attribute
+    // is either an allowlisted wire key or a `scalar.*` key — no stray
+    // attribute leaks from the scalar path.
+    for (const k of Object.keys(attrs)) {
+      if (!k.startsWith("glasstrace.side_effect.")) continue;
+      const ok =
+        ALLOWLISTED_WIRE_KEYS.includes(k) ||
+        k.startsWith(SIDE_EFFECT_SCALAR_PREFIX);
+      expect(ok, `unexpected side-effect attribute: ${k}`).toBe(true);
+    }
+
+    // The raw rejected id never appears anywhere on the span's
+    // attribute set (where a leaked value would surface).
+    expect(JSON.stringify(attrs)).not.toContain(rawId);
+  });
+
+  it("enforces the per-operation scalar cap", () => {
+    const scalars: Record<string, number> = {};
+    for (let i = 0; i < MAX_SIDE_EFFECT_SCALARS_PER_OPERATION + 3; i++) {
+      scalars[`metric${i}Value`] = i;
+    }
+
+    tracer.startActiveSpan("scalar-cap", (span) => {
+      recordSideEffect({ kind: "email", operation: "email.send", scalars });
+      span.end();
+    });
+
+    const attrs = exporter.getFinishedSpans()[0].attributes as Record<
+      string,
+      unknown
+    >;
+    const scalarKeys = Object.keys(attrs).filter((k) =>
+      k.startsWith(SIDE_EFFECT_SCALAR_PREFIX),
+    );
+    expect(scalarKeys).toHaveLength(MAX_SIDE_EFFECT_SCALARS_PER_OPERATION);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG],
+    ).toBe(1);
+  });
+
+  it("counts rejected scalars against the per-operation budget", () => {
+    // The cap counts every processed entry, accepted or rejected, so a
+    // burst of rejections exhausts the budget and a later valid scalar is
+    // dropped (over-budget) rather than emitted.
+    const scalars: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_SIDE_EFFECT_SCALARS_PER_OPERATION; i++) {
+      scalars[`flag${i}Flag`] = i; // number on *Flag → raw_payload
+    }
+    scalars.lateValue = 7; // a valid scalar, but the budget is spent
+
+    tracer.startActiveSpan("scalar-budget", (span) => {
+      recordSideEffect({ kind: "email", operation: "email.send", scalars });
+      span.end();
+    });
+
+    const attrs = exporter.getFinishedSpans()[0].attributes as Record<
+      string,
+      unknown
+    >;
+    // No scalar emitted — all 16 slots consumed by rejections.
+    expect(
+      Object.keys(attrs).filter((k) => k.startsWith(SIDE_EFFECT_SCALAR_PREFIX)),
+    ).toHaveLength(0);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+    ).toBe(MAX_SIDE_EFFECT_SCALARS_PER_OPERATION);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG],
+    ).toBe(1);
   });
 });

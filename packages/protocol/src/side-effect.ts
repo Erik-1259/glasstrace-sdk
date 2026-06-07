@@ -171,6 +171,21 @@ export const SIDE_EFFECT_OMISSION_REASONS = [
   "value_too_long",
   "not_emitted",
   "capture_disabled",
+  // Value-fidelity scalar channel reasons. A scalar is dropped under
+  // `raw_timestamp` when a wall-clock value (a `Date` instance, or a
+  // numeric epoch on a `*Ms` key) is rejected in favor of a bounded
+  // delta; `unhashed_id` when an `*Id` scalar is not the `gthid_<hex>`
+  // output of `hashId`; `non_finite` when a number is NaN/±Infinity.
+  // (A type-mismatched value — e.g. a date *string* on a numeric key —
+  // is dropped under `raw_payload`, not `raw_timestamp`, since the
+  // scalar channel only carries native numbers/booleans plus `gthid_`
+  // ids.) These mirror the product `SideEffectOmissionReasonSchema`
+  // tuple verbatim (hand-maintained on both sides; see @drift-check
+  // above). `non_finite` is SDK-emit-time only — JSON cannot carry
+  // NaN/Infinity to the wire.
+  "raw_timestamp",
+  "unhashed_id",
+  "non_finite",
 ] as const;
 
 /**
@@ -180,6 +195,78 @@ export const SIDE_EFFECT_OMISSION_REASONS = [
  */
 export type SideEffectOmissionReason =
   (typeof SIDE_EFFECT_OMISSION_REASONS)[number];
+
+/**
+ * Value-fidelity scalar key pattern.
+ *
+ * Scalars carry type-aware raw magnitudes off-summary on the
+ * `glasstrace.side_effect.scalar.*` channel, distinct from the
+ * categorical `*.field.*` summary channel. A scalar key is camelCase
+ * ending in one of the magnitude/identity suffixes:
+ *
+ *   - `*Ms` / `*Amount` / `*Bytes` / `*Ratio` / `*Value` → finite number
+ *   - `*Flag` → boolean
+ *   - `*Id` → a `gthid_<hex>` hashed identifier (never a raw id)
+ *
+ * `Count` is deliberately **excluded**: count facets route to the
+ * categorical summary channel via the `*Count` semantic-field validator,
+ * not the scalar channel. Channel selection is by attribute **prefix**
+ * (`…field.*` vs `…scalar.*`), never by key suffix — the same key may
+ * legitimately exist on both channels.
+ *
+ * Mirrors the product `SideEffectScalarSchema` key regex verbatim
+ * (`shared/types/agent-evidence.ts`); see @drift-check above.
+ */
+export const SIDE_EFFECT_SCALAR_KEY_PATTERN =
+  /^[a-z][A-Za-z0-9]*(Ms|Amount|Bytes|Ratio|Id|Value|Flag)$/;
+
+/**
+ * OTel attribute-name prefix for the value-fidelity scalar channel.
+ * The emitted attribute is `${SIDE_EFFECT_SCALAR_PREFIX}${key}` carrying
+ * a native `number` / `boolean` / `string` value (no stringify — the
+ * product validator rejects numeric- and boolean-shaped strings).
+ */
+export const SIDE_EFFECT_SCALAR_PREFIX = "glasstrace.side_effect.scalar.";
+
+/**
+ * Maximum number of scalars recorded per side-effect operation. Scalars
+ * are off-summary and do not count against the categorical
+ * per-operation field budget; this is the separate scalar ceiling,
+ * enforced SDK-side at emit and re-enforced product-side at ingestion.
+ */
+export const MAX_SIDE_EFFECT_SCALARS_PER_OPERATION = 16;
+
+/**
+ * Runtime guard for the scalar key admission contract. Returns `true`
+ * when `key` is no longer than
+ * {@link MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH} and matches
+ * {@link SIDE_EFFECT_SCALAR_KEY_PATTERN}. The length cap is shared with
+ * the semantic-field key contract for symmetry with the product schema,
+ * which bounds the scalar key by the same constant.
+ */
+export function isSideEffectScalarKey(key: string): boolean {
+  if (key.length > MAX_SIDE_EFFECT_SEMANTIC_FIELD_KEY_LENGTH) return false;
+  return SIDE_EFFECT_SCALAR_KEY_PATTERN.test(key);
+}
+
+/**
+ * Fixed prefix of a hashed side-effect identifier produced by `hashId`.
+ * The full shape is `gthid_<lowercase-hex>`; the product validator
+ * accepts `/^gthid_[0-9a-f]+$/` (length-agnostic), while the SDK emits a
+ * fixed-length digest so a forged `gthid_<non-hex>` fails the shape.
+ */
+export const SIDE_EFFECT_HASHED_ID_PREFIX = "gthid_";
+
+/**
+ * Hex length of the digest in a `hashId` token (`gthid_<hex>`). The SDK
+ * both emits and (under `strict`) admits exactly this length — a
+ * fixed-shape `gthid_[0-9a-f]{N}` token, which is stronger than the
+ * product validator's length-agnostic `^gthid_[0-9a-f]+$`. Pinning the
+ * length closes a smuggling vector (arbitrary hex-encoded data behind
+ * `gthid_`) and bounds the emitted attribute size. Shared by `hashId`
+ * and the SDK scalar validator so the two cannot drift.
+ */
+export const SIDE_EFFECT_HASHED_ID_HEX_LENGTH = 32;
 
 /**
  * Allowlisted side-effect operation lifecycle statuses.
