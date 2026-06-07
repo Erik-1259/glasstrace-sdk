@@ -78,18 +78,22 @@ export type SideEffectSemanticFieldStableCoreKey =
  *
  * Keys that match this regex are admitted alongside the stable-core
  * literal set. The suffix family is `*Class` / `*Count` / `*Kind` /
- * `*Role`; producers normalize key names to lowerCamelCase with one
- * of the four canonical suffixes. Value-shape validators route on
+ * `*Role` / `*Holds`; producers normalize key names to lowerCamelCase
+ * with one of the canonical suffixes. Value-shape validators route on
  * the suffix:
  *
  *   - `*Count` → digit-only string (max 16 chars)
+ *   - `*Holds` → boolean string (`"true"` / `"false"`)
  *   - `*Class` / `*Kind` / `*Role` → compact-token string (max 80)
  *
- * Stable-core keys with specialized validators take precedence over
- * the default suffix routing.
+ * `*Holds` carries a producer-supplied boolean relation (an asserted
+ * invariant such as `timezonePreservedHolds`) inline on the categorical
+ * field channel — not the scalar channel. Stable-core keys with
+ * specialized validators take precedence over the default suffix
+ * routing.
  */
 export const SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN =
-  /^[a-z][A-Za-z0-9]*(Class|Count|Kind|Role)$/;
+  /^[a-z][A-Za-z0-9]*(Class|Count|Kind|Role|Holds)$/;
 
 /**
  * Maximum length, in characters, of a semantic field KEY name.

@@ -210,7 +210,7 @@ describe("SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS", () => {
 });
 
 describe("SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN", () => {
-  it("matches lowerCamelCase keys ending in one of the four canonical suffixes", () => {
+  it("matches lowerCamelCase keys ending in one of the canonical suffixes", () => {
     for (const key of [
       "recipientClass",
       "attachmentClass",
@@ -222,6 +222,8 @@ describe("SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN", () => {
       "channelKind",
       "actorRole",
       "recipientRole",
+      "timezonePreservedHolds",
+      "durationMatchesHolds",
     ]) {
       expect(SIDE_EFFECT_SEMANTIC_FIELD_OPEN_PATTERN.test(key)).toBe(true);
     }

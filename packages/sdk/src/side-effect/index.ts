@@ -284,6 +284,21 @@ export interface RecordSideEffectInput {
    * prefix), so a categorical and a scalar facet can share a name.
    */
   scalars?: Record<string, unknown>;
+
+  /**
+   * Optional producer-asserted boolean relations (invariants) emitted on
+   * the categorical field channel. Keys must be camelCase ending in
+   * `Holds` (e.g. `timezonePreservedHolds`); values are real `boolean`s,
+   * coerced to `"true"`/`"false"` on the wire. A non-`Holds` key, a
+   * non-boolean value, or a key already attached by `fields` (a
+   * same-channel collision — `fields` wins) is dropped with the matching
+   * omission counter. Relations count against the same product-side
+   * per-operation field budget as `fields` (enforced at projection).
+   *
+   * Use {@link invariant} / {@link isNullInvariant} to compute the
+   * boolean from a comparison.
+   */
+  relations?: Record<string, boolean>;
 }
 
 /**
@@ -421,6 +436,10 @@ function runRecordSideEffect(input: unknown): void {
 
   // Process semantic fields. Each rejection routes to an omission
   // count on the same span; accepted values become field attributes.
+  // `attachedFieldKeys` records the keys that actually reached the wire,
+  // so the relations loop below can detect a genuine same-channel
+  // collision (a rejected field does not suppress a valid relation).
+  const attachedFieldKeys = new Set<string>();
   const fields = candidate.fields;
   if (fields && typeof fields === "object") {
     for (const [rawKey, rawValue] of Object.entries(fields)) {
@@ -445,6 +464,53 @@ function runRecordSideEffect(input: unknown): void {
         // Intentionally silent — warn deliverability is best-effort.
       }
       attachField(outcome.span, rawKey, valueOutcome.value);
+      attachedFieldKeys.add(rawKey);
+    }
+  }
+
+  // Process boolean `*Holds` relations on the categorical field channel.
+  // A real boolean is coerced to `"true"`/`"false"` and routed through
+  // the same field validator/emitter as `fields`. A key already attached
+  // by `fields` collides on the same channel — `fields` wins and the
+  // relation is dropped (a *rejected* field key is not a collision).
+  // (`scalars` is a separate attribute channel, so a `*Holds` name there
+  // is unrelated — and is independently rejected as a non-scalar key.)
+  // Relations count against the same product-side per-operation field
+  // budget as `fields`, enforced at projection.
+  const relations = candidate.relations;
+  if (relations && typeof relations === "object") {
+    for (const [rawKey, rawValue] of Object.entries(relations)) {
+      if (attachedFieldKeys.has(rawKey)) {
+        recordOmission(outcome.span, "unsupported_key");
+        continue;
+      }
+      if (!rawKey.endsWith("Holds") || !checkSemanticFieldKey(rawKey)) {
+        recordOmission(outcome.span, "unsupported_key");
+        continue;
+      }
+      if (typeof rawValue !== "boolean") {
+        // Relations must be real booleans; a non-boolean is malformed.
+        recordOmission(outcome.span, "raw_payload");
+        continue;
+      }
+      const valueOutcome = checkSemanticFieldValue(
+        rawKey,
+        rawValue ? "true" : "false",
+      );
+      if (!valueOutcome.accepted) {
+        recordOmission(outcome.span, valueOutcome.reason);
+        continue;
+      }
+      // Same diagnostic governance as `fields` (the casing warn no-ops
+      // for `*Holds`; the proliferation warn counts the pattern key).
+      try {
+        maybeWarnMixedCasing(rawKey, valueOutcome.value);
+        maybeWarnPatternKeyProliferation(rawKey);
+      } catch {
+        // Intentionally silent — warn deliverability is best-effort.
+      }
+      attachField(outcome.span, rawKey, valueOutcome.value);
+      attachedFieldKeys.add(rawKey);
     }
   }
 

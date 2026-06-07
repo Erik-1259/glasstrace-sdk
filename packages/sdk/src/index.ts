@@ -207,6 +207,13 @@ export { recordSideEffect } from "./side-effect/index.js";
 export type { RecordSideEffectInput } from "./side-effect/index.js";
 
 /**
+ * Producer-sugar for computing boolean `*Holds` relations passed to
+ * {@link recordSideEffect}'s `relations`. Pure and edge-safe.
+ */
+export { invariant, isNullInvariant } from "./side-effect/invariant.js";
+export type { InvariantOp } from "./side-effect/invariant.js";
+
+/**
  * Re-exported value-enum types from `@glasstrace/protocol` so
  * consumers building call sites for {@link recordSideEffect} can
  * import the allowed operation kind / status / phase / semantic

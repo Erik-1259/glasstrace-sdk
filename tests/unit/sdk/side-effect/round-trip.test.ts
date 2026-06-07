@@ -362,3 +362,126 @@ describe("recordSideEffect — scalar channel round trip", () => {
     ).toBe(1);
   });
 });
+
+describe("recordSideEffect — *Holds relations round trip", () => {
+  const FIELD_PREFIX = "glasstrace.side_effect.field.";
+
+  it("emits booleans as coerced true/false field attributes", () => {
+    tracer.startActiveSpan("relations", (span) => {
+      recordSideEffect({
+        kind: "calendar_link",
+        operation: "invite.create",
+        relations: {
+          timezonePreservedHolds: false,
+          durationMatchesHolds: true,
+        },
+      });
+      span.end();
+    });
+    const attrs = exporter.getFinishedSpans()[0].attributes as Record<
+      string,
+      unknown
+    >;
+    expect(attrs[`${FIELD_PREFIX}timezonePreservedHolds`]).toBe("false");
+    expect(attrs[`${FIELD_PREFIX}durationMatchesHolds`]).toBe("true");
+  });
+
+  it("drops non-Holds keys, non-boolean values, and fields/relations collisions", () => {
+    tracer.startActiveSpan("relations-reject", (span) => {
+      recordSideEffect({
+        kind: "calendar_link",
+        operation: "invite.create",
+        fields: { sharedHolds: "true" }, // takes the field channel
+        relations: {
+          // non-Holds suffix → unsupported_key
+          extraClass: true,
+          // collides with fields.sharedHolds → unsupported_key (fields wins)
+          sharedHolds: false,
+          // non-boolean value → raw_payload
+          coercedHolds: "true" as unknown as boolean,
+        },
+      });
+      span.end();
+    });
+    const attrs = exporter.getFinishedSpans()[0].attributes as Record<
+      string,
+      unknown
+    >;
+    // fields wins the shared key.
+    expect(attrs[`${FIELD_PREFIX}sharedHolds`]).toBe("true");
+    // The non-Holds relation key is dropped, never emitted.
+    expect(attrs[`${FIELD_PREFIX}extraClass`]).toBeUndefined();
+    expect(attrs[`${FIELD_PREFIX}coercedHolds`]).toBeUndefined();
+    // Two unsupported_key (non-Holds key + collision) and one raw_payload.
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNSUPPORTED_KEY],
+    ).toBe(2);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+    ).toBe(1);
+  });
+
+  it("a rejected fields entry does NOT suppress a valid relation of the same key", () => {
+    tracer.startActiveSpan("relations-not-collision", (span) => {
+      recordSideEffect({
+        kind: "calendar_link",
+        operation: "invite.create",
+        fields: { okHolds: "maybe" }, // rejected (not a bool literal)
+        relations: { okHolds: true }, // valid — must still emit
+      });
+      span.end();
+    });
+    const attrs = exporter.getFinishedSpans()[0].attributes as Record<
+      string,
+      unknown
+    >;
+    // The field was rejected, so the relation is not a collision and wins.
+    expect(attrs[`${FIELD_PREFIX}okHolds`]).toBe("true");
+    // The rejected field still recorded one raw_payload; no unsupported_key.
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+    ).toBe(1);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNSUPPORTED_KEY],
+    ).toBeUndefined();
+  });
+
+  it("treats an empty relations map as a no-op", () => {
+    tracer.startActiveSpan("relations-empty", (span) => {
+      recordSideEffect({
+        kind: "email",
+        operation: "email.send",
+        relations: {},
+      });
+      span.end();
+    });
+    const attrs = exporter.getFinishedSpans()[0].attributes as Record<
+      string,
+      unknown
+    >;
+    const fieldAttrs = Object.keys(attrs).filter((k) =>
+      k.startsWith(FIELD_PREFIX),
+    );
+    expect(fieldAttrs).toHaveLength(0);
+  });
+
+  it("also admits a *Holds key supplied via the fields channel", () => {
+    tracer.startActiveSpan("holds-via-fields", (span) => {
+      recordSideEffect({
+        kind: "calendar_link",
+        operation: "invite.create",
+        fields: { timezonePreservedHolds: "false", badHolds: "maybe" },
+      });
+      span.end();
+    });
+    const attrs = exporter.getFinishedSpans()[0].attributes as Record<
+      string,
+      unknown
+    >;
+    expect(attrs[`${FIELD_PREFIX}timezonePreservedHolds`]).toBe("false");
+    expect(attrs[`${FIELD_PREFIX}badHolds`]).toBeUndefined();
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+    ).toBe(1);
+  });
+});
