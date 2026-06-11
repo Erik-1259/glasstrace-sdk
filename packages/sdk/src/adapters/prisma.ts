@@ -2,9 +2,10 @@
  * Passive Prisma value-capture adapter (L1 capture).
  *
  * `prismaAdapter({ allow })` returns a Prisma client extension that, for
- * each allowlisted `(model, column)`, projects a boolean result field onto
- * a Glasstrace value-fidelity scalar so an agent can read it back from the
- * trace. It is **passive and observational**: it never executes a query
+ * each allowlisted `(model, column)`, projects a result field — a boolean
+ * (default) or, with an `as` intent, a finite number — onto a Glasstrace
+ * value-fidelity scalar so an agent can read it back from the trace. It is
+ * **passive and observational**: it never executes a query
  * itself, never reads or mutates the result, and never changes query
  * behavior or errors.
  *
@@ -28,9 +29,15 @@
  *  - **Default-deny.** Nothing is captured unless an explicit `allow` entry
  *    matches AND the server-pushed `sideEffectEvidence` capture flag is on.
  *    An empty / unset `allow` captures nothing.
- *  - **Boolean only.** This adapter projects boolean columns (the strict,
- *    no-`captureFidelity:full` case). Non-boolean allowlisted columns route
- *    to a safe omission counter, never a captured value.
+ *  - **Strict scalars only.** Each column projects onto a value-fidelity
+ *    scalar by its `as` intent — a boolean `*Flag` (default) or a finite
+ *    numeric `*Value`/`*Amount`/`*Ms`/`*Bytes`/`*Ratio`. Numeric intents
+ *    capture native JavaScript `number` values only; non-`number` shapes such
+ *    as a Prisma `Decimal` (a Decimal.js object) or `BigInt` are safely
+ *    omitted rather than lossily converted — project a pre-converted `number`
+ *    if you need them. A value whose type does not match its intent routes to
+ *    a safe omission counter, never a captured value. Identifier and
+ *    categorical scalars are out of scope.
  *  - **Pure observer.** Capture work can never throw into the host query;
  *    the owned span is always ended; the original query error is re-thrown
  *    verbatim.
@@ -73,12 +80,37 @@ export interface PrismaCaptureExtension {
   };
 }
 
+/**
+ * How an allowlisted column is projected — selects the value-fidelity scalar
+ * key suffix and the expected value type. `flag` is a boolean (`*Flag`); the
+ * rest are finite numbers (`*Value`/`*Amount`/`*Ms`/`*Bytes`/`*Ratio`), where
+ * `ms` is a bounded delta, never a wall-clock epoch (a raw epoch is rejected
+ * at emit). Identifier and categorical scalars are intentionally unsupported.
+ */
+export type ScalarIntent =
+  | "flag"
+  | "value"
+  | "amount"
+  | "ms"
+  | "bytes"
+  | "ratio";
+
 /** A single allowlisted column to project. */
 export interface PrismaCaptureColumn {
   /** The Prisma model name, PascalCase, exactly as Prisma reports it (e.g. `Poll`). */
   model: string;
-  /** The boolean result column to project (e.g. `muted`). */
+  /** The result column to project (e.g. `muted`, `total`). */
   column: string;
+  /**
+   * How to project the column's value (default `flag`). `flag` projects a
+   * boolean onto a `*Flag` scalar; the numeric intents project a native
+   * JavaScript `number` onto `*Value` / `*Amount` / `*Ms` / `*Bytes` /
+   * `*Ratio` (the column with the intent's suffix). The value is
+   * strict-validated by type at emit, so a value whose type does not match the
+   * intent — including a Prisma `Decimal`/`BigInt`, which are not native
+   * `number`s — is dropped, never captured.
+   */
+  as?: ScalarIntent;
 }
 
 /** Options for {@link prismaAdapter}. */
@@ -134,15 +166,34 @@ function openOwnedSpan(model: string, operation: string): Span | undefined {
   }
 }
 
+/** The value-fidelity scalar-key suffix for each {@link ScalarIntent}. */
+const INTENT_SUFFIX: Readonly<Record<ScalarIntent, string>> = {
+  flag: "Flag",
+  value: "Value",
+  amount: "Amount",
+  ms: "Ms",
+  bytes: "Bytes",
+  ratio: "Ratio",
+};
+
 /**
- * Derive the scalar key for a boolean column. A boolean projects onto a
- * `*Flag` scalar; the key is the column with a `Flag` suffix (not doubled if
- * the column already ends in `Flag`). This derivation is deterministic and
- * stable because the server-side operator allowlist keys on the emitted
- * scalar key (`<column>Flag`), not the source column.
+ * Every supported {@link ScalarIntent}, derived from {@link INTENT_SUFFIX} so
+ * the two cannot drift — used to validate `as` input from untyped callers.
  */
-function deriveFlagKey(column: string): string {
-  return column.endsWith("Flag") ? column : `${column}Flag`;
+const SCALAR_INTENTS = Object.keys(
+  INTENT_SUFFIX,
+) as ReadonlyArray<ScalarIntent>;
+
+/**
+ * Derive the scalar key for an allowlisted column and its intent — the column
+ * with the intent's suffix appended (not doubled if the column already ends in
+ * it). This derivation is deterministic and stable because the server-side
+ * operator allowlist keys on the emitted scalar key (`<column><Suffix>`), not
+ * the source column.
+ */
+function deriveScalarKey(column: string, intent: ScalarIntent): string {
+  const suffix = INTENT_SUFFIX[intent];
+  return column.endsWith(suffix) ? column : `${column}${suffix}`;
 }
 
 /**
@@ -154,16 +205,16 @@ function deriveFlagKey(column: string): string {
  */
 function projectAllowlisted(
   span: Span,
-  columns: ReadonlySet<string>,
+  columns: ReadonlyMap<string, ScalarIntent>,
   result: unknown,
 ): void {
   if (result === null || typeof result !== "object" || Array.isArray(result)) {
     return;
   }
   const row = result as Record<string, unknown>;
-  for (const column of columns) {
+  for (const [column, intent] of columns) {
     if (!(column in row)) continue;
-    capture(deriveFlagKey(column), row[column], { span });
+    capture(deriveScalarKey(column, intent), row[column], { span });
   }
 }
 
@@ -174,8 +225,10 @@ function projectAllowlisted(
 export function prismaAdapter(
   options: PrismaAdapterOptions = {},
 ): PrismaCaptureExtension {
-  // Compile the allowlist into model -> set(columns) once at construction.
-  const policy = new Map<string, Set<string>>();
+  // Compile the allowlist into model -> map(column -> intent) once at
+  // construction. An out-of-contract `as` (untyped callers) drops the entry
+  // (default-deny).
+  const policy = new Map<string, Map<string, ScalarIntent>>();
   for (const entry of options?.allow ?? []) {
     if (
       !entry ||
@@ -186,12 +239,19 @@ export function prismaAdapter(
     ) {
       continue;
     }
+    // Only an absent `as` defaults to "flag"; an explicitly-provided
+    // out-of-contract value (incl. `null` from untyped/JSON callers) drops
+    // the entry (default-deny) rather than silently falling back to "flag".
+    const intent = entry.as === undefined ? "flag" : entry.as;
+    if (!SCALAR_INTENTS.includes(intent)) {
+      continue;
+    }
     let columns = policy.get(entry.model);
     if (!columns) {
-      columns = new Set();
+      columns = new Map();
       policy.set(entry.model, columns);
     }
-    columns.add(entry.column);
+    columns.set(entry.column, intent);
   }
 
   return {
