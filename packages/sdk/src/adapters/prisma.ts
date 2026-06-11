@@ -19,10 +19,12 @@
  * ```
  *
  * Design:
- *  - **OWN a span.** At the capture point the database client's own
- *    operation span has already ended, so the adapter opens its own
- *    recording `db.<Model>.<op>` span (parented under the active request
- *    span) and emits onto it via {@link capture}.
+ *  - **OWN a span.** The ambient span at the capture point is not a reliable
+ *    emit target — depending on the Prisma / instrumentation version it may be
+ *    the (possibly already-ended) database operation span rather than a
+ *    `db.<Model>.<op>` span — so the adapter opens its own recording
+ *    `db.<Model>.<op>` span (a same-trace descendant of the request span) and
+ *    emits onto it via {@link capture}.
  *  - **Default-deny.** Nothing is captured unless an explicit `allow` entry
  *    matches AND the server-pushed `sideEffectEvidence` capture flag is on.
  *    An empty / unset `allow` captures nothing.
@@ -224,8 +226,10 @@ export function prismaAdapter(
             return query(args);
           }
 
-          // OWN a recording db.<Model>.<op> span, parented under the active
-          // request span. The span name is the attribution anchor. If the
+          // OWN a recording db.<Model>.<op> span — a same-trace descendant of
+          // the request span (its immediate parent is the active span, which
+          // on some Prisma/instrumentation versions is the still-recording
+          // operation span). The span name is the attribution anchor. If the
           // OTel API fails to open the span, fall back to running the query
           // untouched — the capture path must never throw into it.
           const span = openOwnedSpan(model, operation);
