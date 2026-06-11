@@ -12,6 +12,7 @@
 import * as otelApi from "@opentelemetry/api";
 import {
   GLASSTRACE_ATTRIBUTE_NAMES,
+  MAX_SIDE_EFFECT_SCALARS_PER_OPERATION,
   SIDE_EFFECT_SCALAR_PREFIX,
   type SideEffectOmissionReason,
   type SideEffectOperationKind,
@@ -30,6 +31,13 @@ import { MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN } from "./allowlist.js";
 interface SpanSideEffectState {
   operationsRecorded: number;
   omissions: Map<SideEffectOmissionReason, number>;
+  /**
+   * Cumulative count of value-fidelity scalars attached to this span via the
+   * owned-span `capture()` path, enforcing the per-operation scalar budget
+   * across many `capture()` calls (e.g. a Prisma adapter projecting several
+   * allowlisted columns onto one span).
+   */
+  scalarsRecorded: number;
 }
 
 const spanState: WeakMap<otelApi.Span, SpanSideEffectState> = new WeakMap();
@@ -37,7 +45,7 @@ const spanState: WeakMap<otelApi.Span, SpanSideEffectState> = new WeakMap();
 function getOrCreateState(span: otelApi.Span): SpanSideEffectState {
   let state = spanState.get(span);
   if (!state) {
-    state = { operationsRecorded: 0, omissions: new Map() };
+    state = { operationsRecorded: 0, omissions: new Map(), scalarsRecorded: 0 };
     spanState.set(span, state);
   }
   return state;
@@ -281,6 +289,24 @@ export function attachScalar(
   } catch {
     // Slot exhaustion — ignore.
   }
+}
+
+/**
+ * Reserve one slot in the span's per-operation scalar budget
+ * ({@link MAX_SIDE_EFFECT_SCALARS_PER_OPERATION}). Returns `true` and
+ * increments the count when a slot is available, `false` once the span is at
+ * budget. Used by the owned-span `capture()` path so that many `capture()`
+ * calls on one span (e.g. a Prisma adapter projecting several columns) stay
+ * within the protocol budget and deterministically omit the overflow rather
+ * than over-emitting for downstream truncation.
+ */
+export function reserveScalarSlot(span: otelApi.Span): boolean {
+  const state = getOrCreateState(span);
+  if (state.scalarsRecorded >= MAX_SIDE_EFFECT_SCALARS_PER_OPERATION) {
+    return false;
+  }
+  state.scalarsRecorded += 1;
+  return true;
 }
 
 /**

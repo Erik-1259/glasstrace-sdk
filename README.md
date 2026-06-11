@@ -166,6 +166,61 @@ import { drizzle } from "drizzle-orm/node-postgres";
 const db = drizzle(pool, { logger: new GlasstraceDrizzleLogger() });
 ```
 
+### Prisma Value Capture
+
+Capture specific boolean result columns onto your traces so an agent
+debugging a failure can see the value a query actually returned — not
+just that the query ran. Apply the adapter as a Prisma client
+extension:
+
+```typescript
+import { PrismaClient } from "@prisma/client";
+import { prismaAdapter } from "@glasstrace/sdk";
+
+const prisma = new PrismaClient().$extends(
+  prismaAdapter({
+    allow: [{ model: "Poll", column: "muted" }],
+  }),
+);
+```
+
+For an eligible operation the adapter opens a single `db.<Model>.<op>`
+span and records each allowlisted boolean column on it as a
+value-fidelity scalar (`muted` → `mutedFlag`).
+
+The adapter is **passive and default-deny**:
+
+- It never executes, mutates, or alters a query — the original result
+  and any error pass through unchanged.
+- Nothing is captured unless a column is explicitly listed in `allow`
+  **and** value capture is enabled for your account. With an empty or
+  unset `allow`, it captures nothing and adds no spans.
+- Only boolean columns are captured. `findMany` and list queries are
+  not captured.
+- It has no dependency on `@prisma/client` and is safe to import in any
+  runtime; on a runtime with no active request span it captures
+  nothing.
+
+To project onto a span you own from a custom adapter, use the
+lower-level `capture` primitive:
+
+```typescript
+import { capture } from "@glasstrace/sdk";
+
+const span = tracer.startSpan("db.Poll.findUnique");
+try {
+  const row = await runQuery();
+  if (row) capture("mutedFlag", row.muted, { span });
+  return row;
+} finally {
+  span.end();
+}
+```
+
+`capture` validates the value against the scalar allowlist (a `*Flag`
+key requires a boolean), is gated by your account's capture
+configuration, and never throws.
+
 ### Middleware-Ownership Tracing
 
 Wrap a Next.js `middleware.ts` (or any Web Fetch-shaped middleware
