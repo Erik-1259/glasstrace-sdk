@@ -602,6 +602,21 @@ export function getActiveConfig(): CaptureConfig {
 }
 
 /**
+ * Whether side-effect / value capture is enabled by the active capture
+ * config. Reads {@link getActiveConfig} on every call so config rotation
+ * takes effect on the next emission. Fail-closed: any error (or absent
+ * config) resolves to `false`. Internal — not exported from the package
+ * barrel.
+ */
+export function isCaptureEnabled(): boolean {
+  try {
+    return getActiveConfig().sideEffectEvidence === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Returns the `linkedAccountId` from the current in-memory init response,
  * or `undefined` if no init response is available or no account is linked.
  *

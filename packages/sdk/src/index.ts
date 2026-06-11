@@ -207,6 +207,32 @@ export { recordSideEffect } from "./side-effect/index.js";
 export type { RecordSideEffectInput } from "./side-effect/index.js";
 
 /**
+ * Emit a single allowlisted value-fidelity scalar onto a caller-**owned**
+ * OTel span. The owned-span counterpart to {@link recordSideEffect}, used
+ * by passive adapters (e.g. {@link prismaAdapter}) that open their own
+ * span. Strict-mode only; observational; never throws. Gated by the
+ * `sideEffectEvidence` capture-config flag (default off).
+ *
+ * @see {@link CaptureOptions}
+ */
+export { capture } from "./side-effect/capture.js";
+export type { CaptureOptions } from "./side-effect/capture.js";
+
+/**
+ * Passive Prisma value-capture extension. Pass to `prisma.$extends(...)` to
+ * project allowlisted boolean columns onto value-fidelity scalars. Passive,
+ * default-deny, observational; no `@prisma/client` dependency.
+ *
+ * @see {@link PrismaAdapterOptions}
+ */
+export { prismaAdapter } from "./adapters/prisma.js";
+export type {
+  PrismaAdapterOptions,
+  PrismaCaptureColumn,
+  PrismaCaptureExtension,
+} from "./adapters/prisma.js";
+
+/**
  * Producer-sugar for computing boolean `*Holds` relations passed to
  * {@link recordSideEffect}'s `relations`. Pure and edge-safe.
  */

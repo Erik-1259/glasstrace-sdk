@@ -1,0 +1,361 @@
+/**
+ * Behavior tests for the passive Prisma value-capture adapter.
+ *
+ * The adapter returns a Prisma client extension; these tests drive its
+ * `$allOperations` callback structurally (no real `@prisma/client`) under a
+ * real active request span + capture config, and assert the contract:
+ *
+ *  - green: an allowlisted boolean projects onto an owned `db.<Model>.<op>`
+ *    span as a native scalar; the query result is returned unchanged;
+ *  - default-deny: with no allow entry (and the master switch ON) nothing is
+ *    captured and NO owned span is opened (gate-before-startSpan);
+ *  - `findMany` / edge (no active span) / disabled switch / null result are
+ *    all no-ops;
+ *  - pure-observer: a thrown query propagates verbatim with the owned span
+ *    still ended and no leak.
+ *
+ * End-to-end proof through a real installed Prisma client is TEST-008
+ * (validation workspace), not this unit suite.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as otelApi from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
+import { prismaAdapter } from "../../../packages/sdk/src/adapters/prisma.js";
+import {
+  _setCurrentConfig,
+  _resetConfigForTesting,
+} from "../../../packages/sdk/src/init-client.js";
+import { installContextManager } from "../../../packages/sdk/src/context-manager.js";
+import type { SdkInitResponse } from "../../../packages/protocol/src/wire.js";
+import {
+  GLASSTRACE_ATTRIBUTE_NAMES,
+  SIDE_EFFECT_SCALAR_PREFIX,
+} from "../../../packages/protocol/src/index.js";
+
+installContextManager();
+
+let exporter: InMemorySpanExporter;
+let provider: BasicTracerProvider;
+let tracer: otelApi.Tracer;
+
+const scalarKey = (k: string): string => `${SIDE_EFFECT_SCALAR_PREFIX}${k}`;
+
+function configWith(sideEffectEvidence: boolean): SdkInitResponse {
+  return {
+    config: {
+      requestBodies: false,
+      queryParamValues: false,
+      envVarValues: false,
+      fullConsoleOutput: false,
+      importGraph: false,
+      consoleErrors: false,
+      errorResponseBodies: false,
+      sideEffectEvidence,
+    },
+    subscriptionStatus: "active",
+    minimumSdkVersion: "0.0.0",
+    apiVersion: "v1",
+    tierLimits: {
+      tracesPerMinute: 100,
+      storageTtlHours: 48,
+      maxTraceSizeBytes: 512_000,
+      maxConcurrentSessions: 1,
+    },
+  } as SdkInitResponse;
+}
+
+beforeEach(() => {
+  exporter = new InMemorySpanExporter();
+  provider = new BasicTracerProvider({
+    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  });
+  otelApi.trace.setGlobalTracerProvider(provider);
+  tracer = otelApi.trace.getTracer("glasstrace-prisma-test");
+  _setCurrentConfig(configWith(true));
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  _resetConfigForTesting();
+  await provider.shutdown();
+  otelApi.trace.disable();
+  exporter.reset();
+});
+
+/**
+ * Drive one Prisma operation through the adapter under an active request
+ * span. Returns the operation result and the finished spans.
+ */
+async function runOperation(opts: {
+  allow: ReadonlyArray<{ model: string; column: string }>;
+  model: string;
+  operation: string;
+  query: () => Promise<unknown>;
+  /** Omit to simulate an edge runtime with no active request span. */
+  withRequestSpan?: boolean;
+}): Promise<{ result: unknown; thrown: unknown }> {
+  const ext = prismaAdapter({ allow: opts.allow });
+  const invoke = async (): Promise<{ result: unknown; thrown: unknown }> => {
+    try {
+      const result = await ext.query.$allModels.$allOperations({
+        model: opts.model,
+        operation: opts.operation,
+        args: {},
+        query: opts.query,
+      });
+      return { result, thrown: undefined };
+    } catch (err) {
+      return { result: undefined, thrown: err };
+    }
+  };
+
+  if (opts.withRequestSpan === false) {
+    return invoke();
+  }
+  return new Promise((resolve) => {
+    tracer.startActiveSpan("request", async (reqSpan) => {
+      const out = await invoke();
+      reqSpan.end();
+      resolve(out);
+    });
+  });
+}
+
+function ownedSpanAttrs(): Record<string, unknown> | undefined {
+  const span = exporter
+    .getFinishedSpans()
+    .find((s) => s.name.startsWith("db."));
+  return span?.attributes as Record<string, unknown> | undefined;
+}
+
+describe("prismaAdapter — green path", () => {
+  it("projects an allowlisted boolean onto an owned db.<Model>.<op> span and returns the result unchanged", async () => {
+    const row = { muted: false, id: "p1" };
+    const { result } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => row,
+    });
+
+    expect(result).toBe(row); // identity preserved (no mutation/copy)
+    const finished = exporter.getFinishedSpans();
+    const owned = finished.find((s) => s.name === "db.Poll.findUnique");
+    expect(owned).toBeDefined();
+    expect(owned?.attributes[scalarKey("mutedFlag")]).toBe(false);
+  });
+});
+
+describe("prismaAdapter — default-deny and gate-before-startSpan", () => {
+  it("captures nothing AND opens no owned span with an empty allow (master switch explicitly ON)", async () => {
+    await runOperation({
+      allow: [],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ muted: false }),
+    });
+    // Only the request span exists — no db.* owned span was opened.
+    const names = exporter.getFinishedSpans().map((s) => s.name);
+    expect(names).toEqual(["request"]);
+  });
+
+  it("opens no owned span when the capture master switch is off", async () => {
+    _setCurrentConfig(configWith(false));
+    await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ muted: false }),
+    });
+    expect(exporter.getFinishedSpans().map((s) => s.name)).toEqual(["request"]);
+  });
+
+  it("does not capture a model that is not allowlisted", async () => {
+    await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "User",
+      operation: "findUnique",
+      query: async () => ({ muted: false }),
+    });
+    expect(exporter.getFinishedSpans().map((s) => s.name)).toEqual(["request"]);
+  });
+});
+
+describe("prismaAdapter — bounded and edge-safe no-ops", () => {
+  it("disables findMany (no per-row capture)", async () => {
+    const rows = [{ muted: false }, { muted: true }];
+    const { result } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findMany",
+      query: async () => rows,
+    });
+    expect(result).toBe(rows);
+    expect(exporter.getFinishedSpans().map((s) => s.name)).toEqual(["request"]);
+  });
+
+  it("captures nothing on a runtime with no active request span (edge)", async () => {
+    const { result } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ muted: false }),
+      withRequestSpan: false,
+    });
+    expect(result).toEqual({ muted: false });
+    expect(exporter.getFinishedSpans().some((s) => s.name.startsWith("db."))).toBe(
+      false,
+    );
+  });
+
+  it("handles a null result (findUnique miss) without throwing or capturing", async () => {
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => null,
+    });
+    expect(thrown).toBeUndefined();
+    expect(result).toBeNull();
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("mutedFlag")]).toBeUndefined();
+  });
+});
+
+describe("prismaAdapter — pure observer", () => {
+  it("re-throws a query error verbatim and still ends the owned span", async () => {
+    const boom = new Error("db exploded");
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => {
+        throw boom;
+      },
+    });
+    expect(result).toBeUndefined();
+    expect(thrown).toBe(boom); // identical error instance, not wrapped
+    // The owned span was opened and ended (no leak), carrying no scalar.
+    const owned = exporter
+      .getFinishedSpans()
+      .find((s) => s.name === "db.Poll.findUnique");
+    expect(owned).toBeDefined();
+    expect(owned?.ended).toBe(true);
+  });
+
+  it("records a safe omission (not a captured value) for a non-boolean allowlisted column", async () => {
+    await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ muted: "yes" }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("mutedFlag")]).toBeUndefined();
+    expect(owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD]).toBe(
+      1,
+    );
+  });
+});
+
+describe("prismaAdapter — never throws on an OTel API failure", () => {
+  it("falls back to running the query when trace.getActiveSpan() throws", async () => {
+    vi.spyOn(otelApi.trace, "getActiveSpan").mockImplementation(() => {
+      throw new Error("otel api boom");
+    });
+    const row = { muted: false };
+    const ext = prismaAdapter({ allow: [{ model: "Poll", column: "muted" }] });
+
+    let result: unknown;
+    let thrown: unknown;
+    try {
+      result = await ext.query.$allModels.$allOperations({
+        model: "Poll",
+        operation: "findUnique",
+        args: {},
+        query: async () => row,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeUndefined();
+    expect(result).toBe(row); // query ran, result unchanged
+    expect(
+      exporter.getFinishedSpans().some((s) => s.name.startsWith("db.")),
+    ).toBe(false);
+  });
+
+  it("falls back to running the query when startSpan throws", async () => {
+    // Gate passes (an active span is present), then the owned-span open fails.
+    vi.spyOn(otelApi.trace, "getActiveSpan").mockReturnValue({} as otelApi.Span);
+    vi.spyOn(otelApi.trace, "getTracer").mockReturnValue({
+      startSpan: () => {
+        throw new Error("startSpan boom");
+      },
+    } as unknown as otelApi.Tracer);
+    const row = { muted: true };
+    const ext = prismaAdapter({ allow: [{ model: "Poll", column: "muted" }] });
+
+    let result: unknown;
+    let thrown: unknown;
+    try {
+      result = await ext.query.$allModels.$allOperations({
+        model: "Poll",
+        operation: "findUnique",
+        args: {},
+        query: async () => row,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeUndefined();
+    expect(result).toBe(row);
+  });
+});
+
+describe("prismaAdapter — optional config and non-recording spans", () => {
+  it("is callable with no options / empty options and captures nothing", async () => {
+    for (const ext of [prismaAdapter(), prismaAdapter({})]) {
+      const result = await new Promise((resolve) => {
+        tracer.startActiveSpan("request", async (reqSpan) => {
+          const out = await ext.query.$allModels.$allOperations({
+            model: "Poll",
+            operation: "findUnique",
+            args: {},
+            query: async () => ({ muted: false }),
+          });
+          reqSpan.end();
+          resolve(out);
+        });
+      });
+      expect(result).toEqual({ muted: false });
+    }
+    expect(
+      exporter.getFinishedSpans().some((s) => s.name.startsWith("db.")),
+    ).toBe(false);
+  });
+
+  it("captures nothing when the active span is non-recording (sampled out)", async () => {
+    vi.spyOn(otelApi.trace, "getActiveSpan").mockReturnValue({
+      isRecording: () => false,
+    } as unknown as otelApi.Span);
+    const { result } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ muted: false }),
+      withRequestSpan: false,
+    });
+    expect(result).toEqual({ muted: false });
+    expect(
+      exporter.getFinishedSpans().some((s) => s.name.startsWith("db.")),
+    ).toBe(false);
+  });
+});
