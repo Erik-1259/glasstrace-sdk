@@ -220,8 +220,9 @@ export type { CaptureOptions } from "./side-effect/capture.js";
 
 /**
  * Passive Prisma value-capture extension. Pass to `prisma.$extends(...)` to
- * project allowlisted boolean columns onto value-fidelity scalars. Passive,
- * default-deny, observational; no `@prisma/client` dependency.
+ * project allowlisted boolean and numeric columns onto value-fidelity scalars
+ * (per-column `as` intent). Passive, default-deny, observational; no
+ * `@prisma/client` dependency.
  *
  * @see {@link PrismaAdapterOptions}
  */
@@ -230,6 +231,7 @@ export type {
   PrismaAdapterOptions,
   PrismaCaptureColumn,
   PrismaCaptureExtension,
+  ScalarIntent,
 } from "./adapters/prisma.js";
 
 /**

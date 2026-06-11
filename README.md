@@ -168,9 +168,9 @@ const db = drizzle(pool, { logger: new GlasstraceDrizzleLogger() });
 
 ### Prisma Value Capture
 
-Capture specific boolean result columns onto your traces so an agent
-debugging a failure can see the value a query actually returned — not
-just that the query ran. Apply the adapter as a Prisma client
+Capture specific boolean and numeric result columns onto your traces so
+an agent debugging a failure can see the value a query actually returned
+— not just that the query ran. Apply the adapter as a Prisma client
 extension:
 
 ```typescript
@@ -185,8 +185,34 @@ const prisma = new PrismaClient().$extends(
 ```
 
 For an eligible operation the adapter opens a single `db.<Model>.<op>`
-span and records each allowlisted boolean column on it as a
-value-fidelity scalar (`muted` → `mutedFlag`).
+span and records each allowlisted column on it as a value-fidelity
+scalar (`muted` → `mutedFlag`).
+
+Capture numeric columns with an `as` intent on the allow entry — the
+scalar key is the column with the intent's suffix appended (not doubled
+if the column already ends in it), and the value is strict-validated by
+type:
+
+```typescript
+prismaAdapter({
+  allow: [
+    { model: "Poll", column: "muted" },                    // boolean → mutedFlag
+    { model: "Upload", column: "size", as: "bytes" },      // number  → sizeBytes
+    { model: "Request", column: "durationMs", as: "ms" },  // number  → durationMs
+  ],
+});
+```
+
+`as` is one of `"flag"` (default, boolean) or `"value"` / `"amount"` /
+`"ms"` / `"bytes"` / `"ratio"` (finite number; `ms` is a bounded delta,
+not a wall-clock timestamp). A value whose type does not match its
+intent is dropped, never captured.
+
+Numeric intents capture native JavaScript `number` columns (Prisma
+`Int` / `Float`). A Prisma `Decimal` (a Decimal.js object) or `BigInt`
+is not a native `number`, so it is safely omitted rather than lossily
+converted — convert it to a `number` in your own code first if you need
+to capture it (mind the precision trade-off for money).
 
 The adapter is **passive and default-deny**:
 
@@ -195,8 +221,9 @@ The adapter is **passive and default-deny**:
 - Nothing is captured unless a column is explicitly listed in `allow`
   **and** value capture is enabled for your account. With an empty or
   unset `allow`, it captures nothing and adds no spans.
-- Only boolean columns are captured. `findMany` and list queries are
-  not captured.
+- Only boolean and numeric columns are captured (per the `as` intent);
+  identifier and categorical columns are not. `findMany` and list
+  queries are not captured.
 - It has no dependency on `@prisma/client` and is safe to import in any
   runtime; on a runtime with no active request span it captures
   nothing.

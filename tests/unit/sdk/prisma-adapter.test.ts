@@ -25,7 +25,10 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { prismaAdapter } from "../../../packages/sdk/src/adapters/prisma.js";
+import {
+  prismaAdapter,
+  type ScalarIntent,
+} from "../../../packages/sdk/src/adapters/prisma.js";
 import {
   _setCurrentConfig,
   _resetConfigForTesting,
@@ -92,7 +95,7 @@ afterEach(async () => {
  * span. Returns the operation result and the finished spans.
  */
 async function runOperation(opts: {
-  allow: ReadonlyArray<{ model: string; column: string }>;
+  allow: ReadonlyArray<{ model: string; column: string; as?: ScalarIntent }>;
   model: string;
   operation: string;
   query: () => Promise<unknown>;
@@ -357,5 +360,158 @@ describe("prismaAdapter — optional config and non-recording spans", () => {
     expect(
       exporter.getFinishedSpans().some((s) => s.name.startsWith("db.")),
     ).toBe(false);
+  });
+});
+
+describe("prismaAdapter — non-boolean scalar intents (as)", () => {
+  it("projects a numeric column onto the as-derived scalar as a native number", async () => {
+    await runOperation({
+      allow: [{ model: "Order", column: "total", as: "amount" }],
+      model: "Order",
+      operation: "findUnique",
+      query: async () => ({ total: 4200 }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("totalAmount")]).toBe(4200);
+    expect(typeof owned?.[scalarKey("totalAmount")]).toBe("number");
+  });
+
+  it("projects multiple intents on one model (default flag + numerics)", async () => {
+    await runOperation({
+      allow: [
+        { model: "Order", column: "paid" }, // as defaults to "flag"
+        { model: "Order", column: "total", as: "amount" },
+        { model: "Order", column: "size", as: "bytes" },
+      ],
+      model: "Order",
+      operation: "findUnique",
+      query: async () => ({ paid: true, total: 99, size: 2048 }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("paidFlag")]).toBe(true);
+    expect(owned?.[scalarKey("totalAmount")]).toBe(99);
+    expect(owned?.[scalarKey("sizeBytes")]).toBe(2048);
+  });
+
+  it("rejects a non-number on a numeric intent (omission, no scalar)", async () => {
+    await runOperation({
+      allow: [{ model: "Order", column: "total", as: "amount" }],
+      model: "Order",
+      operation: "findUnique",
+      query: async () => ({ total: "lots" }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("totalAmount")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+    ).toBe(1);
+  });
+
+  it("rejects a raw epoch on an `ms` intent but accepts a bounded delta", async () => {
+    await runOperation({
+      allow: [{ model: "Job", column: "elapsed", as: "ms" }],
+      model: "Job",
+      operation: "findUnique",
+      query: async () => ({ elapsed: 1_700_000_000_000 }),
+    });
+    let owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("elapsedMs")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_TIMESTAMP],
+    ).toBe(1);
+
+    exporter.reset();
+    await runOperation({
+      allow: [{ model: "Job", column: "elapsed", as: "ms" }],
+      model: "Job",
+      operation: "findUnique",
+      query: async () => ({ elapsed: 42 }),
+    });
+    owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("elapsedMs")]).toBe(42);
+  });
+
+  it("drops an entry with an out-of-contract `as` intent (default-deny)", async () => {
+    await runOperation({
+      allow: [
+        {
+          model: "Order",
+          column: "total",
+          as: "bogus" as unknown as ScalarIntent,
+        },
+      ],
+      model: "Order",
+      operation: "findUnique",
+      query: async () => ({ total: 4200 }),
+    });
+    // The only allow entry was dropped at construction, so no owned span opens.
+    expect(
+      exporter.getFinishedSpans().some((s) => s.name.startsWith("db.")),
+    ).toBe(false);
+  });
+
+  it("drops an entry with a null `as` intent (untyped callers — default-deny)", async () => {
+    await runOperation({
+      allow: [
+        { model: "Order", column: "paid", as: null as unknown as ScalarIntent },
+      ],
+      model: "Order",
+      operation: "findUnique",
+      query: async () => ({ paid: true }),
+    });
+    // `null` is out-of-contract (not absent), so the entry is dropped — a
+    // boolean `paid` column is NOT silently captured as a flag.
+    expect(
+      exporter.getFinishedSpans().some((s) => s.name.startsWith("db.")),
+    ).toBe(false);
+  });
+
+  it.each([
+    { as: "value", suffix: "Value" },
+    { as: "amount", suffix: "Amount" },
+    { as: "ms", suffix: "Ms" },
+    { as: "bytes", suffix: "Bytes" },
+    { as: "ratio", suffix: "Ratio" },
+  ] as ReadonlyArray<{ as: ScalarIntent; suffix: string }>)(
+    "projects a finite number onto the $suffix scalar for the '$as' intent",
+    async ({ as, suffix }) => {
+      await runOperation({
+        allow: [{ model: "Order", column: "metric", as }],
+        model: "Order",
+        operation: "findUnique",
+        query: async () => ({ metric: 7 }),
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[scalarKey(`metric${suffix}`)]).toBe(7);
+      expect(typeof owned?.[scalarKey(`metric${suffix}`)]).toBe("number");
+    },
+  );
+
+  it("does not double the suffix when the column already ends in it", async () => {
+    await runOperation({
+      allow: [{ model: "Job", column: "elapsedMs", as: "ms" }],
+      model: "Job",
+      operation: "findUnique",
+      query: async () => ({ elapsedMs: 42 }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("elapsedMs")]).toBe(42);
+    expect(owned?.[scalarKey("elapsedMsMs")]).toBeUndefined();
+  });
+
+  it("omits a Prisma Decimal (non-native-number object), never lossily converting it", async () => {
+    // Prisma represents Decimal columns as Decimal.js objects, not numbers.
+    const decimalLike = { toNumber: () => 4200, toString: () => "4200.00" };
+    await runOperation({
+      allow: [{ model: "Order", column: "total", as: "amount" }],
+      model: "Order",
+      operation: "findUnique",
+      query: async () => ({ total: decimalLike }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("totalAmount")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+    ).toBe(1);
   });
 });
