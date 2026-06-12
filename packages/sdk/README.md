@@ -671,6 +671,36 @@ ingestion service before persistence. This is intentional
 defense-in-depth: the SDK is the first gate; the product receiver
 is the second.
 
+### Attaching to an owned span
+
+`recordSideEffect()` attaches to the **ambient active OTel span** by default.
+When no span is recording at the call site — common when the host app's OTel
+context does not propagate intact to the call site — the call is a no-op and
+the evidence is silently lost. With `verbose: true`, the SDK logs a one-time
+diagnostic pointing at the fix.
+
+To make categorical capture robust to a missing ambient span, pass a span you
+**own** as a second argument:
+
+```ts
+const span = tracer.startSpan("db.Poll.findUnique");
+try {
+  await prisma.poll.findUnique({ where: { id } });
+  recordSideEffect(
+    { kind: "calendar_link", operation: "calendar.create", phase: "request" },
+    { span },
+  );
+} finally {
+  span.end();
+}
+```
+
+The supplied span must be recording; a span that has ended or is a
+`NonRecordingSpan` is a silent no-op (the call does **not** fall back to the
+ambient span). Glasstrace's `@glasstrace/sdk/trpc` `tracedMiddleware` opens a
+recording span around each procedure, so the default ambient path works under
+it without an explicit span.
+
 ### Value-fidelity scalars
 
 Beyond the categorical `fields` channel, `recordSideEffect()` accepts an

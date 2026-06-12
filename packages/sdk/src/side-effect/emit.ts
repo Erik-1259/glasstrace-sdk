@@ -52,13 +52,40 @@ function getOrCreateState(span: otelApi.Span): SpanSideEffectState {
 }
 
 /**
+ * Whether `span` is a usable recording span: `false` for a
+ * `NonRecordingSpan` or an already-ended span (both report
+ * `isRecording() === false`), and `false` if `isRecording` throws. A
+ * span whose `isRecording` is absent is treated as usable — the same
+ * convention as `capture()` and the Prisma adapter — since the only
+ * standard spans that report not-recording implement the method. Used
+ * to validate both the ambient active span and a caller-supplied owned
+ * span.
+ */
+export function isRecordingSpan(span: otelApi.Span): boolean {
+  // A NonRecordingSpan and an ended span both report
+  // `isRecording() === false`; honor that as the no-op signal, and
+  // treat a throwing `isRecording` as not-recording too. A missing
+  // `isRecording` (a non-standard host shim) is treated as usable,
+  // matching `capture()` and the Prisma adapter so the primitives stay
+  // consistent.
+  try {
+    if (typeof span.isRecording === "function" && !span.isRecording()) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Returns the currently-active span when it is recording and not yet
  * ended. Returns `undefined` when there is no active span, when the
  * active span is a `NonRecordingSpan`, or when the active span has
  * already ended. Callers treat all such cases as silent no-op
  * conditions: there is no span on which to attach evidence.
  */
-function getRecordingActiveSpan(): otelApi.Span | undefined {
+export function getRecordingActiveSpan(): otelApi.Span | undefined {
   let span: otelApi.Span | undefined;
   try {
     span = otelApi.trace.getActiveSpan();
@@ -68,36 +95,7 @@ function getRecordingActiveSpan(): otelApi.Span | undefined {
     return undefined;
   }
   if (!span) return undefined;
-
-  // `isRecording()` returns false for both NonRecordingSpan and ended
-  // spans on the standard SDK; honor that as the no-op signal. The
-  // method is part of the OTel API contract so a missing impl
-  // indicates a host shim — fall through to the conservative no-op.
-  try {
-    if (typeof span.isRecording === "function" && !span.isRecording()) {
-      return undefined;
-    }
-  } catch {
-    return undefined;
-  }
-  return span;
-}
-
-/**
- * Record a single omission count on the active span without emitting
- * the rejected value. Rejection metadata only ever leaks the integer
- * count, never the original input.
- *
- * No-op when there is no recording active span — the rejected value
- * still doesn't reach the wire because emission is gated on a span
- * being available.
- */
-export function recordOmissionOnActiveSpan(
-  reason: SideEffectOmissionReason,
-): void {
-  const span = getRecordingActiveSpan();
-  if (!span) return;
-  recordOmissionOnSpan(span, reason);
+  return isRecordingSpan(span) ? span : undefined;
 }
 
 function recordOmissionOnSpan(
@@ -189,39 +187,39 @@ export function hasExplicitFieldAttribute(key: string): boolean {
 }
 
 /**
- * Outcome of attempting to attach an operation summary. The
- * `over_budget` and `no_active_span` discriminants let the public API
- * route the call's bookkeeping (omission count vs. silent drop)
- * without re-querying span state.
+ * Outcome of attempting to attach an operation summary onto a known
+ * recording span. The `over_budget` discriminant lets the caller route
+ * the call's bookkeeping (a `value_too_long` omission) without
+ * re-querying span state. The caller resolves the target span (ambient
+ * or owned) and handles the no-span case before calling.
  */
 export type AttachOutcome =
-  | { kind: "attached"; span: otelApi.Span }
-  | { kind: "no_active_span" }
-  | { kind: "over_budget"; span: otelApi.Span };
+  | { kind: "attached" }
+  | { kind: "over_budget" };
 
 /**
- * Attach the top-level operation attributes to the active span and
- * advance the per-span operation counter. The caller is responsible
- * for invoking {@link attachField} for each accepted semantic field
- * and {@link recordOmission} for each rejected value.
+ * Attach the top-level operation attributes to the given recording span
+ * and advance the per-span operation counter. The caller resolves the
+ * target span (ambient active span or a caller-owned span) and is
+ * responsible for invoking {@link attachField} for each accepted
+ * semantic field and {@link recordOmission} for each rejected value.
  *
- * Returns the span when emission proceeded, `no_active_span` when no
- * recording span is active, or `over_budget` when the per-span
- * operation budget (5) is exhausted. The caller routes `over_budget`
- * to a `value_too_long` omission via {@link recordOmission}.
+ * Returns `over_budget` when the per-span operation budget (5) is
+ * exhausted — the caller routes that to a `value_too_long` omission via
+ * {@link recordOmission} — and `attached` otherwise.
  */
-export function attachOperation(input: {
-  kind: SideEffectOperationKind;
-  operation: string;
-  status?: SideEffectOperationStatus;
-  phase?: SideEffectOperationPhase;
-}): AttachOutcome {
-  const span = getRecordingActiveSpan();
-  if (!span) return { kind: "no_active_span" };
-
+export function attachOperation(
+  span: otelApi.Span,
+  input: {
+    kind: SideEffectOperationKind;
+    operation: string;
+    status?: SideEffectOperationStatus;
+    phase?: SideEffectOperationPhase;
+  },
+): AttachOutcome {
   const state = getOrCreateState(span);
   if (state.operationsRecorded >= MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN) {
-    return { kind: "over_budget", span };
+    return { kind: "over_budget" };
   }
   state.operationsRecorded += 1;
 
@@ -248,7 +246,7 @@ export function attachOperation(input: {
     // already advanced; subsequent calls within the same span are
     // budget-bounded as expected.
   }
-  return { kind: "attached", span };
+  return { kind: "attached" };
 }
 
 /**
