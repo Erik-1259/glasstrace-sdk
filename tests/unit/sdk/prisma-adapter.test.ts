@@ -29,6 +29,7 @@ import {
   prismaAdapter,
   type ScalarIntent,
 } from "../../../packages/sdk/src/adapters/prisma.js";
+import { hashIdWeb } from "../../../packages/sdk/src/side-effect/hash-id-web.js";
 import {
   _setCurrentConfig,
   _resetConfigForTesting,
@@ -513,5 +514,200 @@ describe("prismaAdapter — non-boolean scalar intents (as)", () => {
     expect(
       owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
     ).toBe(1);
+  });
+});
+
+describe("prismaAdapter — id intent (full-fidelity pseudonymized capture)", () => {
+  const HMAC_KEY = "adapter-test-hmac-secret-do-not-use";
+
+  function setFullConfig(attrHmacKey: string | undefined): void {
+    const init = configWith(true);
+    init.config.captureFidelity = "full";
+    if (attrHmacKey !== undefined) init.config.attrHmacKey = attrHmacKey;
+    _setCurrentConfig(init);
+  }
+
+  it("projects an *Id column as a pseudonymized gthid_ token; the raw id never reaches the wire", async () => {
+    setFullConfig(HMAC_KEY);
+    const rawId = "550e8400-e29b-41d4-a716-446655440000";
+    await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: rawId }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("ownerId")]).toBe(await hashIdWeb(rawId, HMAC_KEY));
+    expect(owned?.[scalarKey("ownerId")]).toMatch(/^gthid_[0-9a-f]{32}$/);
+    // Privacy: the raw id is on no attribute of the owned span.
+    expect(Object.values(owned ?? {})).not.toContain(rawId);
+  });
+
+  it("does not double the Id suffix when the column already ends in Id", async () => {
+    setFullConfig(HMAC_KEY);
+    const rawId = "u-7";
+    await runOperation({
+      allow: [{ model: "User", column: "userId", as: "id" }],
+      model: "User",
+      operation: "findUnique",
+      query: async () => ({ userId: rawId }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("userId")]).toBe(await hashIdWeb(rawId, HMAC_KEY));
+    expect(owned?.[scalarKey("userIdId")]).toBeUndefined();
+  });
+
+  it("coerces a numeric id to a string before hashing", async () => {
+    setFullConfig(HMAC_KEY);
+    await runOperation({
+      allow: [{ model: "Order", column: "owner", as: "id" }],
+      model: "Order",
+      operation: "findUnique",
+      query: async () => ({ owner: 12345 }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("ownerId")]).toBe(await hashIdWeb("12345", HMAC_KEY));
+  });
+
+  it("opens no span for an id-only allowlist under strict (zero overhead until full)", async () => {
+    _setCurrentConfig(configWith(true)); // strict (captureFidelity unset)
+    await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: "u-1" }),
+    });
+    // Identifier capture is off under strict: no owned span, scalar, or omission.
+    expect(exporter.getFinishedSpans().map((s) => s.name)).toEqual(["request"]);
+  });
+
+  it("still opens a span for a mixed model under strict (an eager column warrants it)", async () => {
+    _setCurrentConfig(configWith(true)); // strict
+    await runOperation({
+      allow: [
+        { model: "Poll", column: "owner", as: "id" },
+        { model: "Poll", column: "muted", as: "flag" },
+      ],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: "u-1", muted: true }),
+    });
+    const owned = ownedSpanAttrs();
+    // The eager boolean captures; the id intent is silently off under strict.
+    expect(owned?.[scalarKey("mutedFlag")]).toBe(true);
+    expect(owned?.[scalarKey("ownerId")]).toBeUndefined();
+  });
+
+  it("fail-closed under full with no provisioned key: records unhashed_id, emits no token", async () => {
+    setFullConfig(undefined);
+    await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: "u-1" }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("ownerId")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
+    ).toBe(1);
+  });
+
+  it("fail-closed for a non-string/number id (an object): unhashed_id, no token", async () => {
+    setFullConfig(HMAC_KEY);
+    await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: { nested: "x" } }),
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("ownerId")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
+    ).toBe(1);
+  });
+
+  it("remains a pure observer: returns the result unchanged and ends the owned span despite the async hash", async () => {
+    setFullConfig(HMAC_KEY);
+    const row = { owner: "u-9" };
+    const { result } = await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => row,
+    });
+    expect(result).toBe(row); // identity preserved despite awaiting the hash
+    const owned = exporter
+      .getFinishedSpans()
+      .find((s) => s.name === "db.Poll.findUnique");
+    expect(owned?.ended).toBe(true);
+  });
+
+  it("fail-closed when Web Crypto rejects: records unhashed_id and still projects later columns on the row", async () => {
+    setFullConfig(HMAC_KEY);
+    vi.spyOn(globalThis.crypto.subtle, "sign").mockRejectedValue(
+      new Error("subtle unavailable"),
+    );
+    await runOperation({
+      allow: [
+        { model: "Poll", column: "owner", as: "id" },
+        { model: "Poll", column: "active", as: "flag" },
+      ],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: "u-1", active: true }),
+    });
+    const owned = ownedSpanAttrs();
+    // The id hash failed → no token, but a counted unhashed_id omission...
+    expect(owned?.[scalarKey("ownerId")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
+    ).toBe(1);
+    // ...and the later boolean column on the same row is still captured.
+    expect(owned?.[scalarKey("activeFlag")]).toBe(true);
+  });
+
+  it("fail-closed: a raw value already shaped like a gthid_ token is not emitted when the gate is unmet", async () => {
+    setFullConfig(undefined); // full, but no provisioned key
+    const tokenShaped = `gthid_${"a".repeat(32)}`; // passes the strict *Id shape
+    await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: tokenShaped }),
+    });
+    const owned = ownedSpanAttrs();
+    // The gate (full + key) is unmet, so even a token-shaped raw value is
+    // dropped and counted — never emitted as an unkeyed token.
+    expect(owned?.[scalarKey("ownerId")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
+    ).toBe(1);
+  });
+
+  it("records no omission when capture is disabled mid-operation (gate re-checked at emit)", async () => {
+    // The gate passes at the start (full + capture enabled), then a heartbeat
+    // init disables capture while the query is in flight — but the account is
+    // still `full` with no key, so projection reaches the fail-closed path.
+    setFullConfig(undefined);
+    await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => {
+        const disabled = configWith(false); // sideEffectEvidence off
+        disabled.config.captureFidelity = "full";
+        _setCurrentConfig(disabled);
+        return { owner: "u-1" };
+      },
+    });
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("ownerId")]).toBeUndefined();
+    // Capture was disabled before emit, so even the omission counter is
+    // suppressed — disabled capture writes nothing.
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
+    ).toBeUndefined();
   });
 });

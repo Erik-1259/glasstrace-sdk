@@ -37,6 +37,19 @@ export const CaptureConfigSchema = z.object({
    * ⇒ `strict`.
    */
   captureFidelity: z.enum(["strict", "full"]).optional().default("strict"),
+  /**
+   * Per-account HMAC secret for pseudonymizing allowlisted identifier
+   * columns (server-pushed; never echoed back or logged).
+   *
+   * When present (and only under `captureFidelity: "full"`), a passive
+   * adapter projecting an `*Id` column hashes the raw identifier into a
+   * stable `gthid_<hex>` token under this key before it reaches the wire,
+   * so the raw value is never emitted. Absent (the default) ⇒ identifier
+   * capture stays off (fail-closed): the adapter emits no `*Id` scalar
+   * rather than a raw or unkeyed one. Scoped per account, so tokens do
+   * not correlate across accounts.
+   */
+  attrHmacKey: z.string().optional(),
 });
 export type CaptureConfig = z.infer<typeof CaptureConfigSchema>;
 

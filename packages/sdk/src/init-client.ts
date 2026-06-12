@@ -92,6 +92,27 @@ let rateLimitBackoff = false;
 let lastInitSucceeded = false;
 
 /**
+ * Normalize a capture config for the on-disk cache. The per-account
+ * `attrHmacKey` secret is never persisted, and a `full` posture without that
+ * key is invalid on disk — a cold start that loaded it would make every
+ * id-only Prisma query record a spurious `unhashed_id` omission — so `full` is
+ * downgraded to `strict`. Applied on both write and read, so a cache written
+ * by an older SDK (which may hold `full` from the pre-existing schema) is
+ * normalized on load too. Returns the input unchanged when already clean.
+ */
+function normalizeCachedCaptureConfig(config: CaptureConfig): CaptureConfig {
+  if (config.attrHmacKey === undefined && config.captureFidelity !== "full") {
+    return config;
+  }
+  const normalized: CaptureConfig = { ...config };
+  delete normalized.attrHmacKey;
+  if (normalized.captureFidelity === "full") {
+    normalized.captureFidelity = "strict";
+  }
+  return normalized;
+}
+
+/**
  * Reads and validates a cached config file from `.glasstrace/config`.
  * Returns the parsed `SdkInitResponse` or `null` on any failure,
  * including when `node:fs` is unavailable (non-Node environments).
@@ -121,7 +142,10 @@ export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
     const result = SdkInitResponseSchema.safeParse(cached.response);
     if (result.success) {
       recordConfigSync(cached.cachedAt);
-      return result.data;
+      return {
+        ...result.data,
+        config: normalizeCachedCaptureConfig(result.data.config),
+      };
     }
 
     console.warn("[glasstrace] Cached config failed validation. Using defaults.");
@@ -159,8 +183,14 @@ export async function saveCachedConfig(
   try {
     await modules.fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
     await modules.fs.chmod(dirPath, 0o700);
+    // Strip the per-account HMAC secret (a tenant secret that must never reach
+    // disk) and downgrade an unkeyed `full` posture before persisting — see
+    // normalizeCachedCaptureConfig.
     const cached = {
-      response,
+      response: {
+        ...response,
+        config: normalizeCachedCaptureConfig(response.config),
+      },
       cachedAt: Date.now(),
     };
     // Atomic write per SDK 2.0 §4.3: tmp + fsync(tmp) + rename +
@@ -572,16 +602,17 @@ export async function performInit(
 }
 
 /**
- * Returns the current capture config from the three-tier fallback chain:
+ * Resolves the current capture config from the three-tier fallback chain:
  * 1. In-memory config from latest init response
  * 2. File cache (read at most once per process lifetime)
  * 3. DEFAULT_CAPTURE_CONFIG
  *
- * The disk read is cached via `configCacheChecked` to avoid repeated
- * synchronous I/O on the hot path (called by GlasstraceExporter on
- * every span export batch).
+ * Internal: the returned object may still carry the per-account `attrHmacKey`
+ * secret, so it must not be handed to callers outside this module. The disk
+ * read is cached via `configCacheChecked` to avoid repeated synchronous I/O on
+ * the hot path (called by GlasstraceExporter on every span export batch).
  */
-export function getActiveConfig(): CaptureConfig {
+function resolveActiveConfig(): CaptureConfig {
   // Tier 1: in-memory
   if (currentConfig) {
     return currentConfig.config;
@@ -602,15 +633,42 @@ export function getActiveConfig(): CaptureConfig {
 }
 
 /**
+ * Returns the active capture config with the per-account `attrHmacKey` secret
+ * redacted. This is the public getter (exported from the package barrel), so
+ * application code importing the SDK can never read the tenant secret through
+ * it. The passive value-capture adapter reads the key via the internal
+ * {@link getAttrHmacKey} accessor instead.
+ */
+export function getActiveConfig(): CaptureConfig {
+  const config = resolveActiveConfig();
+  if (config.attrHmacKey === undefined) {
+    return config;
+  }
+  const redacted: CaptureConfig = { ...config };
+  delete redacted.attrHmacKey;
+  return redacted;
+}
+
+/**
+ * The per-account HMAC secret used to pseudonymize `*Id` columns, or
+ * `undefined` when none is provisioned. Internal — deliberately NOT exported
+ * from the package barrel, so the secret stays off the public API surface;
+ * only the passive value-capture adapter reads it.
+ */
+export function getAttrHmacKey(): string | undefined {
+  return resolveActiveConfig().attrHmacKey;
+}
+
+/**
  * Whether side-effect / value capture is enabled by the active capture
- * config. Reads {@link getActiveConfig} on every call so config rotation
+ * config. Reads the active capture config on every call so config rotation
  * takes effect on the next emission. Fail-closed: any error (or absent
  * config) resolves to `false`. Internal — not exported from the package
  * barrel.
  */
 export function isCaptureEnabled(): boolean {
   try {
-    return getActiveConfig().sideEffectEvidence === true;
+    return resolveActiveConfig().sideEffectEvidence === true;
   } catch {
     return false;
   }

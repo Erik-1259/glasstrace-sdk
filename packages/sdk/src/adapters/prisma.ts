@@ -29,15 +29,18 @@
  *  - **Default-deny.** Nothing is captured unless an explicit `allow` entry
  *    matches AND the server-pushed `sideEffectEvidence` capture flag is on.
  *    An empty / unset `allow` captures nothing.
- *  - **Strict scalars only.** Each column projects onto a value-fidelity
- *    scalar by its `as` intent — a boolean `*Flag` (default) or a finite
- *    numeric `*Value`/`*Amount`/`*Ms`/`*Bytes`/`*Ratio`. Numeric intents
- *    capture native JavaScript `number` values only; non-`number` shapes such
- *    as a Prisma `Decimal` (a Decimal.js object) or `BigInt` are safely
- *    omitted rather than lossily converted — project a pre-converted `number`
- *    if you need them. A value whose type does not match its intent routes to
- *    a safe omission counter, never a captured value. Identifier and
- *    categorical scalars are out of scope.
+ *  - **Allowlisted scalars.** Each column projects onto a value-fidelity
+ *    scalar by its `as` intent — a boolean `*Flag` (default), a finite
+ *    numeric `*Value`/`*Amount`/`*Ms`/`*Bytes`/`*Ratio`, or a pseudonymized
+ *    identifier `*Id` (`id` intent). Numeric intents capture native
+ *    JavaScript `number` values only; non-`number` shapes such as a Prisma
+ *    `Decimal` (a Decimal.js object) or `BigInt` are safely omitted rather
+ *    than lossily converted — project a pre-converted `number` if you need
+ *    them. The `id` intent emits a `gthid_` token — the raw id hashed under a
+ *    provisioned per-account key — only under `captureFidelity: "full"`, and
+ *    never the raw value. A value whose type does not match its intent routes
+ *    to a safe omission counter, never a captured value. Categorical scalars
+ *    are out of scope.
  *  - **Pure observer.** Capture work can never throw into the host query;
  *    the owned span is always ended; the original query error is re-thrown
  *    verbatim.
@@ -52,8 +55,13 @@
  */
 
 import { trace, SpanKind, type Span } from "@opentelemetry/api";
-import { capture } from "../side-effect/capture.js";
-import { isCaptureEnabled } from "../init-client.js";
+import { capture, captureOmission } from "../side-effect/capture.js";
+import {
+  getActiveConfig,
+  getAttrHmacKey,
+  isCaptureEnabled,
+} from "../init-client.js";
+import { hashIdWeb } from "../side-effect/hash-id-web.js";
 
 /** The arguments Prisma passes to a `$allOperations` query-extension callback. */
 interface PrismaAllOperationsArgs {
@@ -83,9 +91,12 @@ export interface PrismaCaptureExtension {
 /**
  * How an allowlisted column is projected — selects the value-fidelity scalar
  * key suffix and the expected value type. `flag` is a boolean (`*Flag`); the
- * rest are finite numbers (`*Value`/`*Amount`/`*Ms`/`*Bytes`/`*Ratio`), where
- * `ms` is a bounded delta, never a wall-clock epoch (a raw epoch is rejected
- * at emit). Identifier and categorical scalars are intentionally unsupported.
+ * numeric intents are finite numbers (`*Value`/`*Amount`/`*Ms`/`*Bytes`/
+ * `*Ratio`), where `ms` is a bounded delta, never a wall-clock epoch (a raw
+ * epoch is rejected at emit). `id` projects an identifier column as a
+ * pseudonymized `gthid_` token (`*Id`) — gated on full fidelity with a
+ * provisioned per-account key (see {@link PrismaCaptureColumn.as}); the raw
+ * value never reaches the wire. Categorical scalars remain unsupported.
  */
 export type ScalarIntent =
   | "flag"
@@ -93,7 +104,8 @@ export type ScalarIntent =
   | "amount"
   | "ms"
   | "bytes"
-  | "ratio";
+  | "ratio"
+  | "id";
 
 /** A single allowlisted column to project. */
 export interface PrismaCaptureColumn {
@@ -109,6 +121,12 @@ export interface PrismaCaptureColumn {
    * strict-validated by type at emit, so a value whose type does not match the
    * intent — including a Prisma `Decimal`/`BigInt`, which are not native
    * `number`s — is dropped, never captured.
+   *
+   * `id` projects a `string` or `number` identifier onto an `*Id` scalar as a
+   * pseudonymized `gthid_` token. It is captured only when the account is on
+   * `captureFidelity: "full"` AND a per-account hashing key has been
+   * provisioned; otherwise (or for a non-string/number id) the column is
+   * dropped, never captured. The raw identifier is never emitted.
    */
   as?: ScalarIntent;
 }
@@ -174,6 +192,7 @@ const INTENT_SUFFIX: Readonly<Record<ScalarIntent, string>> = {
   ms: "Ms",
   bytes: "Bytes",
   ratio: "Ratio",
+  id: "Id",
 };
 
 /**
@@ -197,24 +216,70 @@ function deriveScalarKey(column: string, intent: ScalarIntent): string {
 }
 
 /**
+ * Project an allowlisted identifier column as a pseudonymized `gthid_` token.
+ * Identifier capture is an operator escalation, so it is silent unless the
+ * account is on `captureFidelity: "full"`. Under `full`, a provisioned
+ * per-account `attrHmacKey` plus a non-empty `string`/`number` raw id yields a
+ * `gthid_` token — the raw id is hashed under the key and only the token is
+ * emitted, so the raw value never reaches the wire. A missing key, a
+ * non-hashable id, or a Web Crypto failure records a count-only `unhashed_id`
+ * omission — never emitting the raw value, even one already shaped like a
+ * `gthid_` token — so a misconfigured `full` account is observable.
+ */
+async function projectIdentifier(
+  span: Span,
+  key: string,
+  rawValue: unknown,
+): Promise<void> {
+  if (getActiveConfig().captureFidelity !== "full") return;
+  const hmacKey = getAttrHmacKey();
+  const raw =
+    typeof rawValue === "string" || typeof rawValue === "number"
+      ? String(rawValue)
+      : "";
+  if (raw.length > 0 && typeof hmacKey === "string" && hmacKey.length > 0) {
+    const token = await hashIdWeb(raw, hmacKey);
+    if (token !== null) {
+      capture(key, token, { span });
+      return;
+    }
+  }
+  // Fail-closed: no usable key, no hashable id, or a hash failure. Record the
+  // miss via `captureOmission` rather than routing the raw value through
+  // `capture()` — a raw value that happens to be `gthid_`-shaped would
+  // otherwise pass strict validation and emit an unkeyed token, bypassing the
+  // operator gate. `captureOmission` re-checks the capture gate at emit, so a
+  // mid-operation config rotation that disables capture writes nothing.
+  captureOmission("unhashed_id", { span });
+}
+
+/**
  * Project every allowlisted column present in a single-row result onto the
  * owned span via {@link capture}. Guards non-object results (a `findUnique`
  * miss returns `null`; aggregates return non-objects; lists are arrays).
  * Never throws — {@link capture} swallows its own errors, and the call is
  * additionally fenced so a malformed result can never affect the query.
+ *
+ * Async because the `id` intent hashes its value via the Web Crypto API; the
+ * caller ends the owned span only after this resolves.
  */
-function projectAllowlisted(
+async function projectAllowlisted(
   span: Span,
   columns: ReadonlyMap<string, ScalarIntent>,
   result: unknown,
-): void {
+): Promise<void> {
   if (result === null || typeof result !== "object" || Array.isArray(result)) {
     return;
   }
   const row = result as Record<string, unknown>;
   for (const [column, intent] of columns) {
     if (!(column in row)) continue;
-    capture(deriveScalarKey(column, intent), row[column], { span });
+    const key = deriveScalarKey(column, intent);
+    if (intent === "id") {
+      await projectIdentifier(span, key, row[column]);
+    } else {
+      capture(key, row[column], { span });
+    }
   }
 }
 
@@ -229,6 +294,10 @@ export function prismaAdapter(
   // construction. An out-of-contract `as` (untyped callers) drops the entry
   // (default-deny).
   const policy = new Map<string, Map<string, ScalarIntent>>();
+  // Models with at least one eager (non-`id`) column. Such a column captures
+  // under strict fidelity, so the model always warrants an owned span; an
+  // id-only model warrants one only once the operator enables full fidelity.
+  const eagerModels = new Set<string>();
   for (const entry of options?.allow ?? []) {
     if (
       !entry ||
@@ -252,6 +321,9 @@ export function prismaAdapter(
       policy.set(entry.model, columns);
     }
     columns.set(entry.column, intent);
+    if (intent !== "id") {
+      eagerModels.add(entry.model);
+    }
   }
 
   return {
@@ -286,6 +358,19 @@ export function prismaAdapter(
             return query(args);
           }
 
+          // An id-only model adds no span volume until the operator enables
+          // full fidelity: under `strict` its sole `id` intent captures nothing
+          // and records nothing, so opening a span would be pure overhead.
+          // Under `full` (even without a provisioned key) the span is warranted
+          // — projection either captures the `gthid_` token or records a
+          // visible `unhashed_id` omission for the misconfiguration.
+          if (
+            !eagerModels.has(model) &&
+            getActiveConfig().captureFidelity !== "full"
+          ) {
+            return query(args);
+          }
+
           // OWN a recording db.<Model>.<op> span — a same-trace descendant of
           // the request span (its immediate parent is the active span, which
           // on some Prisma/instrumentation versions is the still-recording
@@ -301,7 +386,7 @@ export function prismaAdapter(
             // Fence projection so a malformed result can never alter the
             // query's own outcome (pure-observer invariant).
             try {
-              projectAllowlisted(span, columns, result);
+              await projectAllowlisted(span, columns, result);
             } catch {
               // Never let capture work affect the host query result.
             }
