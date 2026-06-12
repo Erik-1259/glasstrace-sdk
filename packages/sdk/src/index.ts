@@ -202,9 +202,13 @@ export type { CorrelationIdRequest } from "./correlation-id.js";
 export { recordSideEffect } from "./side-effect/index.js";
 
 /**
- * Input shape accepted by {@link recordSideEffect}.
+ * Input shape accepted by {@link recordSideEffect}, and its options
+ * (the owned-span target).
  */
-export type { RecordSideEffectInput } from "./side-effect/index.js";
+export type {
+  RecordSideEffectInput,
+  RecordSideEffectOptions,
+} from "./side-effect/index.js";
 
 /**
  * Emit a single allowlisted value-fidelity scalar onto a caller-**owned**

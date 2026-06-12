@@ -31,13 +31,15 @@ import {
   checkSemanticFieldKey,
   checkSemanticFieldValue,
 } from "./allowlist.js";
+import { type Span } from "@opentelemetry/api";
 import {
   attachField,
   attachOperation,
   attachScalar,
+  getRecordingActiveSpan,
   hasExplicitFieldAttribute,
+  isRecordingSpan,
   recordOmission,
-  recordOmissionOnActiveSpan,
 } from "./emit.js";
 import { getActiveConfig } from "../init-client.js";
 
@@ -63,6 +65,37 @@ let _verbose = false;
  */
 export function setSideEffectVerboseFlag(verbose: boolean): void {
   _verbose = verbose;
+}
+
+/**
+ * One-shot guard for the no-recording-active-span diagnostic. The warn
+ * fires at most once per process so a high-frequency call site (a tRPC
+ * procedure that drops every request) does not flood the log.
+ */
+let _noActiveSpanWarned = false;
+
+/**
+ * Emit a one-time, verbose-gated diagnostic when `recordSideEffect` is
+ * called correctly (valid `kind`) but no recording span is available to
+ * attach evidence to — the otherwise-silent drop that makes a lost
+ * side effect externally undebuggable. Marked before the `console.warn`
+ * (so a throwing host does not cause a retry) and fenced (so a host that
+ * replaces `console.warn` cannot disrupt the behavior-neutral path).
+ */
+function maybeWarnNoActiveSpan(): void {
+  if (!_verbose) return;
+  if (_noActiveSpanWarned) return;
+  _noActiveSpanWarned = true;
+  try {
+    console.warn(
+      `[glasstrace] recordSideEffect: no recording active span at the ` +
+        `call site — side-effect evidence was dropped. Wrap tRPC ` +
+        `procedures with @glasstrace/sdk/trpc tracedMiddleware, or pass ` +
+        `an owned span: recordSideEffect(input, { span }).`,
+    );
+  } catch {
+    // Diagnostic deliverability is best-effort; never propagate.
+  }
 }
 
 /**
@@ -216,6 +249,7 @@ export function _resetSideEffectVocabState(): void {
   _patternKeysSeen.clear();
   _recentPatternKeys.length = 0;
   _proliferationWarned = false;
+  _noActiveSpanWarned = false;
 }
 
 /**
@@ -302,6 +336,25 @@ export interface RecordSideEffectInput {
 }
 
 /**
+ * Options for {@link recordSideEffect}.
+ */
+export interface RecordSideEffectOptions {
+  /**
+   * A caller-**owned**, recording OTel span to attach the operation to,
+   * instead of the ambient active span. Use this from a passive adapter
+   * that opens its own span, or whenever the host app's OTel context may
+   * not reliably survive to the call site (so the ambient active span is
+   * unreliable). When omitted, the ambient active span is used.
+   *
+   * A supplied span that has ended or is a `NonRecordingSpan` is a silent
+   * no-op — the call does NOT fall back to the ambient span. This is the
+   * owned-span counterpart, for the categorical channel, to the `span`
+   * option on the value-fidelity `capture()` primitive.
+   */
+  span?: Span;
+}
+
+/**
  * Record allowlisted side-effect evidence on the current active OTel
  * span (SDK-049).
  *
@@ -310,12 +363,21 @@ export interface RecordSideEffectInput {
  * flag `sideEffectEvidence` is `false`; callers must opt in via
  * account configuration before any attribute reaches the wire.
  *
- * Edge cases (all silent no-ops):
+ * Pass an owned span via `recordSideEffect(input, { span })` (see
+ * {@link RecordSideEffectOptions}) to attach the operation to a span you
+ * control instead of the ambient active span — use this when the host
+ * app's OTel context may not reliably survive to the call site.
+ *
+ * Edge cases (all silent no-ops unless noted):
  *  - capture-config flag is `false` ⇒ no-op (no allowlist evaluation)
  *  - input is not a plain object ⇒ no-op
  *  - `kind` is not in the v1 allowlist ⇒ no-op
- *  - no active span ⇒ no-op
- *  - active span has already ended or is `NonRecordingSpan` ⇒ no-op
+ *  - no recording span (no `{ span }` supplied and no recording active
+ *    span — including an active span that has ended or is a
+ *    `NonRecordingSpan`) ⇒ no-op, plus a one-time `console.warn`
+ *    diagnostic when `verbose` is enabled
+ *  - a supplied `{ span }` that has ended or is a `NonRecordingSpan` ⇒
+ *    no-op (does NOT fall back to the ambient span)
  *  - per-span operation budget exhausted (5 ops max) ⇒ records a
  *    `value_too_long` omission count, no operation attributes
  *  - OTel attribute slot exhaustion ⇒ silently drops the attribute
@@ -351,9 +413,12 @@ export interface RecordSideEffectInput {
  * });
  * ```
  */
-export function recordSideEffect(input: RecordSideEffectInput): void {
+export function recordSideEffect(
+  input: RecordSideEffectInput,
+  options?: RecordSideEffectOptions,
+): void {
   try {
-    runRecordSideEffect(input);
+    runRecordSideEffect(input, options);
   } catch {
     // Defense-in-depth: any unexpected throw inside the function
     // (e.g., a host shim mis-implementing OTel API) must not
@@ -362,7 +427,10 @@ export function recordSideEffect(input: RecordSideEffectInput): void {
   }
 }
 
-function runRecordSideEffect(input: unknown): void {
+function runRecordSideEffect(
+  input: unknown,
+  options?: RecordSideEffectOptions,
+): void {
   if (!input || typeof input !== "object") return;
 
   // Capture-config gate: read at every call so config rotation takes
@@ -394,9 +462,27 @@ function runRecordSideEffect(input: unknown): void {
     return;
   }
 
+  // Resolve the target span up front and route everything onto it. A
+  // caller-supplied span is used only when it is recording (a dead /
+  // NonRecordingSpan supplied span is caller misuse — silent no-op, no
+  // ambient fallback, mirroring `capture`). Otherwise the ambient active
+  // span is used; when none is recording a valid call would otherwise
+  // drop invisibly, so emit the one-time verbose diagnostic.
+  let targetSpan: Span | undefined;
+  if (options?.span !== undefined) {
+    if (!isRecordingSpan(options.span)) return;
+    targetSpan = options.span;
+  } else {
+    targetSpan = getRecordingActiveSpan();
+    if (!targetSpan) {
+      maybeWarnNoActiveSpan();
+      return;
+    }
+  }
+
   const labelOutcome = checkOperationLabel(candidate.operation);
   if (!labelOutcome.accepted) {
-    recordOmissionOnActiveSpan(labelOutcome.reason);
+    recordOmission(targetSpan, labelOutcome.reason);
     return;
   }
 
@@ -405,7 +491,7 @@ function runRecordSideEffect(input: unknown): void {
     if (checkOperationStatus(candidate.status)) {
       acceptedStatus = candidate.status;
     } else {
-      recordOmissionOnActiveSpan("unsupported_key");
+      recordOmission(targetSpan, "unsupported_key");
     }
   }
 
@@ -414,23 +500,19 @@ function runRecordSideEffect(input: unknown): void {
     if (checkOperationPhase(candidate.phase)) {
       acceptedPhase = candidate.phase;
     } else {
-      recordOmissionOnActiveSpan("unsupported_key");
+      recordOmission(targetSpan, "unsupported_key");
     }
   }
 
-  const outcome = attachOperation({
+  const outcome = attachOperation(targetSpan, {
     kind: candidate.kind,
     operation: labelOutcome.value,
     status: acceptedStatus,
     phase: acceptedPhase,
   });
 
-  if (outcome.kind === "no_active_span") {
-    // No span to record an omission against either — silent drop.
-    return;
-  }
   if (outcome.kind === "over_budget") {
-    recordOmission(outcome.span, "value_too_long");
+    recordOmission(targetSpan, "value_too_long");
     return;
   }
 
@@ -444,12 +526,12 @@ function runRecordSideEffect(input: unknown): void {
   if (fields && typeof fields === "object") {
     for (const [rawKey, rawValue] of Object.entries(fields)) {
       if (!checkSemanticFieldKey(rawKey)) {
-        recordOmission(outcome.span, "unsupported_key");
+        recordOmission(targetSpan, "unsupported_key");
         continue;
       }
       const valueOutcome = checkSemanticFieldValue(rawKey, rawValue);
       if (!valueOutcome.accepted) {
-        recordOmission(outcome.span, valueOutcome.reason);
+        recordOmission(targetSpan, valueOutcome.reason);
         continue;
       }
       // Vocabulary-governance signals are diagnostic-only. Wrap in a
@@ -463,7 +545,7 @@ function runRecordSideEffect(input: unknown): void {
       } catch {
         // Intentionally silent — warn deliverability is best-effort.
       }
-      attachField(outcome.span, rawKey, valueOutcome.value);
+      attachField(targetSpan, rawKey, valueOutcome.value);
       attachedFieldKeys.add(rawKey);
     }
   }
@@ -481,16 +563,16 @@ function runRecordSideEffect(input: unknown): void {
   if (relations && typeof relations === "object") {
     for (const [rawKey, rawValue] of Object.entries(relations)) {
       if (attachedFieldKeys.has(rawKey)) {
-        recordOmission(outcome.span, "unsupported_key");
+        recordOmission(targetSpan, "unsupported_key");
         continue;
       }
       if (!rawKey.endsWith("Holds") || !checkSemanticFieldKey(rawKey)) {
-        recordOmission(outcome.span, "unsupported_key");
+        recordOmission(targetSpan, "unsupported_key");
         continue;
       }
       if (typeof rawValue !== "boolean") {
         // Relations must be real booleans; a non-boolean is malformed.
-        recordOmission(outcome.span, "raw_payload");
+        recordOmission(targetSpan, "raw_payload");
         continue;
       }
       const valueOutcome = checkSemanticFieldValue(
@@ -498,7 +580,7 @@ function runRecordSideEffect(input: unknown): void {
         rawValue ? "true" : "false",
       );
       if (!valueOutcome.accepted) {
-        recordOmission(outcome.span, valueOutcome.reason);
+        recordOmission(targetSpan, valueOutcome.reason);
         continue;
       }
       // Same diagnostic governance as `fields` (the casing warn no-ops
@@ -509,7 +591,7 @@ function runRecordSideEffect(input: unknown): void {
       } catch {
         // Intentionally silent — warn deliverability is best-effort.
       }
-      attachField(outcome.span, rawKey, valueOutcome.value);
+      attachField(targetSpan, rawKey, valueOutcome.value);
       attachedFieldKeys.add(rawKey);
     }
   }
@@ -530,16 +612,16 @@ function runRecordSideEffect(input: unknown): void {
         // Per-operation scalar budget exhausted. Record a single
         // count (mirroring the operation over-budget path) and stop;
         // no rejected value is echoed.
-        recordOmission(outcome.span, "value_too_long");
+        recordOmission(targetSpan, "value_too_long");
         break;
       }
       scalarCount += 1;
       const scalarOutcome = checkScalarField(rawKey, rawValue);
       if (!scalarOutcome.accepted) {
-        recordOmission(outcome.span, scalarOutcome.reason);
+        recordOmission(targetSpan, scalarOutcome.reason);
         continue;
       }
-      attachScalar(outcome.span, rawKey, scalarOutcome.value);
+      attachScalar(targetSpan, rawKey, scalarOutcome.value);
     }
   }
 }

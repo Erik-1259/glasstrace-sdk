@@ -19,6 +19,11 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { recordSideEffect } from "../../../../packages/sdk/src/side-effect/index.js";
 import {
+  attachOperation,
+  isRecordingSpan,
+} from "../../../../packages/sdk/src/side-effect/emit.js";
+import { MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN } from "../../../../packages/sdk/src/side-effect/allowlist.js";
+import {
   _setCurrentConfig,
   _resetConfigForTesting,
 } from "../../../../packages/sdk/src/init-client.js";
@@ -611,5 +616,74 @@ describe("recordSideEffect — non-object input", () => {
     });
     const attrs = exportedAttributes();
     expect(attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_KIND]).toBeUndefined();
+  });
+});
+
+describe("attachOperation — direct contract", () => {
+  it("attaches the operation attributes onto the given span and returns 'attached'", () => {
+    const span = tracer.startSpan("owned");
+    const outcome = attachOperation(span, {
+      kind: "email",
+      operation: "email.send",
+      status: "succeeded",
+      phase: "request",
+    });
+    span.end();
+
+    expect(outcome).toEqual({ kind: "attached" });
+    const attrs = exportedAttributes();
+    expect(attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_KIND]).toBe("email");
+    expect(attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OPERATION]).toBe(
+      "email.send",
+    );
+    expect(attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_STATUS]).toBe(
+      "succeeded",
+    );
+    expect(attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_PHASE]).toBe("request");
+  });
+
+  it("returns 'over_budget' once the per-span operation budget is exhausted", () => {
+    const span = tracer.startSpan("owned");
+    for (let i = 0; i < MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN; i++) {
+      expect(
+        attachOperation(span, { kind: "email", operation: `op.${i}` }),
+      ).toEqual({ kind: "attached" });
+    }
+    expect(
+      attachOperation(span, { kind: "email", operation: "op.over" }),
+    ).toEqual({ kind: "over_budget" });
+    span.end();
+  });
+});
+
+describe("isRecordingSpan — contract", () => {
+  it("is true for a live recording span and false once it has ended", () => {
+    const span = tracer.startSpan("owned");
+    expect(isRecordingSpan(span)).toBe(true);
+    span.end();
+    expect(isRecordingSpan(span)).toBe(false);
+  });
+
+  it("is false for an explicit isRecording() === false (NonRecordingSpan / sampled-out)", () => {
+    const span = { isRecording: () => false } as unknown as otelApi.Span;
+    expect(isRecordingSpan(span)).toBe(false);
+  });
+
+  it("treats a missing isRecording as usable, matching capture() and the Prisma adapter", () => {
+    // A non-standard host shim without isRecording is assumed usable —
+    // the only standard spans that report not-recording implement the
+    // method, and this keeps recordSideEffect consistent with the other
+    // span-writing primitives.
+    const span = {} as unknown as otelApi.Span;
+    expect(isRecordingSpan(span)).toBe(true);
+  });
+
+  it("is false when isRecording throws (defensive — never propagates to the call site)", () => {
+    const span = {
+      isRecording: () => {
+        throw new Error("shim boom");
+      },
+    } as unknown as otelApi.Span;
+    expect(isRecordingSpan(span)).toBe(false);
   });
 });
