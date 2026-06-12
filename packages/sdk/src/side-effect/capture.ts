@@ -26,6 +26,7 @@
  */
 
 import { type Span } from "@opentelemetry/api";
+import type { SideEffectOmissionReason } from "@glasstrace/protocol";
 import { checkScalarField } from "./allowlist.js";
 import { attachScalar, recordOmission, reserveScalarSlot } from "./emit.js";
 import { isCaptureEnabled } from "../init-client.js";
@@ -136,4 +137,38 @@ function runCapture(
   }
 
   attachScalar(span, name, outcome.value);
+}
+
+/**
+ * Record an omission count on a caller-owned span, honoring the same gates as
+ * {@link capture} — the capture-config flag and a recording span — but without
+ * emitting a value.
+ *
+ * Used by a passive adapter that has already determined a value cannot be
+ * captured (e.g. an identifier that could not be pseudonymized) and must record
+ * the miss *without* routing a value through {@link capture} — where a value
+ * that merely looks like a valid scalar could pass validation and be emitted.
+ * Re-checking `isCaptureEnabled()` here (not only at the adapter's entry gate)
+ * means a config rotation that disables capture mid-operation writes nothing,
+ * counter included — matching {@link capture}. Never throws.
+ */
+export function captureOmission(
+  reason: SideEffectOmissionReason,
+  options: CaptureOptions,
+): void {
+  try {
+    const span = options?.span;
+    if (!span) return;
+    if (!isCaptureEnabled()) return;
+    try {
+      if (typeof span.isRecording === "function" && !span.isRecording()) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    recordOmission(span, reason);
+  } catch {
+    // Defense-in-depth: capture work must never propagate to the host path.
+  }
 }

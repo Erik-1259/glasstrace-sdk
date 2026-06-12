@@ -203,16 +203,27 @@ prismaAdapter({
 });
 ```
 
-`as` is one of `"flag"` (default, boolean) or `"value"` / `"amount"` /
+`as` is one of `"flag"` (default, boolean), `"value"` / `"amount"` /
 `"ms"` / `"bytes"` / `"ratio"` (finite number; `ms` is a bounded delta,
-not a wall-clock timestamp). A value whose type does not match its
-intent is dropped, never captured.
+not a wall-clock timestamp), or `"id"` (a pseudonymized identifier — see
+below). A value whose type does not match its intent is dropped, never
+captured.
 
 Numeric intents capture native JavaScript `number` columns (Prisma
 `Int` / `Float`). A Prisma `Decimal` (a Decimal.js object) or `BigInt`
 is not a native `number`, so it is safely omitted rather than lossily
 converted — convert it to a `number` in your own code first if you need
 to capture it (mind the precision trade-off for money).
+
+The `"id"` intent captures an identifier column (`*Id`) as a stable,
+opaque `gthid_<hex>` token — the raw id is hashed under a per-account key
+and never reaches the wire. It is captured only when an operator has set
+your account to full-fidelity capture **and** the per-account key is
+provisioned. Without full-fidelity capture the intent is simply off (no
+scalar, no counter); under full-fidelity capture with a missing key (or a
+non-string/number id) the column is dropped and a count-only `unhashed_id`
+omission is recorded so the misconfiguration stays visible. Use it to
+correlate the same entity across traces without exposing the raw id.
 
 The adapter is **passive and default-deny**:
 
@@ -221,9 +232,10 @@ The adapter is **passive and default-deny**:
 - Nothing is captured unless a column is explicitly listed in `allow`
   **and** value capture is enabled for your account. With an empty or
   unset `allow`, it captures nothing and adds no spans.
-- Only boolean and numeric columns are captured (per the `as` intent);
-  identifier and categorical columns are not. `findMany` and list
-  queries are not captured.
+- Booleans and numbers are captured by their `as` intent; identifiers
+  are captured only as pseudonymized `gthid_` tokens under full-fidelity
+  capture, never raw. Categorical columns are not captured, and
+  `findMany` / list queries are not captured.
 - It has no dependency on `@prisma/client` and is safe to import in any
   runtime; on a runtime with no active request span it captures
   nothing.

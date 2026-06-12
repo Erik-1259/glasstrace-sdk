@@ -11,6 +11,7 @@ import {
   sendInitRequest,
   performInit,
   getActiveConfig,
+  getAttrHmacKey,
   writeClaimedKey,
   _resetConfigForTesting,
   _isRateLimitBackoff,
@@ -190,6 +191,24 @@ describe("Init Client + Config Cache", () => {
         expect.stringContaining("old. Will refresh"),
       );
     });
+
+    it("normalizes a pre-existing full-without-key cache to strict on read", () => {
+      // Simulate a cache written by an older SDK: `full` with a stray/absent key.
+      const response = makeInitResponse();
+      response.config.captureFidelity = "full";
+      response.config.attrHmacKey = "stale-secret";
+      const cached = { response, cachedAt: Date.now() };
+      const dirPath = join(tempDir, ".glasstrace");
+      mkdirSync(dirPath, { recursive: true });
+      writeFileSync(join(dirPath, "config"), JSON.stringify(cached), "utf-8");
+
+      const result = loadCachedConfig(tempDir);
+      expect(result).not.toBeNull();
+      // Unkeyed full is downgraded to strict so cold-start id capture stays off...
+      expect(result!.config.captureFidelity).toBe("strict");
+      // ...and any cached secret is dropped on load.
+      expect(result!.config.attrHmacKey).toBeUndefined();
+    });
   });
 
   describe("Requirement 2: saveCachedConfig", () => {
@@ -228,6 +247,29 @@ describe("Init Client + Config Cache", () => {
       await saveCachedConfig(response, join(badPath, "subdir"));
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringMatching(/Failed to cache config.*(ENOTDIR|ENOENT|EPERM|EACCES)/),
+      );
+    });
+
+    it("redacts the attrHmacKey secret and downgrades full fidelity in the persisted cache", async () => {
+      const response = makeInitResponse();
+      response.config.captureFidelity = "full";
+      response.config.attrHmacKey = "super-secret-per-account-hmac-key";
+      await saveCachedConfig(response, tempDir);
+
+      const content = await readFile(
+        join(tempDir, ".glasstrace", "config"),
+        "utf-8",
+      );
+      // The tenant secret must never reach disk, in any form.
+      expect(content).not.toContain("super-secret-per-account-hmac-key");
+      const parsed = JSON.parse(content);
+      expect(parsed.response.config.attrHmacKey).toBeUndefined();
+      // Without the cached key, the posture is downgraded to strict so a cold
+      // start records no spurious unhashed_id omissions for id capture.
+      expect(parsed.response.config.captureFidelity).toBe("strict");
+      // Non-secret config is still cached for offline startup.
+      expect(parsed.response.config.requestBodies).toBe(
+        response.config.requestBodies,
       );
     });
   });
@@ -670,6 +712,27 @@ describe("Init Client + Config Cache", () => {
     it("returns DEFAULT_CAPTURE_CONFIG when both in-memory and cache are empty (tier 3)", () => {
       const config = getActiveConfig();
       expect(config).toEqual(DEFAULT_CAPTURE_CONFIG);
+    });
+
+    it("redacts attrHmacKey from the public getter (the secret stays off the public API)", () => {
+      const response = makeInitResponse();
+      response.config.captureFidelity = "full";
+      response.config.attrHmacKey = "secret-key-value";
+      _setCurrentConfig(response);
+
+      const config = getActiveConfig();
+      expect(config.attrHmacKey).toBeUndefined();
+      // Non-secret fields stay readable through the public getter.
+      expect(config.captureFidelity).toBe("full");
+    });
+
+    it("exposes attrHmacKey only through the internal getAttrHmacKey accessor", () => {
+      const response = makeInitResponse();
+      response.config.attrHmacKey = "secret-key-value";
+      _setCurrentConfig(response);
+
+      expect(getAttrHmacKey()).toBe("secret-key-value");
+      expect(getActiveConfig().attrHmacKey).toBeUndefined();
     });
   });
 
