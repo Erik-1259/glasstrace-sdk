@@ -9,15 +9,14 @@ import {
 import { findMarkerBoundaries } from "./inject.js";
 
 /**
- * Wave 18 multi-target write dispatcher.
+ * Multi-target write dispatcher.
  *
- * Per DISC-1782 (P1 design_correction, 2026-05-09): the SDK's
- * agent-instruction injection writes the Glasstrace MCP managed
+ * Earlier SDK versions wrote the Glasstrace MCP managed
  * section to deprecated/wrong/missing filenames for nearly every
- * supported agent except Claude Code, and never writes to the
+ * supported agent except Claude Code, and never wrote to the
  * cross-tool `AGENTS.md` standard governed by the Agentic AI
- * Foundation under the Linux Foundation. Wave 18 corrects this by
- * routing every detected agent through this multi-target helper,
+ * Foundation under the Linux Foundation. This dispatcher corrects that
+ * by routing every detected agent through this multi-target helper,
  * which writes to:
  *
  *   - Claude Code:  CLAUDE.md (primary)         + AGENTS.md (companion)
@@ -44,20 +43,20 @@ import { findMarkerBoundaries } from "./inject.js";
  * fail-loud policy from the wave's 350-pass adversarial review
  * (finding 350-O8) — the prior `isPermissionError` path covered only
  * permission-class errors. Atomic rollback across targets is
- * explicitly OUT OF SCOPE for Wave 18 (track via closeout-gate).
+ * explicitly out of scope for this dispatcher.
  *
  * **Silent on success.** Successful writes produce no stdout/stderr
  * output. Only failures emit warnings. The SDK runs at user-runtime
  * load and verbose per-write logging would constitute log spam
  * across the user base.
  *
- * **Marker contract preserved.** All targets use the SDK-050 /
- * DISC-1592 / DISC-1602 marker contract for idempotent in-place
+ * **Marker contract preserved.** All targets use the same
+ * marker contract for idempotent in-place
  * replacement on re-runs. Markdown-family destinations (CLAUDE.md,
  * AGENTS.md, GEMINI.md, .windsurf/rules/glasstrace.md, the body of
  * .cursor/rules/glasstrace.mdc) use HTML comment markers; the legacy
  * .cursorrules destination uses hash-prefix markers preserved from
- * the SDK-050 contract for backward-compat with already-rendered
+ * the original contract for backward-compat with already-rendered
  * managed sections.
  *
  * @param agents - All detected agents (typically the result of
@@ -148,7 +147,7 @@ interface WriteTarget {
    *   prepend YAML frontmatter.
    * - "cursorrules-legacy": render via
    *   `generateInfoSectionForCursorrulesLegacy` with hash-prefix
-   *   markers preserved from the SDK-050 contract.
+   *   markers preserved from the original contract.
    */
   kind: "primary" | "agents-md-companion" | "cursor-mdc" | "cursorrules-legacy";
   isAgentsMdCompanion: boolean;

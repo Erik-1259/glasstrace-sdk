@@ -1,5 +1,5 @@
 /**
- * SHA-256 hash helper for API-key rotation detection (DISC-1568 / Wave 15C).
+ * SHA-256 hash helper for API-key rotation detection.
  *
  * Memo §Decision 7 calls for a stable hash of the resolved API key
  * that can be compared on every `_setCurrentConfig` /

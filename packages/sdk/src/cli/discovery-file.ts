@@ -65,7 +65,7 @@ export interface StaticRootResolution {
 /**
  * Describes the outcome of a single call to {@link writeDiscoveryFile} so
  * callers can surface an accurate summary line without re-reading the
- * file. Mirrors the DISC-1247 Scenario 2 re-init preservation contract:
+ * file. Mirrors the re-init preservation contract:
  * a valid file whose `key` already matches the on-disk anon key is left
  * alone rather than rewritten.
  */

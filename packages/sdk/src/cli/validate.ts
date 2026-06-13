@@ -85,7 +85,7 @@ export function hasRegisterGlasstraceImport(content: string): boolean {
 
 /**
  * Validates consistency between the filesystem artifacts that `sdk init`
- * produces (DISC-1247 Scenario 4). Detects five classes of inconsistency:
+ * produces. Detects five classes of inconsistency:
  *
  * 1. `.glasstrace/` exists but `instrumentation.ts` does not import
  *    `registerGlasstrace` from `@glasstrace/sdk`.
@@ -96,7 +96,7 @@ export function hasRegisterGlasstraceImport(content: string): boolean {
  * 5. `.glasstrace/mcp-connected` marker records a credential identity
  *    that no longer matches the project's effective MCP credential
  *    (e.g. project moved from anon to account/dev-key but the managed
- *    helper config still embeds the anon bearer — DISC-1512).
+ *    helper config still embeds the anon bearer).
  *
  * Each issue includes a stable `code`, a message, and a suggested fix.
  * Exit code is non-zero whenever any issue is detected so CI pipelines

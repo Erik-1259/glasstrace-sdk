@@ -1,8 +1,8 @@
 /**
  * The text body the SDK injects into a user's agent-instruction file
  * (AGENTS.md, CLAUDE.md, GEMINI.md, .cursor/rules/glasstrace.mdc,
- * .windsurf/rules/glasstrace.md, plus legacy .cursorrules — Wave 18
- * expanded the canonical set per DISC-1782) between the
+ * .windsurf/rules/glasstrace.md, plus legacy .cursorrules — the
+ * canonical set follows the 2026 cross-tool standard) between the
  * `<!-- glasstrace:mcp:start v=<sdkVersion> -->` ... `<!-- glasstrace:mcp:end -->`
  * managed-section markers.
  *
@@ -14,8 +14,7 @@
  * machinery in `configs.ts`. Keeping it in a sibling module means
  * future content edits are a single-file change and don't risk
  * disturbing the `configs.ts` rendering machinery (which carries the
- * SDK-050 / DISC-1592 / DISC-1602 marker contract that has soaked in
- * production and must not regress).
+ * marker contract that has soaked in production and must not regress).
  *
  * **Vocabulary alignment:** every MCP tool name and response-field
  * name in the body below is verified against the current MCP server
@@ -28,9 +27,8 @@
  * this module in lockstep with the protocol change so the
  * agent-instruction text never references fields that don't exist.
  *
- * **Wave 17 follow-up (2026-05-09, post-PR-998):** the
- * vocabulary-mismatch-recovery wave (DISC-1626 + 40 sibling DISCs,
- * shipped via `glasstrace-product` PR #998) added five fields to
+ * **Vocabulary-mismatch-recovery follow-up:** the
+ * vocabulary-mismatch-recovery work added five fields to
  * the no-match envelope on `find_trace_candidates`'s
  * `CandidateDiagnosticSchema` and the sibling-tools'
  * `ToolDiagnosticSchema`: `windowActivity`, `humanReadable`,
@@ -42,8 +40,7 @@
  * result — most notably, `windowActivity` carries the four-way
  * distinguisher between "wrong vocabulary", "no traffic in window",
  * "captureConfig-blocked", and "no traces ever for this tenant"
- * (per `wire-mcp.ts` `NoMatchWindowActivitySchema` /
- * DISC-1652 Amendment 1 / DISC-1654). Without `windowActivity`
+ * (per `wire-mcp.ts` `NoMatchWindowActivitySchema`). Without `windowActivity`
  * the agent cannot distinguish a vocabulary miss from "the SDK was
  * never registered for this tenant" — they look identical at the
  * `closeMatches`-only layer.
@@ -58,7 +55,7 @@
  * `recoveryActions` before pivoting to source — that is the
  * load-bearing recovery contract from MCP-025 / MCP-027 (codified
  * in `wire-mcp.ts` `ToolDiagnosticSchema` and `CandidateDiagnosticSchema`)
- * and is the failure mode the prior SDK-050 cost-aware decision
+ * and is the failure mode the prior cost-aware decision
  * paragraph did not surface.
  */
 
@@ -74,8 +71,7 @@
  *
  * Returns the body WITHOUT the surrounding markers — the caller
  * (`generateInfoSection` in `configs.ts`) wraps the body with the
- * version-stamped start/end markers per the SDK-050 / DISC-1592
- * marker contract.
+ * version-stamped start/end markers per the marker contract.
  */
 export function buildAgentInstructionBody(): string {
   return [

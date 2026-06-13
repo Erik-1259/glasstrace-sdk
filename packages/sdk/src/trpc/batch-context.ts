@@ -1,6 +1,5 @@
 /**
- * Per-request batch envelope for tRPC HTTP-batch dispatch (SDK-052 /
- * Wave 16B / advances DISC-1534 SDK-side slice).
+ * Per-request batch envelope for tRPC HTTP-batch dispatch.
  *
  * The envelope is set by `wrapBatchedHttpHandler` at the outer HTTP
  * boundary and read by `tracedMiddleware` inside each member's
@@ -15,8 +14,7 @@
  * N-th invocation to the N-th positional occurrence in
  * `procedures` (positional dispatch index, NOT name-only matching).
  * The counter mutation is scoped to the single-request envelope and
- * therefore safe under tRPC's per-batch dispatch ordering — see
- * §6 of the SDK-052 brief for the full contract.
+ * therefore safe under tRPC's per-batch dispatch ordering.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 

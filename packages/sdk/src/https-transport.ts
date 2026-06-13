@@ -7,12 +7,11 @@
  * and request deduplication. When the SDK is bundled into a Next.js
  * process (instrumentation.ts path), outbound calls to
  * `api.glasstrace.dev` get intercepted by the patched fetch and can
- * silently hang — the fetch promise never resolves (DISC-493 Issue 3).
+ * silently hang — the fetch promise never resolves.
  *
  * A silent init hang is catastrophic: the SDK stays in "pending key"
  * state forever, enriched spans are buffered without ever being
- * exported, and anonymous keys are never registered server-side
- * (DISC-494).
+ * exported, and anonymous keys are never registered server-side.
  *
  * ## Why `node:https`
  *

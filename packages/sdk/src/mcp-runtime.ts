@@ -72,7 +72,7 @@ export function identityFingerprint(token: string): string {
  * parse errors that don't fall through to text comparison.
  *
  * Used to detect manually-edited MCP configs before overwriting them
- * (DISC-1247 Scenario 2c) and as the staleness signal for SDK-managed
+ * and as the staleness signal for SDK-managed
  * configs that must be refreshed when the project's effective
  * credential changes.
  *
@@ -81,7 +81,7 @@ export function identityFingerprint(token: string): string {
  * NOT be treated as SDK-managed and silently overwritten on re-init.
  * Callers that need backwards-compatible recognition of the legacy
  * generic `.glasstrace/mcp.json` shape (no `type: "http"`, written by
- * SDK versions prior to DISC-1572) should use
+ * older SDK versions) should use
  * {@link genericMcpConfigOrLegacyShapeMatches} instead.
  *
  * @internal Exported for unit testing only.
@@ -108,8 +108,8 @@ export function mcpConfigMatches(
 
 /**
  * Generic-shape variant of {@link mcpConfigMatches} that also recognizes
- * the legacy `.glasstrace/mcp.json` shape written by SDK versions prior
- * to DISC-1572 (the same generic shape minus `type: "http"`).
+ * the legacy `.glasstrace/mcp.json` shape written by older SDK
+ * versions (the same generic shape minus `type: "http"`).
  *
  * Scoped to callers that operate exclusively on `.glasstrace/mcp.json`
  * (currently {@link refreshMcpConfigAfterClaim}). It must not be used
@@ -154,7 +154,7 @@ export function genericMcpConfigOrLegacyShapeMatches(
  * `mcpServers.glasstrace`, or `null` when `value` is not the new
  * Claude-compatible SDK shape. Used by
  * {@link genericMcpConfigOrLegacyShapeMatches} to recognize legacy
- * on-disk files written by SDK versions prior to DISC-1572.
+ * on-disk files written by older SDK versions.
  *
  * The helper is deliberately narrow: it only strips when `type` is
  * exactly the string `"http"`, and only from the `glasstrace` server
@@ -417,7 +417,7 @@ const GLASSTRACE_DIR = ".glasstrace";
  * Used by `mcp add` (marker-mismatch detection) and by
  * {@link writeMcpMarker} (skip-if-match optimization).
  *
- * Reader rules per the design (`SDK-034 D3`):
+ * Reader rules per the design:
  * - `version === undefined` → v1: `{ keyHash, configuredAt }`. Mapped
  *   to `credentialSource: "anon"`, `credentialHash: keyHash`. v1's
  *   `keyHash` is itself produced by `identityFingerprint`, so the

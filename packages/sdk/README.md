@@ -139,9 +139,9 @@ first call for each symptom class.
 
 ### Migration from legacy filenames
 
-If you installed `@glasstrace/sdk` before v1.11 (Wave 18 / DISC-1782),
-your project may have a managed Glasstrace block in legacy
-destinations the SDK no longer writes to as primary:
+If you installed `@glasstrace/sdk` before v1.11, your project may have a
+managed Glasstrace block in legacy destinations the SDK no longer writes
+to as primary:
 
 - `codex.md` (Codex now reads `AGENTS.md` by default)
 - `.windsurfrules` (Windsurf moved to `.windsurf/rules/*.md`)
@@ -272,10 +272,10 @@ The nudge never fires in production (detected via `NODE_ENV` or
 ## Production deployment under Next 16
 
 As of `@glasstrace/sdk@1.3.5`, auto-attach detection now classifies the
-SDK's own bundled proxy correctly under bundler minification (DISC-1556
-— verified against the `clean-next-sdk130` validation fixture). The
-manual integration documented below remains supported for users who
-prefer explicit configuration.
+SDK's own bundled proxy correctly under bundler minification, verified
+against a clean Next.js validation fixture. The manual integration
+documented below remains supported for users who prefer explicit
+configuration.
 
 Next 16 (`next build && next start`) registers an OpenTelemetry
 TracerProvider before user code runs. When `registerGlasstrace()` then
@@ -1075,7 +1075,7 @@ keeps a symbol on the Node-only side even when the read is wrapped in
 `typeof` guard means "this module reaches for `process`", and an
 edge-safe module should not reach for `process` at all.
 
-This is by design. Per the SDK-033 strict-gate policy, the contract
+This is by design. Under the strict-gate policy, the contract
 "this bundle passes the gate" must imply "this bundle is safe in any
 edge runtime", and that implication only holds if the gate refuses
 guards rather than trusting them. If you need a symbol that is currently

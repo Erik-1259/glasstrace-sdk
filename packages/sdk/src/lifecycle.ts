@@ -3,7 +3,7 @@
  *
  * Provides a single source of truth for SDK state across three runtime
  * layers: core, auth, and OTel coexistence. (The CLI layer is handled
- * separately via the runtime state file bridge in SDK-026.)
+ * separately via the runtime state file bridge.)
  *
  * The core layer provides a shared typed event emitter that other layers
  * and SDK modules use for cross-layer communication.
@@ -141,7 +141,7 @@ export interface SdkLifecycleEvents {
   "core:shutdown_completed": Record<string, never>;
   /**
    * The boundary-masked-error heuristic fired for an HTTP server span
-   * (SDK-051 / DISC-1125 — same-span scope). Emitted from the enriching
+   * (same-span scope). Emitted from the enriching
    * exporter when ALL of the following hold for an HTTP server span:
    *
    *   1. At least one error signal is present on the span — any of:
@@ -159,7 +159,7 @@ export interface SdkLifecycleEvents {
    * heuristic's behavior does NOT depend on subscribers.
    *
    * **Same-span scope:** this event fires when the HTTP server span
-   * itself carries the error signal (the DISC-1134 case the existing
+   * itself carries the error signal (the case the existing
    * inference block already handled). Descendant-traversal detection
    * (the page-route boundary case where the exception lives in a
    * child span) is tracked separately and does NOT emit this event
@@ -189,7 +189,7 @@ export interface SdkLifecycleEvents {
   "otel:injection_failed": { reason: string };
   /**
    * Structured fail-loud diagnostic emitted when the OTel coexistence
-   * path observes an unrecoverable auto-attach failure (DISC-1556).
+   * path observes an unrecoverable auto-attach failure.
    * Distinct from `otel:injection_failed` (which carries a free-form
    * `reason` string for logging) — `otel:failed` carries a
    * machine-readable payload destined for the runtime-state CLI bridge.
@@ -205,8 +205,8 @@ export interface SdkLifecycleEvents {
     providerClass?: string;
   };
   /**
-   * The export-path circuit breaker has tripped from CLOSED to OPEN
-   * (DISC-1568 / Wave 15C). Fired exactly once per outage; the
+   * The export-path circuit breaker has tripped from CLOSED to OPEN.
+   * Fired exactly once per outage; the
    * `category` discriminates the failure class that crossed the
    * consecutive-failure threshold and `nextProbeMs` reports the
    * scheduled HALF_OPEN delay.
@@ -214,7 +214,7 @@ export interface SdkLifecycleEvents {
    * **PII-safety:** the payload's `message` is built from a fixed
    * template and references only the closed `category` enum and the
    * failure count; never URLs, headers, payload bodies, or the
-   * underlying error message text. Mirrors the DISC-1556 `otel:failed`
+   * underlying error message text. Mirrors the `otel:failed`
    * contract.
    */
   "otel:circuit_opened": {
@@ -231,7 +231,7 @@ export interface SdkLifecycleEvents {
   };
   /**
    * The breaker's backoff timer expired and the next real export
-   * batch is being permitted as a probe (DISC-1568). `previousTimerMs`
+   * batch is being permitted as a probe. `previousTimerMs`
    * reports the timer that just elapsed; useful for surfacing a
    * recovery-attempt diagnostic in the CLI bridge.
    */
@@ -241,8 +241,8 @@ export interface SdkLifecycleEvents {
   };
   /**
    * The breaker has transitioned back to CLOSED, either because a
-   * probe succeeded or because credential rotation reset the breaker
-   * (DISC-1568). `outageDurationMs` reports the wall-clock duration
+   * probe succeeded or because credential rotation reset the breaker.
+   * `outageDurationMs` reports the wall-clock duration
    * the breaker spent in OPEN+HALF_OPEN; `0` when the close was a
    * defensive no-op (already CLOSED).
    */
@@ -258,7 +258,7 @@ export interface SdkLifecycleEvents {
    * list, OR the per-name occurrence count exceeds the positional
    * matches available). The middleware emits the span as today
    * (no batch attributes); this event is informational only — the
-   * trace shape is preserved (SDK-052 / Wave 16B).
+   * trace shape is preserved.
    *
    * **PII-safety:** `procedureName` and `batchMembers` are tRPC
    * procedure names already on the trace; no new disclosure
@@ -282,8 +282,7 @@ export interface SdkLifecycleEvents {
    * `tracedRequestMiddleware` from `@glasstrace/sdk/middleware` was
    * invoked but the SDK is not registered (early-init race or
    * `OtelState.UNCONFIGURED`). The wrapped middleware still runs;
-   * the span landed on the OTel API's noop tracer and was discarded
-   * (DISC-1537 / SDK-046).
+   * the span landed on the OTel API's noop tracer and was discarded.
    *
    * Emitted at most once per process by the wrapper to avoid log
    * floods on a hot request path; a single signal is sufficient to
@@ -297,7 +296,7 @@ export interface SdkLifecycleEvents {
    * invoked outside an active request span (no captured
    * `SpanContext` at call time). The continuation still runs; the
    * resulting span has no `glasstrace.causal.post_response_async`
-   * link (DISC-1539 / SDK-046).
+   * link.
    *
    * Emitted at most once per process. **PII-safety:** payload is
    * empty by construction.
@@ -306,7 +305,7 @@ export interface SdkLifecycleEvents {
   /**
    * `withAsyncCausality` continuation fired but the SDK is not
    * registered. The continuation still runs; the span landed on the
-   * noop tracer (DISC-1539 / SDK-046).
+   * noop tracer.
    *
    * Emitted at most once per process. **PII-safety:** payload is
    * empty by construction.
@@ -760,7 +759,7 @@ export function waitForReady(timeoutMs = 30000): Promise<void> {
  *   `ACTIVE_DEGRADED` (e.g., a non-fatal export failure).
  * - `"not-configured"` — the SDK could not configure tracing. Covers
  *   `OtelState.UNCONFIGURED`, `OtelState.CONFIGURING`, and
- *   `OtelState.COEXISTENCE_FAILED` (the DISC-1556 Next 16 production
+ *   `OtelState.COEXISTENCE_FAILED` (the Next 16 production
  *   "auto-attach returned null" path). When the value is
  *   `"not-configured"` after `registerGlasstrace()` has resolved,
  *   spans are NOT reaching the Glasstrace exporter and the manual
@@ -891,7 +890,7 @@ export async function executeShutdown(timeoutMs = 5000): Promise<void> {
 /**
  * Register SIGTERM and SIGINT handlers that trigger the shutdown coordinator.
  * Always installed by registerGlasstrace(), regardless of whether another
- * OTel provider exists (DISC-1265). The re-raise decision is deferred to
+ * OTel provider exists. The re-raise decision is deferred to
  * delivery time: the handler checks coexistenceState (set by configureOtel()
  * once its async provider probe completes) and only re-raises when NOT
  * "coexisting". In coexistence mode, hooks still run but the existing
@@ -952,7 +951,7 @@ export function registerSignalHandlers(): void {
  * Register a beforeExit handler that triggers the shutdown coordinator.
  * beforeExit fires when the event loop drains (not on signals).
  *
- * For Scenario B (coexistence): Glasstrace installs signal handlers (DISC-1265)
+ * For Scenario B (coexistence): Glasstrace installs signal handlers
  * but does not re-raise — the existing provider owns signal re-raise. This
  * beforeExit trigger covers the edge case where the process exits without
  * signals (event loop drains naturally).

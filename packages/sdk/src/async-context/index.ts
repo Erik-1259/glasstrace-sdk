@@ -16,7 +16,7 @@
  *     "follows from" relationship.
  *   - A `glasstrace.causal.post_response_async` attribute carrying
  *     the captured trace ID (32-char hex). Used by the product-side
- *     trace-summary transform (per DISC-1539's product handoff) to
+ *     trace-summary transform to
  *     reconstruct ownership without resolving the Link. Two
  *     companion booleans
  *     (`glasstrace.causal.affects_http_status` and
@@ -38,7 +38,7 @@
  *
  * Strategy: continuation-passing, NOT global ALS propagation
  * ---------------------------------------------------------
- * Per the SDK-046 brief §2.3: ALS continuity across Next.js `after()`
+ * ALS continuity across Next.js `after()`
  * is uncertain (the framework may schedule via `queueMicrotask`
  * (preserves ALS) or via cross-tick scheduling (drops ALS)). Relying
  * on ALS would couple the SDK to Next internals. Continuation-passing
@@ -162,7 +162,7 @@ export interface WithAsyncCausalityOptions {
  *          documenting that the async work does NOT participate in
  *          the root request's outcome.
  *      When no valid `SpanContext` was captured, none of these are
- *      emitted (per SDK-046's "missing or unknown evidence is
+ *      emitted (following the SDK's "missing or unknown evidence is
  *      preferable to guessed evidence" rule) and an
  *      `async:no_originating_context` lifecycle event fires (at
  *      most once per process).

@@ -8,7 +8,7 @@ import { isBuiltin as isNodeBuiltin } from "node:module";
  * The constraint is `object` rather than `Record<string, unknown>` because
  * Next's actual `NextConfig` is an interface *without* a string index
  * signature. Requiring `[key: string]: unknown` would fail the assignability
- * check that caused DISC-1256, reported by Next 16 consumers as:
+ * check, reported by Next 16 consumers as:
  *   > Argument of type 'NextConfig' is not assignable to parameter of type
  *   > 'NextConfig'. Index signature for type 'string' is missing in type
  *   > 'NextConfig'.
@@ -82,7 +82,7 @@ type WebpackExternalsFn = (
 /**
  * Appends an externals entry to a webpack config that rewrites every
  * Node.js built-in import into a runtime CommonJS `require()`. This is
- * the piece of DISC-1257 that actually fixes `next dev --webpack`:
+ * the piece that actually fixes `next dev --webpack`:
  * webpack dev-mode ships no default handler for the `node:` URI scheme
  * AND does not auto-externalize bare built-ins pulled through transitive
  * SDK dependencies (e.g. `import * as zlib from "zlib"` inside an OTel
@@ -148,7 +148,7 @@ function appendNodeSchemeExternal(webpackConfig: Record<string, unknown>): void 
  * Note that `serverExternalPackages` only affects RSC and Route Handler
  * bundling — it does NOT externalize the instrumentation path under
  * `next dev --webpack` (see vercel/next.js#58003, #28774). The full fix
- * for DISC-1257 pairs this write with the `node:*` externals function.
+ * pairs this write with the `node:*` externals function.
  *
  * Mutates the `config` bag in place; callers pass the shallow-copied bag
  * owned by `withGlasstraceConfig`, so the user's original reference is not
@@ -190,12 +190,11 @@ function ensureServerExternal(config: Record<string, unknown>): void {
  *   `node:child_process` or the bare `zlib` specifier used by
  *   `@opentelemetry/otlp-exporter-base` would otherwise crash with
  *   `UnhandledSchemeError` or `Can't resolve 'zlib'`. This entry is the
- *   actual DISC-1257 fix for the dev-webpack path. Turbopack is
+ *   authoritative fix for the dev-webpack path. Turbopack is
  *   unaffected — it ignores `config.webpack` and resolves Node built-ins
  *   natively.
  * - An empty `turbopack: {}` when none is set, so Next 16 does not reject
- *   the config for setting `webpack` without a companion `turbopack` key
- *   (DISC-1256).
+ *   the config for setting `webpack` without a companion `turbopack` key.
  * - A `webpack` hook that collects and uploads `.map` files on client-side
  *   production builds.
  *
@@ -216,7 +215,7 @@ function ensureServerExternal(config: Record<string, unknown>): void {
  *   The return type mirrors the input type so that caller-side config
  *   properties are preserved. The `object` constraint (rather than
  *   `Record<string, unknown>`) is what makes the wrapper accept Next's
- *   real `NextConfig` interface (DISC-1256).
+ *   real `NextConfig` interface.
  */
 export function withGlasstraceConfig<T extends NextConfig>(nextConfig: T): T {
   // Guard: config wrapper requires Node.js for source map instrumentation.

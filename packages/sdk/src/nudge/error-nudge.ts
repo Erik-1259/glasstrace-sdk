@@ -8,7 +8,7 @@ let hasFired = false;
 
 /**
  * Module-level flag ensuring the Server Action nudge fires at most once
- * per process (DISC-1253).
+ * per process.
  */
 let hasFiredServerAction = false;
 
@@ -88,7 +88,7 @@ export function maybeShowMcpNudge(errorSummary: string): void {
  * Action trace whose originating request had no Glasstrace browser
  * extension correlation header (`x-gt-cid`) — meaning the extension was
  * not active for that request and the specific Server Action identifier
- * could not be captured (DISC-1253).
+ * could not be captured.
  *
  * The nudge is suppressed when:
  * - It has already fired in this process

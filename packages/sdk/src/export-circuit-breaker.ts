@@ -1,5 +1,5 @@
 /**
- * Export-Path Circuit Breaker (DISC-1568 / Wave 15C-impl)
+ * Export-Path Circuit Breaker
  *
  * Three-state machine — CLOSED → OPEN → HALF_OPEN — that bounds wasted
  * traffic from the OTLP export path when the backend is rejecting
@@ -267,7 +267,7 @@ function readStatus(info: ExportFailureInfo): number | undefined {
 
 /**
  * Builds a fixed-template, PII-safe summary string for the
- * `otel:circuit_opened` payload. Mirrors the DISC-1556 `otel:failed`
+ * `otel:circuit_opened` payload. Mirrors the `otel:failed`
  * contract: no URLs, no headers, no payload bodies — only the closed
  * category enum and the consecutive-failure count.
  */

@@ -4,15 +4,15 @@ import type { DetectedAgent } from "./detect.js";
 
 /**
  * HTML start-marker regex used in markdown files (.md). Matches both
- * legacy unstamped markers (pre-SDK-050) and stamped markers (SDK-050+).
+ * legacy unstamped markers and version-stamped markers.
  *
  * Two shapes:
  *   - Legacy: `<!-- glasstrace:mcp:start -->`
  *   - Stamped: `<!-- glasstrace:mcp:start v=1.4.0 -->`
  *
- * The optional `v=<semver>` capture group is the SDK-050 version stamp
- * (DISC-1592 Required Semantics Item 1). Recognising the legacy form is
- * load-bearing for the SDK-050 backward-compatibility constraint: an
+ * The optional `v=<semver>` capture group is the version stamp.
+ * Recognising the legacy form is
+ * load-bearing for the backward-compatibility constraint: an
  * upgrading user's first re-render must replace the existing block in
  * place rather than appending a duplicate. Subsequent re-renders write
  * the stamped form.
@@ -39,7 +39,7 @@ const HASH_END = "# glasstrace:mcp:end";
 /**
  * Parsed start marker — its kind (HTML vs hash) and, when present, the
  * `v=<sdkVersion>` stamp. `stamp === null` means the marker matched the
- * legacy unstamped form (pre-SDK-050).
+ * legacy unstamped form.
  */
 export interface ParsedStartMarker {
   kind: "html" | "hash";
@@ -49,8 +49,8 @@ export interface ParsedStartMarker {
 /**
  * Parses a single line as a Glasstrace start marker.
  *
- * Accepts both legacy unstamped markers (pre-SDK-050) and stamped
- * markers (SDK-050+). Returns `null` if the line is not a start
+ * Accepts both legacy unstamped markers and version-stamped
+ * markers. Returns `null` if the line is not a start
  * marker. Trims whitespace before matching so leading/trailing spaces
  * in user-edited files do not defeat detection.
  *
@@ -161,8 +161,8 @@ export async function writeMcpConfig(
 /**
  * Finds existing marker boundaries in file content.
  *
- * Recognises both the legacy unstamped marker form (pre-SDK-050) and
- * the stamped form (SDK-050+) for both HTML-comment and hash-prefix
+ * Recognises both the legacy unstamped marker form and
+ * the version-stamped form for both HTML-comment and hash-prefix
  * conventions. Returns the start and end line indices, or `null` if no
  * complete marker pair is found. The `v=<sdkVersion>` stamp itself is
  * only inspected by the upgrade-notice module via
@@ -172,7 +172,7 @@ export async function writeMcpConfig(
  * When multiple start markers appear before the first end marker
  * (e.g. a quoted example of the marker shape earlier in the file
  * followed by the real managed block), the boundary anchors to the
- * MOST RECENT start preceding the end. This matches the pre-SDK-050
+ * MOST RECENT start preceding the end. This matches the legacy
  * behaviour of `findMarkerBoundaries` and avoids the "swallow the
  * user's example into the replacement" failure mode that anchoring
  * to the FIRST start would produce.
@@ -204,9 +204,9 @@ export function findMarkerBoundaries(
  * - If the file does not exist, creates it with the section content.
  *
  * The boundary detector recognises both legacy unstamped markers
- * (pre-SDK-050) and stamped markers, so an upgrading user's first
+ * and version-stamped markers, so an upgrading user's first
  * re-render replaces the existing block in place rather than
- * appending a duplicate (DISC-1592 / SDK-050 backward-compatibility
+ * appending a duplicate (the backward-compatibility
  * constraint). Subsequent re-renders write the stamped form.
  *
  * Fails gracefully: logs a warning to stderr on read-only files instead
@@ -302,7 +302,7 @@ export async function injectInfoSection(
 /**
  * Returns true when the file at `filePath` contains a complete
  * Glasstrace managed section (marker pair). Matches both legacy
- * unstamped markers and SDK-050+ stamped markers. Used by the
+ * unstamped markers and version-stamped markers. Used by the
  * upgrade-instructions CLI to decide which detected agent files
  * actually have a managed section to refresh.
  *

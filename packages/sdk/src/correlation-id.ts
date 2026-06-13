@@ -41,8 +41,7 @@ export interface CorrelationIdRequest {
 /**
  * Captures the Glasstrace correlation ID header (`x-gt-cid`) from an
  * incoming request and materializes it as the
- * `glasstrace.correlation.id` attribute on the currently active OTel span
- * (DISC-1253).
+ * `glasstrace.correlation.id` attribute on the currently active OTel span.
  *
  * The SDK does not own any HTTP instrumentation, so it cannot read this
  * header itself. Users opt in by calling this helper from a hook that
@@ -135,7 +134,7 @@ function readHeader(
  * times — `x-gt-cid: cid1, x-gt-cid: cid2` may surface as the single
  * string `"cid1, cid2"` via `Headers.get()` or `IncomingMessage.headers`.
  * Storing that raw merged value would both fail correlation and
- * silently suppress the DISC-1253 Server Action nudge (which only
+ * silently suppress the Server Action nudge (which only
  * checks attribute presence, not validity). We split on commas and
  * keep the first non-empty token.
  */

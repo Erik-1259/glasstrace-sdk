@@ -26,7 +26,7 @@
  * field across `.use()` chains) continues to flow through.
  *
  * Compatibility with the existing `glasstrace.trpc.procedure` URL-derived
- * attribute (DISC-1215, shipped) is by construction: that attribute is
+ * attribute is by construction: that attribute is
  * attached to the **parent** HTTP span at exporter time, never to a
  * middleware child span. Middleware spans only carry `trpc.path` and
  * `trpc.type` (forwarded from the middleware options) plus whatever
@@ -115,7 +115,7 @@ export interface TracedMiddlewareOptions {
    * or other sensitive data in `attributes`.
    *
    * Sensitive request/response data is captured through the gated
-   * `glasstrace.error.response_body` path (see DISC-1216), not through
+   * `glasstrace.error.response_body` path, not through
    * this surface.
    */
   attributes?: Record<string, AttributeValue>;

@@ -116,7 +116,7 @@ export function _resetHeartbeatForTesting(): void {
 /**
  * Checks for the presence of the `.glasstrace/shutdown-requested` marker
  * file and, if present, triggers the lifecycle shutdown coordinator and
- * removes the marker (DISC-1247 Scenario 1).
+ * removes the marker.
  *
  * Returns `true` when the marker was found and the shutdown coordinator
  * was scheduled, `false` otherwise. The marker is removed synchronously
@@ -132,7 +132,7 @@ export function _resetHeartbeatForTesting(): void {
  * caller when desired.
  *
  * Self-contained so it can be called from either the heartbeat tick
- * (current location) or a dedicated lifecycle hook after DISC-1248 lands.
+ * (current location) or a dedicated lifecycle hook in the future.
  *
  * @param projectRoot - Optional project root; defaults to `process.cwd()`.
  * @returns An object describing the outcome. When `triggered` is true,

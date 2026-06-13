@@ -134,7 +134,7 @@ export default withGlasstraceConfig({ reactStrictMode: true });
   `node:*` and bare Node built-ins (`fs`, `path`, `child_process`,
   `zlib`, etc.) are marked as `commonjs` externals. This is the
   authoritative fix for `next dev --webpack` `UnhandledSchemeError`
-  failures on the instrumentation path (DISC-1257).
+  failures on the instrumentation path.
 
 Monorepo users editing a forked `@glasstrace/sdk` as a workspace dep and
 wanting live HMR of SDK source should remove `@glasstrace/sdk` from

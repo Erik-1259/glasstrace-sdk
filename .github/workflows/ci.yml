@@ -7,8 +7,17 @@ on:
     # package-lock changes always trigger. The check runs at workflow
     # level — if ALL paths in the diff match one of the ignored
     # patterns, the workflow is skipped entirely.
+    #
+    # IMPORTANT: the published per-package READMEs
+    # (`packages/*/README.md`) are deliberately NOT ignored. They ship to
+    # npm consumers, and the "Check published surfaces for internal IDs"
+    # step is the guard against leaking internal tracking identifiers onto
+    # those pages. Ignoring all `*.md` would let a README-only change skip
+    # CI entirely and bypass that guard. The negated patterns below carve
+    # the published READMEs back out of the markdown ignore.
     paths-ignore:
       - "**/*.md"
+      - "!packages/*/README.md"
       - "LICENSE"
       - ".gitignore"
       - ".github/ISSUE_TEMPLATE/**"
@@ -17,6 +26,7 @@ on:
     branches: [main]
     paths-ignore:
       - "**/*.md"
+      - "!packages/*/README.md"
       - "LICENSE"
       - ".gitignore"
       - ".github/ISSUE_TEMPLATE/**"
@@ -83,6 +93,15 @@ jobs:
       # them in CI.
       - name: Build
         run: npm run build
+
+      # Public-surface guard: no internal tracking identifier may appear
+      # in README.md or in the generated `.d.ts` / `.d.cts` files that
+      # ship to consumers (exported JSDoc propagates into declarations and
+      # surfaces in editor tooltips). Runs after Build so the declaration
+      # files exist. The same scanner is mirrored by a unit test in the
+      # Test step below, so the rule is enforced in the local gate too.
+      - name: Check published surfaces for internal IDs
+        run: npm run check:no-internal-ids
 
       - name: Test
         run: npm run test

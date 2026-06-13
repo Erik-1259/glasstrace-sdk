@@ -10,7 +10,7 @@
  * `glasstrace.causal.middleware_for_request` causal-evidence attribute
  * carrying the originating request's normalized path so the
  * product-side trace-summary transform can link the middleware span
- * to the owning HTTP request trace (DISC-1537 / SDK-046).
+ * to the owning HTTP request trace.
  *
  * Edge-runtime safety
  * -------------------
@@ -34,8 +34,8 @@
  *      causality works in both Node and Edge runtimes; a Link would
  *      degrade to a no-op (no parent context) on Edge.
  *   2. The product-side trace-summary transform reconstructs
- *      ownership from `glasstrace.causal.*` attributes per
- *      DISC-1539 §51-58; it does not require a Link.
+ *      ownership from `glasstrace.causal.*` attributes; it does not
+ *      require a Link.
  *
  * Invariants
  * ----------
@@ -176,9 +176,9 @@ export interface TracedRequestMiddlewareOptions {
  *      discarded — only the path is used).
  *   3. `undefined` — when neither field exists or both fail to
  *      parse, the wrapper omits the causal attribute rather than
- *      emitting a guessed value, per the SDK-046 product brief's
+ *      emitting a guessed value, following the SDK's
  *      "missing or unknown evidence is preferable to guessed
- *      evidence" rule (DISC-1537 / DISC-1539 product handoff).
+ *      evidence" rule.
  *
  * This function never throws.
  */

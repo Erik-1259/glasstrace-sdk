@@ -7,11 +7,11 @@
  * `module`, etc.) or `@vercel/blob`. This is the Node-only surface of
  * the SDK.
  *
- * The classification was produced by the reconnaissance artifact for
- * SDK-028 (per-symbol esbuild probes). This file, plus `edge-entry.ts`,
+ * The classification was produced by a per-symbol esbuild-probe
+ * reconnaissance pass. This file, plus `edge-entry.ts`,
  * partitions the root barrel into two runtime-scoped views. The root
- * barrel (`index.ts`) remains unchanged in this brief — SDK-029
- * narrows it; SDK-030 wires the subpath exports map.
+ * barrel (`index.ts`) is narrowed separately; a follow-up wires the
+ * subpath exports map.
  *
  * Consumers do **not** import this file directly yet — `package.json`
  * `exports` still points every consumer at `./dist/index.js`.

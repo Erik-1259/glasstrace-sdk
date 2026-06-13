@@ -68,7 +68,7 @@ export interface InitOptions {
    * MCP configuration files without prompting. Preservation of the
    * anonymous key, config cache, and developer API key still applies
    * regardless of this flag — `--force` only affects the MCP diff
-   * prompt (DISC-1247 Scenario 2c). Defaults to `false`.
+   * prompt. Defaults to `false`.
    */
   force?: boolean;
 }
@@ -188,8 +188,8 @@ interface RollbackState {
   /**
    * Absolute path of the instrumentation file that the scaffolder
    * wrote to. May be either `{root}/instrumentation.ts` or
-   * `{root}/src/instrumentation.ts` depending on the project layout
-   * (DISC-493 Issue 1). When absent, rollback falls back to the
+   * `{root}/src/instrumentation.ts` depending on the project layout.
+   * When absent, rollback falls back to the
    * root path for backward compatibility with callers that do not
    * populate this field.
    */
@@ -1106,7 +1106,7 @@ export type VerifyAnonKeyOutcome =
  * server-side. Called at the end of the scaffold flow so that when it
  * fails, the user sees an actionable error rather than a misleading
  * "initialized successfully" followed by silent MCP authentication
- * failures (DISC-494).
+ * failures.
  *
  * Returns a discriminated outcome so the CLI can distinguish a genuine
  * verification pass from the "no anon key on disk" skip case. On
@@ -1258,8 +1258,8 @@ const isDirectExecution =
 
 /**
  * Detect a help invocation. Help flags short-circuit before any
- * subcommand routing so help invocations never run mutating code paths
- * (DISC-1566). Accepts the argv slice from the second positional onward
+ * subcommand routing so help invocations never run mutating code paths.
+ * Accepts the argv slice from the second positional onward
  * (i.e., `process.argv.slice(2)`).
  *
  * The check is presence-based on `--help` or `-h` anywhere in the slice.

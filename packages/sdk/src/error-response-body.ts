@@ -1,5 +1,5 @@
 /**
- * Helpers for the `glasstrace.error.response_body` span attribute (DISC-1216).
+ * Helpers for the `glasstrace.error.response_body` span attribute.
  *
  * The exporter promotes an internal `glasstrace.internal.response_body`
  * attribute to the public `glasstrace.error.response_body` attribute when
@@ -25,7 +25,7 @@
  *     turn a JSON `password` field into `[REDACTED]` are acceptable; false
  *     negatives that leak a token are not.
  *
- * @drift-check DISC-1216 (Phase 2 — sanitize, status-gate, raise truncation cap).
+ * Phase 2 behavior: sanitize, status-gate, raise the truncation cap.
  */
 
 /**
@@ -77,7 +77,7 @@ export const ERROR_STATUS_MAX = 599;
  * `glasstrace.http.status_code` wire attribute (which downstream
  * ingestion expects to be numeric) and (b) fail the
  * `statusCode === 200` comparison that the Next.js timing-race
- * inference block (DISC-1134, DISC-1204) relies on. This helper closes
+ * inference block relies on. This helper closes
  * both gaps at the read site.
  *
  * Postel's Law: be liberal in what we accept. The behavior is identical

@@ -8,8 +8,7 @@
  * **Why structural rather than constructor-name based:** Next.js 16's
  * production bundler/minifier renames `@opentelemetry/api`'s
  * `ProxyTracerProvider` and `ProxyTracer` classes to short identifiers
- * (`eN` / `ew` / `ek` / `e_` in the wild — see DISC-1556 recon at
- * `/tmp/recon-option-A-DISC-1556.md`). A constructor-name comparison
+ * (`eN` / `ew` / `ek` / `e_` in the wild). A constructor-name comparison
  * (`probeTracer.constructor.name !== "ProxyTracer"`) therefore returns
  * `true` against the SDK's own bundled proxy, the SDK incorrectly
  * concludes that an external provider is registered, and the

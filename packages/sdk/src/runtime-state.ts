@@ -6,7 +6,6 @@
  * state without a live process connection.
  *
  * Design: sdk-lifecycle.md Section 14 (Runtime State File)
- * Task brief: SDK-026
  */
 
 import {
@@ -62,7 +61,7 @@ export interface RuntimeState {
    * Currently emitted by the OTel coexistence path when
    * `tryAutoAttachGlasstraceProcessor` returns `null` under a non-
    * inert pre-registered provider (the Next 16 production failure
-   * mode tracked in DISC-1556). Additional structured failures may
+   * mode). Additional structured failures may
    * extend the `category` enum in future revisions.
    *
    * **PII-safety constraint (load-bearing):** populated values must
@@ -87,12 +86,12 @@ export interface RuntimeStateLastError {
    *
    * - `"auto-attach-returned-null"`: the OTel coexistence path detected
    *   a pre-registered provider but could not inject the Glasstrace
-   *   span processor (DISC-1556). Spans flowing through the existing
+   *   span processor. Spans flowing through the existing
    *   provider will not reach the Glasstrace exporter; the documented
    *   manual `createGlasstraceSpanProcessor()` workaround applies.
    * - `"export-circuit-open"`: the export-path circuit breaker tripped
    *   after {@link FAILURE_THRESHOLD} consecutive non-success export
-   *   results (DISC-1568 / Wave 15C). Spans are dropped via
+   *   results. Spans are dropped via
    *   `recordSpansDropped` until the next probe succeeds or
    *   credentials rotate. The `exportCircuitCategory` field
    *   disambiguates the underlying failure class (auth, rate_limit,
@@ -115,7 +114,7 @@ export interface RuntimeStateLastError {
   providerClass?: string;
   /**
    * Failure category that tripped the export-path circuit when
-   * `category === "export-circuit-open"` (DISC-1568). Closed enum;
+   * `category === "export-circuit-open"`. Closed enum;
    * extending the set is non-breaking, removing or renaming a member
    * is a public-contract change because CLI consumers may render the
    * value verbatim.
@@ -154,7 +153,7 @@ let _started = false;
  * listeners. When the probe fails — for example, when the SDK is loaded as
  * an ESM module under a Next.js dev/start server, where tsup's bundled
  * `__require` shim cannot resolve `require("node:fs")` from an ESM scope
- * (DISC-1555) — registration is skipped silently. The runtime-state file
+ * — registration is skipped silently. The runtime-state file
  * is a best-effort CLI bridge; trace capture continues unaffected. A
  * later `npx @glasstrace/sdk status` call falls back to its existing
  * "no runtime state available" path, matching the behavior on a project
