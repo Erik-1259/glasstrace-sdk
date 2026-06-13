@@ -432,7 +432,20 @@ export class GlasstraceExporter implements SpanExporter {
         );
       }
 
-      if (method && statusNotExplicitlyOK && (isErrorByStatus || isErrorByEvent || isErrorByAttrs)) {
+      // Gate on SpanKind.SERVER. A boundary-masked HTTP *response* status
+      // belongs to an inbound request span. OTel CLIENT spans (outbound
+      // fetch, DB-over-HTTP, the SDK's own OTLP export POST) also carry
+      // `http.method`, and a failed outbound request typically has an
+      // exception event / ERROR status with no/200 status — without this
+      // gate it would be wrongly promoted to a 500 + boundary_masked,
+      // surfacing as a spurious error trace. Mirrors the explicit
+      // `span.kind === SpanKind.CLIENT` gate on the fetch-target
+      // classifier below. SERVER (not `!== CLIENT`) is correct here:
+      // the only inbound request spans carrying `http.method` in this
+      // stack (`@opentelemetry/instrumentation-http` incoming, Next.js
+      // request spans) are SERVER kind, so narrowing to SERVER fixes the
+      // false positive without losing any legitimate promotion.
+      if (method && span.kind === SpanKind.SERVER && statusNotExplicitlyOK && (isErrorByStatus || isErrorByEvent || isErrorByAttrs)) {
         if (statusCode === undefined || statusCode === 0 || statusCode === 200) {
           const httpErrorType = attrs["error.type"];
           if (typeof httpErrorType === "string") {

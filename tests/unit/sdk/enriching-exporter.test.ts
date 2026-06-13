@@ -1945,6 +1945,61 @@ describe("GlasstraceExporter", () => {
       expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
     });
 
+    it("does NOT promote a failed CLIENT span (outbound fetch with http.method + exception)", () => {
+      // SpanKind gate: outbound HTTP CLIENT spans (fetch, DB-over-HTTP,
+      // the SDK's own OTLP export POST) also carry `http.method`. A
+      // failed outbound request typically has an exception event / ERROR
+      // status and an undefined/200 status — without the SpanKind gate
+      // it would be wrongly promoted to a 500 + boundary_masked and
+      // surface as a spurious error trace. The boundary-masked heuristic
+      // describes a masked HTTP *response* status, which belongs to an
+      // inbound server span, so CLIENT spans must be left untouched.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "HTTP POST",
+        kind: SpanKind.CLIENT,
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "POST",
+          "http.url": "https://api.stripe.com/v1/charges",
+          // no http.status_code (connection failed before a response)
+        },
+        events: [createExceptionEvent("FetchError", "ECONNREFUSED")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBeUndefined();
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+    });
+
+    it("still promotes a failed SERVER span in the same scenario (no regression)", () => {
+      // Regression guard for the existing heuristic: an inbound request
+      // SERVER span with the identical error signals must still be
+      // promoted to 500 + boundary_masked. This pins that the SpanKind
+      // gate narrows only the CLIENT false positive and does not weaken
+      // the legitimate server-span promotion.
+      const { exporter, delegate } = createExporter();
+      const span = createMockSpan({
+        name: "POST /api/checkout",
+        kind: SpanKind.SERVER,
+        status: { code: SpanStatusCode.ERROR },
+        attributes: {
+          "http.method": "POST",
+          "http.url": "https://app.example.com/api/checkout",
+          // no http.status_code
+        },
+        events: [createExceptionEvent("FetchError", "ECONNREFUSED")],
+      });
+
+      exporter.export([span], vi.fn());
+
+      const enriched = delegate.exportedSpans[0][0];
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBe(true);
+    });
+
     it("emits core:error_boundary_detected lifecycle event when the heuristic fires", async () => {
       // Lifecycle event payload contract — informational; downstream
       // tooling MAY consume this for activation-rate dashboards. The
