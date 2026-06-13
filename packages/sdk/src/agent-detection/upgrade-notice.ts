@@ -3,14 +3,14 @@ import * as path from "node:path";
 import { isEndMarkerLine, parseStartMarkerLine } from "./inject.js";
 
 /**
- * SDK-050 / DISC-1592 stale-managed-section warning.
+ * Stale-managed-section warning.
  *
  * Detects a project whose agent instruction file (CLAUDE.md /
  * .cursorrules / codex.md) was rendered by an older `@glasstrace/sdk`
  * and emits a single stderr warning at SDK init pointing the user at
  * the upgrade command.
  *
- * Constraints (from SDK-050 Required Semantics §2 Item 3):
+ * Constraints:
  *   - Stderr only; never stdout. Must not affect tracing behaviour.
  *   - At most once per process boot, even when `registerGlasstrace()`
  *     is invoked more than once in the same process (test runners,
@@ -28,8 +28,8 @@ import { isEndMarkerLine, parseStartMarkerLine } from "./inject.js";
  *     (defends against terminal-escape-sequence injection via a
  *     hand-edited stamp).
  *
- * Only stamped sections (SDK-050+) participate. Legacy unstamped
- * sections (pre-SDK-050) trigger no warning by spec — those users
+ * Only version-stamped sections participate. Legacy unstamped
+ * sections trigger no warning by spec — those users
  * receive the upgraded text on their next `npx glasstrace mcp add`
  * or `npx glasstrace upgrade-instructions` run.
  */
@@ -43,8 +43,8 @@ let warningEmitted = false;
 
 /**
  * Hardcoded set of agent instruction filenames to inspect, relative
- * to the supplied project root. Wave 18 (DISC-1782) expanded the
- * canonical set to follow the 2026 cross-tool standard:
+ * to the supplied project root. The canonical set follows the 2026
+ * cross-tool standard:
  *
  *   - `AGENTS.md`: universal cross-tool fallback (canonical 2026)
  *   - `CLAUDE.md`: Claude Code primary (canonical, unchanged)
@@ -53,10 +53,10 @@ let warningEmitted = false;
  *   - `.windsurf/rules/glasstrace.md`: Windsurf workspace-rules
  *     directory (canonical 2026)
  *   - `.cursorrules`: Cursor legacy single-file (still scanned to
- *     surface stale sections from pre-Wave-18 installs; written
- *     unconditionally as a transitional fallback per DISC-1782)
+ *     surface stale sections from older installs; written
+ *     unconditionally as a transitional fallback)
  *   - `codex.md`: Codex legacy (no longer the canonical destination;
- *     scanned to surface stale sections from pre-Wave-18 installs)
+ *     scanned to surface stale sections from older installs)
  *   - `.windsurfrules`: Windsurf legacy single-file (no longer
  *     written by the SDK; scanned for the same stale-section reason)
  *
@@ -82,8 +82,7 @@ const AGENT_INSTRUCTION_FILES = [
  * precedence — then extracts MAJOR / MINOR / PATCH and an optional
  * dot-separated prerelease tail. Returns null when the input is not
  * a valid semver, which the caller maps to "stamp present but
- * unknown" (DISC-1592 Required Semantics Item 1 future-format
- * tolerance).
+ * unknown" (future-format tolerance).
  */
 interface ParsedSemver {
   major: number;
@@ -144,7 +143,7 @@ function comparePrerelease(a: string, b: string): number {
  * positive when `a > b`, zero when equal, or null when either input
  * is not a parseable semver. The null return is what implements the
  * "stamp present but unknown — skip the stale-warning rather than
- * crash" tolerance from SDK-050.
+ * crash" tolerance.
  */
 export function compareSemver(a: string, b: string): number | null {
   const pa = parseSemver(a);
@@ -174,8 +173,8 @@ function isOptedOut(): boolean {
 }
 
 /**
- * Optional heuristic suppression in non-interactive CI runs (per
- * SDK-050 Required Semantics §2 Item 3). The brief allows — but does
+ * Optional heuristic suppression in non-interactive CI runs. The
+ * design allows — but does
  * not require — suppressing the warning when stderr is not a TTY AND
  * `CI=true` is set in the environment. The combination indicates an
  * automated build (`next build` evaluating `instrumentation.ts`,

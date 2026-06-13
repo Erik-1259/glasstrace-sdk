@@ -137,7 +137,7 @@ export function _resetContextManagerForTesting(): void {
  *
  * This MUST be called synchronously before any spans are created —
  * otherwise, spans created before registration have no parent context
- * and each gets a fresh traceId (DISC-1183).
+ * and each gets a fresh traceId.
  *
  * Uses a static import of `node:async_hooks` (synchronous, no race
  * condition). This means the module cannot be evaluated in non-Node
@@ -146,7 +146,7 @@ export function _resetContextManagerForTesting(): void {
  * flag in package.json (browser bundlers tree-shake it) and the browser
  * import check CI step externalizes `async_hooks`.
  *
- * **Idempotency contract (DISC-1310).** Construction is idempotent
+ * **Idempotency contract.** Construction is idempotent
  * across module re-evaluations within a single V8 isolate. The first
  * successful call records the installed `ContextManager` instance
  * under `globalThis[Symbol.for("glasstrace.context-manager.installed")]`;
@@ -155,7 +155,7 @@ export function _resetContextManagerForTesting(): void {
  * recorded instance and return without constructing a fresh
  * `AsyncLocalStorage`, **so long as OTel's global slot still holds
  * that same manager instance**. This guard prevents unbounded
- * `AsyncLocalStorage` accumulation under Turbopack HMR (DISC-1310)
+ * `AsyncLocalStorage` accumulation under Turbopack HMR
  * while still allowing recovery if an external caller has run
  * `otelApi.context.disable()` or replaced the manager underneath us.
  *

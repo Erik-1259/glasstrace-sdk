@@ -1,16 +1,16 @@
 /**
- * Side-effect evidence allowlist enforcement (SDK-049).
+ * Side-effect evidence allowlist enforcement.
  *
  * Two enforcement layers, both pure functions with no I/O. The SDK
  * runs these before any `glasstrace.side_effect.*` attribute is
- * attached to a span; the product's storage filter (ING-023) is a
- * second defense, not the primary boundary. A value rejected here
+ * attached to a span; the receiver's storage filter is a second
+ * defense, not the primary boundary. A value rejected here
  * never reaches the OTel exporter, so it cannot leak through any
  * downstream telemetry path.
  *
  * Layer 1 (input shape):
  *  - Reject non-string scalars where strings are required.
- *  - Reject lengths exceeding the SCHEMA-036 budgets
+ *  - Reject lengths exceeding the wire-schema budgets
  *    (operation label > 96 chars, field value > 80 chars) ⇒
  *    `value_too_long`.
  *  - Reject unsafe-pattern matches (URL, email, headers, tokens,
@@ -96,7 +96,7 @@ const OMISSION_REASON_SET: ReadonlySet<string> = new Set(
 );
 
 /**
- * Returns `true` when `reason` is one of the SCHEMA-036 omission
+ * Returns `true` when `reason` is one of the wire-schema omission
  * reasons. Exposed for tests and any future caller that needs to
  * narrow an arbitrary string to a `SideEffectOmissionReason` before
  * passing it to the emission helpers; the SDK's own emission path
@@ -114,11 +114,11 @@ export function isKnownOmissionReason(
 // (rather than this regex's anchor failure being mis-categorized).
 const TOKEN_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
 
-// BCP-47-shaped locale, mirroring SCHEMA-036's
+// BCP-47-shaped locale, mirroring the wire schema's
 // SideEffectLocaleValueSchema regex.
 const LOCALE_REGEX = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/;
 
-// IANA-shaped timezone, mirroring SCHEMA-036's
+// IANA-shaped timezone, mirroring the wire schema's
 // SideEffectTimezoneValueSchema regex.
 const TIMEZONE_REGEX =
   /^(?:UTC|GMT|[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+){1,3})$/;
@@ -181,7 +181,7 @@ function detectUnsafePattern(value: string): SideEffectOmissionReason | null {
   // URL-shape detectors run first so a credential-bearing query
   // string is categorized by its structural shape (raw_payload)
   // rather than the credential token inside it. The product's
-  // SCHEMA-036 filter rejects URL shapes regardless of category, so
+  // The wire-schema filter rejects URL shapes regardless of category, so
   // either choice is safe; the test fixture documents that URL-shape
   // wins.
   if (URL_SCHEME.test(value)) return "raw_payload";
@@ -475,7 +475,7 @@ export function checkOperationKind(
  * Returns `true` when `status` is one of the v1 allowlisted operation
  * statuses. Distinct from the per-field `status` check because the
  * top-level operation status is enforced as an enum membership only —
- * no compact-token regex applies (the SCHEMA-036 enum is the
+ * no compact-token regex applies (the wire-schema enum is the
  * exhaustive accepted set).
  */
 export function checkOperationStatus(

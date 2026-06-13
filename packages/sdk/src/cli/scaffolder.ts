@@ -73,7 +73,7 @@ export interface ScaffoldInstrumentationResult {
 export interface ScaffoldInstrumentationOptions {
   /**
    * When `true`, skip the merge-confirmation prompt and write changes
-   * without asking. Matches the DISC-1247 Scenario 2c `--force` behavior
+   * without asking. Matches the `--force` behavior
    * already used for MCP config overwrites. Defaults to `false`.
    */
   force?: boolean;
@@ -200,8 +200,7 @@ const INSTRUMENTATION_FILENAMES = [
  * conflict, `target` identifies the file the scaffolder should create or
  * merge into. When both root and `src/` variants already exist, `target`
  * is `null` and both detected paths are returned so the caller can surface
- * a clear error — Next.js's loader behavior is undefined in that state
- * (DISC-493 Issue 1).
+ * a clear error — Next.js's loader behavior is undefined in that state.
  */
 export interface InstrumentationTarget {
   /** Absolute path of the chosen file, or null when a conflict exists. */
@@ -242,7 +241,7 @@ export interface InstrumentationTarget {
  * picks the instrumentation file path the scaffolder should create or
  * merge into.
  *
- * Selection rules (DISC-493 Issue 1):
+ * Selection rules:
  *
  * 1. Prefer an existing file. If `src/instrumentation.{ts,js,mjs}` exists,
  *    it wins; otherwise the root variant wins. This preserves user intent
@@ -447,7 +446,7 @@ async function defaultInstrumentationPrompt(
  * Ensures an instrumentation file exists and contains a `registerGlasstrace()`
  * call, merging into the user's existing file rather than overwriting it.
  *
- * Behavior (DISC-493 Issue 1):
+ * Behavior:
  *
  * - Detects `src/`-layout projects via {@link resolveInstrumentationTarget}
  *   and targets `src/instrumentation.ts` instead of the root when a `src/`
@@ -465,7 +464,7 @@ async function defaultInstrumentationPrompt(
  *     Sentry / Datadog / custom-instrumentation case where `register()`
  *     hasn't been created yet.
  *   - Before either mutation, prompts the user unless `force: true` is
- *     passed (DISC-1247 Scenario 2c re-init safety).
+ *     passed (re-init safety).
  * - When the target already contains `registerGlasstrace()`, returns
  *   `action: "already-registered"` (idempotent).
  *
@@ -707,7 +706,7 @@ export function wrapCJSExport(content: string): WrapResult {
  * Creates `.env.local` with `GLASSTRACE_API_KEY=` placeholder, or appends
  * to an existing file if it does not already contain `GLASSTRACE_API_KEY`.
  *
- * Preservation behavior (DISC-1247 Scenario 6): if an existing `.env.local`
+ * Preservation behavior: if an existing `.env.local`
  * already defines a developer key (`gt_dev_*`), the file is left untouched
  * so re-running `init` after an account claim does not overwrite the
  * claimed dev key.

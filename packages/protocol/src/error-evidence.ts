@@ -1,5 +1,5 @@
 /**
- * Error evidence value-enum constants (SDK-041 / DISC-1535).
+ * Error evidence value-enum constants.
  *
  * Companion to the new `glasstrace.error.*` attribute keys in
  * `constants.ts`. The runtime `as const` tuples are the source of

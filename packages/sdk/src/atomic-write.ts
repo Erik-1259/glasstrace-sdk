@@ -20,8 +20,8 @@
  *      (the kernel acknowledges the syscall but the metadata never
  *      reached durable storage).
  *
- * Closes the durability gap that allowed DISC-494 (anon-key unlinked
- * silently on re-init under crash interleavings).
+ * Closes a durability gap where an anonymous key could be unlinked
+ * silently on re-init under crash interleavings.
  *
  * Out-of-scope by design:
  *   - The `lstat → tmp → rename → re-lstat` TOCTOU re-check (spec
@@ -554,7 +554,7 @@ export function writeAndFsyncTempSync(
  *
  * Background: tsup's bundled `__require` shim throws "Dynamic require
  * of \"node:fs\" is not supported" when the SDK is loaded as an ESM
- * module from a host like Next.js (DISC-1555). The runtime is a real
+ * module from a host like Next.js. The runtime is a real
  * Node process — it just lacks a working synchronous `require()`
  * binding in the ESM scope. Async helpers are unaffected because
  * `await import("node:fs/promises")` is ESM-native.

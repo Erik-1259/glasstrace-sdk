@@ -20,7 +20,8 @@
     "build": "turbo run build",
     "test": "vitest run",
     "typecheck": "tsc -b",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "check:no-internal-ids": "node scripts/check-no-internal-ids.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",

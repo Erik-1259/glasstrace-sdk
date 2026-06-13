@@ -3,8 +3,7 @@
  * inspects incoming tRPC batch URLs and sets a request-scoped
  * batch envelope so `tracedMiddleware` can label each member span
  * with `glasstrace.trpc.batch.member_index` /
- * `glasstrace.trpc.batch.member_procedures` (SDK-052 / Wave 16B,
- * advances DISC-1534 SDK-side slice).
+ * `glasstrace.trpc.batch.member_procedures`.
  *
  * **Opt-in design (v1):** the wrapper is a separate exported helper
  * that apps wire into their tRPC handler explicitly. Apps NOT using
@@ -41,7 +40,7 @@ export interface WrapBatchedHttpHandlerOptions {
    * `/api/v2/trpc/`) MUST pass their actual base path here — the
    * wrapper does NOT auto-detect to avoid both false matches
    * (unrelated routes containing `trpc`) and missed matches (custom
-   * mounts). Per DISC-1215, the tRPC base path is configurable on
+   * mounts). The tRPC base path is configurable on
    * the user side; this option propagates that decision.
    *
    * Callers MAY supply the path with or without a trailing `/` —

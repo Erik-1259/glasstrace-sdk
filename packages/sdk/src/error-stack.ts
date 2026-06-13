@@ -1,5 +1,5 @@
 /**
- * Helpers for the `glasstrace.error.stack` span attribute (SDK-041 / DISC-1535).
+ * Helpers for the `glasstrace.error.stack` span attribute.
  *
  * The exporter promotes an OTel `exception.stacktrace` (read from a span
  * event or, as a fallback, a span attribute) to the public
@@ -34,8 +34,7 @@
  * Out of scope for v1:
  *   - Parsed `StackFrameSummary[]` structured attribute output. The
  *     v1 contract is bounded `exception.stacktrace` input for the
- *     product-side StackSummary parser (SCHEMA-033) per SDK-041
- *     Decision A.
+ *     product-side stack-summary parser.
  *   - Source-map resolution to original source paths. The SDK already
  *     emits the top user-relevant frame's source via
  *     `glasstrace.source.{file,line,mapped}` on `captureError()` span

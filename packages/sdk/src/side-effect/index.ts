@@ -1,5 +1,5 @@
 /**
- * Public side-effect evidence emission API (SDK-049).
+ * Public side-effect evidence emission API.
  *
  * Exposes {@link recordSideEffect} as a single user-callable function
  * that attaches allowlisted, non-sensitive semantic metadata about a
@@ -109,7 +109,7 @@ function maybeWarnNoActiveSpan(): void {
  * cap is reached, new keys are silently skipped — no warn, no map
  * growth. Existing keys in the cap continue to dedup correctly.
  * For the high-cardinality-producer scenario the proliferation warn
- * (DISC-1879, verbose-gated) is the operator-facing signal; this
+ * (verbose-gated) is the operator-facing signal; this
  * cap is just a memory bound.
  */
 const _casingWarnSeen = new Map<string, Set<string>>();
@@ -125,7 +125,7 @@ const _CASING_DEDUP_MAX_KEYS = 100;
 
 /**
  * Distinct pattern-admitted field keys observed this process,
- * excluding explicitly-mapped keys (stable-core + DISC-1853-era).
+ * excluding explicitly-mapped keys (stable-core or extended evidence).
  * Used as the input to the proliferation warn threshold check.
  */
 const _patternKeysSeen = new Set<string>();
@@ -175,7 +175,7 @@ function casingPattern(value: string): "uppercase" | "mixed" {
 }
 
 /**
- * DISC-1878 — warn once per (`*Class`/`*Role` key, casing-pattern)
+ * Warn once per (`*Class`/`*Role` key, casing-pattern)
  * pair when a value deviates from the lowercase-kebab convention.
  * Emission still succeeds; the warn surfaces producer-side
  * normalization opportunities. Warn message contains the key name
@@ -206,12 +206,12 @@ function maybeWarnMixedCasing(key: string, value: string): void {
 }
 
 /**
- * DISC-1879 — proliferation soft-cap. Counts distinct
+ * Proliferation soft-cap. Counts distinct
  * pattern-admitted keys (those without an explicit
  * `FIELD_ATTRIBUTE_BY_KEY` entry) seen this process. When verbose
  * is on and the count crosses `_PROLIFERATION_THRESHOLD`, emits a
  * one-shot warn naming the most-recent `_RECENT_KEYS_IN_WARN` keys.
- * Stable-core and DISC-1853-era keys never count.
+ * Stable-core and extended evidence keys never count.
  */
 function maybeWarnPatternKeyProliferation(key: string): void {
   if (!_verbose) return;
@@ -356,7 +356,7 @@ export interface RecordSideEffectOptions {
 
 /**
  * Record allowlisted side-effect evidence on the current active OTel
- * span (SDK-049).
+ * span.
  *
  * Behavior is observational only: this function never executes,
  * retries, or duplicates a side effect. The default capture-config
@@ -385,9 +385,9 @@ export interface RecordSideEffectOptions {
  *
  * The SDK guards only callers of this function. Direct
  * `span.setAttribute("glasstrace.side_effect.<...>", ...)` writes
- * bypass the SDK and rely on the product's storage filter (ING-023)
- * as the second defense layer; this is intentional defense-in-depth,
- * not a gap.
+ * bypass the SDK and rely on the receiver's storage filter as the
+ * second defense layer; this is intentional defense-in-depth, not a
+ * gap.
  *
  * @example Recording a successful cancellation email
  * ```ts

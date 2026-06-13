@@ -166,7 +166,7 @@ export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
  * fsynced last so the rename survives an immediate crash. `rename` is
  * atomic on POSIX filesystems, so readers either see the previous valid
  * config or the new valid config — never a truncated or partially-written
- * file (DISC-1247 Scenario 5). If any step fails, the temp file is
+ * file. If any step fails, the temp file is
  * cleaned up on a best-effort basis.
  */
 export async function saveCachedConfig(
@@ -217,7 +217,7 @@ export async function saveCachedConfig(
  *
  * Uses `node:https` via {@link httpsPostJson} rather than the global
  * `fetch` because Next.js 16 patches `fetch` for caching/revalidation
- * and can cause the init request to silently hang (DISC-493 Issue 3).
+ * and can cause the init request to silently hang.
  * Retries transport-level failures (DNS, TCP, TLS) twice with 500ms +
  * 1500ms backoff, capped at a 20-second total deadline. Server responses
  * (HTTP 4xx/5xx) are never retried and are surfaced immediately.
@@ -785,7 +785,7 @@ export type VerifyInitResult =
  * returns them.
  *
  * Used by the CLI `init` command to fail loudly when the init request
- * fails (DISC-493 Issue 3, DISC-494), rather than relying on the
+ * fails, rather than relying on the
  * runtime fire-and-forget call which can silently fail inside a
  * Next.js 16 process.
  *

@@ -117,18 +117,17 @@ export interface UpgradeInstructionsResult {
 
 /**
  * Refreshes the managed Glasstrace MCP section in every detected agent
- * instruction file in the project (DISC-1592 / SDK-050 §Required
- * Semantics Item 2). Idempotent and safe to re-run; the helper only
+ * instruction file in the project. Idempotent and safe to re-run; the helper only
  * touches files that already contain a marker pair, so a hand-written
  * `CLAUDE.md` without a Glasstrace block is left alone.
  *
- * Multi-file projects are handled in a single run (DISC-1592 §Multi-file
- * projects): the same `detectAgents()` call that scaffolds files at
+ * Multi-file projects are handled in a single run: the same
+ * `detectAgents()` call that scaffolds files at
  * `init` time enumerates every detected agent, and this function
  * refreshes every file with a managed section in one pass.
  *
  * The replace-in-place behaviour works for both legacy unstamped
- * markers (pre-SDK-050) and SDK-050+ stamped markers — see
+ * markers and version-stamped markers — see
  * `findMarkerBoundaries` in `inject.ts`.
  *
  * @param options - Project root to operate on. The CLI entry point
