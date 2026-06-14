@@ -61,9 +61,11 @@ describe("GLASSTRACE_ATTRIBUTE_NAMES — side-effect entries", () => {
     "SIDE_EFFECT_OMITTED_RAW_TIMESTAMP",
     "SIDE_EFFECT_OMITTED_UNHASHED_ID",
     "SIDE_EFFECT_OMITTED_NON_FINITE",
+    "SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED",
+    "SIDE_EFFECT_OMITTED_ALLOWLIST_DENIED",
   ] as const;
 
-  it("exports exactly the 24 expected side-effect attribute keys", () => {
+  it("exports exactly the 26 expected side-effect attribute keys", () => {
     const actual = Object.keys(GLASSTRACE_ATTRIBUTE_NAMES).filter((k) =>
       k.startsWith("SIDE_EFFECT_"),
     );
@@ -156,6 +158,12 @@ describe("GLASSTRACE_ATTRIBUTE_NAMES — side-effect entries", () => {
     expect(
       GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NON_FINITE,
     ).toBe("glasstrace.side_effect.omitted.non_finite");
+    expect(
+      GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED,
+    ).toBe("glasstrace.side_effect.omitted.scalar_cap_exceeded");
+    expect(
+      GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_ALLOWLIST_DENIED,
+    ).toBe("glasstrace.side_effect.omitted.allowlist_denied");
   });
 });
 
@@ -331,12 +339,18 @@ describe("SIDE_EFFECT_OMISSION_REASONS", () => {
       "raw_timestamp",
       "unhashed_id",
       "non_finite",
+      "scalar_cap_exceeded",
+      "allowlist_denied",
     ]);
   });
 
   it("derives a literal-type union", () => {
     const sample: SideEffectOmissionReason = "pii";
     expect(SIDE_EFFECT_OMISSION_REASONS).toContain(sample);
+    const capOverflow: SideEffectOmissionReason = "scalar_cap_exceeded";
+    const denied: SideEffectOmissionReason = "allowlist_denied";
+    expect(SIDE_EFFECT_OMISSION_REASONS).toContain(capOverflow);
+    expect(SIDE_EFFECT_OMISSION_REASONS).toContain(denied);
   });
 });
 
