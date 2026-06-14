@@ -138,3 +138,17 @@ export function getBuildHash(): string | undefined {
   }
   return cachedBuildHash === UNSET ? undefined : cachedBuildHash;
 }
+
+/**
+ * Returns the build hash only when it matches the expected SHA shape,
+ * otherwise `undefined`. Intended for contexts that echo the value into
+ * logs (e.g., the decision-trace correlation suffix): a non-SHA value may
+ * be a misconfigured secret substituted for the env var, so it must never
+ * be printed. A non-SHA value is also useless as a correlation key — it
+ * cannot match the source-map manifest — so suppressing it loses nothing.
+ */
+export function getCorrelationBuildHash(): string | undefined {
+  const hash = getBuildHash();
+  if (hash === undefined || !SHA_SHAPE.test(hash)) return undefined;
+  return hash;
+}

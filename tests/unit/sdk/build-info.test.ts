@@ -204,4 +204,28 @@ describe("build-info", () => {
       expect(warnSpy).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("getCorrelationBuildHash — SHA-shaped values only", () => {
+    it("returns the value when SHA-shaped", async () => {
+      process.env.GLASSTRACE_BUILD_HASH = "abcdef0123456789deadbeef";
+      const mod = await importFresh();
+      expect(mod.getCorrelationBuildHash()).toBe("abcdef0123456789deadbeef");
+    });
+
+    it("returns undefined when unset", async () => {
+      delete process.env.GLASSTRACE_BUILD_HASH;
+      const mod = await importFresh();
+      expect(mod.getCorrelationBuildHash()).toBeUndefined();
+    });
+
+    it("returns undefined for a non-SHA value so a misconfigured secret is never surfaced", async () => {
+      // Unlike getBuildHash (which still returns the raw value for
+      // ingestion backward-compat), the correlation accessor suppresses
+      // any value that could be a misconfigured secret.
+      process.env.GLASSTRACE_BUILD_HASH = "super-secret-token-not-a-sha";
+      const mod = await importFresh();
+      expect(mod.getBuildHash()).toBe("super-secret-token-not-a-sha");
+      expect(mod.getCorrelationBuildHash()).toBeUndefined();
+    });
+  });
 });

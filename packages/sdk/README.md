@@ -798,6 +798,60 @@ precedence) is dropped and recorded only as an integer omission count.
 Relations count against the same product-side per-operation field budget
 as `fields` (enforced at projection).
 
+## Decision tracing
+
+Many of the SDK's capture, emit, and redact decisions are made silently:
+when capture produces nothing, it can be hard to tell *which* config gate
+closed — was capture disabled for the account, did the init call not land,
+or was a field rejected by the allowlist? Decision tracing makes those
+decisions observable from the console behind a single toggle that defaults
+**off**.
+
+Enable it with the `decisionTrace` option or the `GLASSTRACE_DECISION_TRACE`
+environment variable (handy for a deployed app you cannot re-instrument):
+
+```ts
+registerGlasstrace({ decisionTrace: true });
+```
+
+```bash
+GLASSTRACE_DECISION_TRACE=true npm run dev
+```
+
+`verbose: true` turns decision tracing on as well, so existing verbose
+sessions get it for free; set `GLASSTRACE_DECISION_TRACE=true` with
+`verbose: false` to see only the decision lines without the full init log.
+
+Each instrumented decision logs one greppable line:
+
+```
+[glasstrace] decision: capture.sideEffectEvidence=enabled (config_applied; surface=configApply,captureFidelity=full)
+[glasstrace] decision: capture.sideEffectEvidence=disabled (surface=recordSideEffect)
+```
+
+```bash
+node server.js 2>&1 | grep '\[glasstrace\] decision:'
+```
+
+The greppable console line is the supported way to consume decision
+traces. Internally, each instrumented decision is also emitted on the
+SDK's in-process lifecycle bus as a `core:decision` event carrying
+`{ point, outcome, reason?, inputs? }`, which the SDK's own integration
+tests assert on; this bus is not part of the public API surface, so prefer
+the console line for external tooling. This release instruments the
+`capture.sideEffectEvidence` gate (the `recordSideEffect` capture-disabled
+branch and the config-apply outcome at init); further decision points will
+be added in subsequent releases. Like the console line, the event fires
+only while decision tracing is enabled — never when the toggle is off.
+
+Decision tracing is **observational and behavior-neutral**: capture
+behavior is byte-for-byte identical whether it is on or off, the emitter
+never throws into your code, and it is a strict no-op (no allocation on the
+hot paths) when off. It emits flags and enums only — never request or
+response bodies, never a rejected key or value, and never a secret (API
+keys appear masked; a key-shaped config value is reported only as `present`
+or `absent`).
+
 ## Source maps
 
 Glasstrace uploads server-side source maps at build time and resolves

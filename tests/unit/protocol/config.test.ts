@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   GlasstraceOptionsSchema,
+  GlasstraceEnvVarsSchema,
   CaptureConfigSchema,
   SdkCachedConfigSchema,
 } from "../../../packages/protocol/src/config.js";
@@ -166,6 +167,32 @@ describe("GlasstraceOptionsSchema", () => {
   it("rejects non-boolean forceEnable", () => {
     const result = GlasstraceOptionsSchema.safeParse({
       forceEnable: "true",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts the optional decisionTrace flag", () => {
+    const result = GlasstraceOptionsSchema.safeParse({ decisionTrace: true });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a non-boolean decisionTrace", () => {
+    const result = GlasstraceOptionsSchema.safeParse({ decisionTrace: "true" });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("GlasstraceEnvVarsSchema", () => {
+  it("accepts the optional GLASSTRACE_DECISION_TRACE env var", () => {
+    const result = GlasstraceEnvVarsSchema.safeParse({
+      GLASSTRACE_DECISION_TRACE: "true",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a non-string GLASSTRACE_DECISION_TRACE", () => {
+    const result = GlasstraceEnvVarsSchema.safeParse({
+      GLASSTRACE_DECISION_TRACE: true,
     });
     expect(result.success).toBe(false);
   });

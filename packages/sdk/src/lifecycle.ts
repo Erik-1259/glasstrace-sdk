@@ -179,6 +179,50 @@ export interface SdkLifecycleEvents {
     inferredStatus: number;
     exceptionMessage?: string;
   };
+  /**
+   * An instrumented SDK config-decision point was decided while decision
+   * tracing is enabled. This is the structured, programmatically-capturable
+   * counterpart of the `[glasstrace] decision:` console line: a validator or
+   * test subscribes with `onLifecycleEvent("core:decision", ...)` and asserts
+   * the `{ point, outcome }` sequence for a scenario instead of scraping
+   * console text.
+   *
+   * **Firing condition.** Emitted for every instrumented decision when
+   * decision tracing is enabled (the `decisionTrace` option, the
+   * `GLASSTRACE_DECISION_TRACE` env var, or `verbose`). When tracing is OFF —
+   * the default — this event is **never** emitted, even to a registered
+   * subscriber: the off-by-default guarantee mirrors the log channel exactly,
+   * and gating is on the toggle, never on subscriber count.
+   *
+   * **Payload semantics.** `point` is a stable, dot-separated decision id
+   * (for example `capture.sideEffectEvidence` or `config.tier`); it is typed
+   * as a plain `string` on the event so a future point can ride the bus before
+   * the internal id union is widened. `outcome` is the closed per-point
+   * outcome (for example `enabled` / `disabled`, `in_memory` / `file_cache` /
+   * `defaults`). `reason` is an optional, bounded, allowlisted reason.
+   * `inputs` is an optional, bounded, safe disambiguation subset — the same
+   * tokens the log line renders (for example the capture-gate `surface`
+   * token, which is the only field distinguishing the `recordSideEffect`,
+   * `capture`, and `prismaAdapter` surfaces' otherwise-identical events).
+   *
+   * **No-secret / no-rejected-value contract.** The payload carries flags and
+   * enums only: never a raw secret, never a rejected key or value, never
+   * nested producer input. API keys appear only masked; a key-shaped config
+   * value is reported as `present` / `absent`, never as its value.
+   *
+   * @example
+   * ```ts
+   * onLifecycleEvent("core:decision", (e) => {
+   *   console.log(e.point, e.outcome, e.inputs?.surface);
+   * });
+   * ```
+   */
+  "core:decision": {
+    point: string;
+    outcome: string;
+    reason?: string;
+    inputs?: Record<string, string | number | boolean>;
+  };
 
   "auth:key_resolved": { key: string; mode: "anonymous" | "dev" };
   "auth:claim_started": { accountId: string };
