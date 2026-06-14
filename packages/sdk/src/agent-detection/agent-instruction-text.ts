@@ -17,12 +17,10 @@
  * marker contract that has soaked in production and must not regress).
  *
  * **Vocabulary alignment:** every MCP tool name and response-field
- * name in the body below is verified against the current MCP server
- * contract maintained in the private `glasstrace-product` repo
- * (`shared/types/wire-mcp.ts` and `shared/types/agent-evidence.ts`
- * there); the SDK consumes the resulting wire format but does not
- * own the schema source of truth for those tool names and field
- * names. If the server-side MCP contract evolves (renames a field,
+ * name in the body below is verified against the current server-side
+ * MCP server contract; the SDK consumes the resulting wire format but
+ * does not own the schema source of truth for those tool names and
+ * field names. If the server-side MCP contract evolves (renames a field,
  * restructures `suggestedFollowups`, adds new tools, etc.), update
  * this module in lockstep with the protocol change so the
  * agent-instruction text never references fields that don't exist.
@@ -53,10 +51,10 @@
  * `find_trace_candidates` as the entry point and instructs the
  * agent to READ `closeMatches` / `recentRoutesSample` /
  * `recoveryActions` before pivoting to source — that is the
- * load-bearing recovery contract from MCP-025 / MCP-027 (codified
- * in `wire-mcp.ts` `ToolDiagnosticSchema` and `CandidateDiagnosticSchema`)
- * and is the failure mode the prior cost-aware decision
- * paragraph did not surface.
+ * load-bearing recovery contract (codified in the server-side MCP
+ * `ToolDiagnosticSchema` and `CandidateDiagnosticSchema`), and it
+ * prevents the bail-to-source failure mode the prior cost-aware
+ * decision paragraph did not surface.
  */
 
 /**
