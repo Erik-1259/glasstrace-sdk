@@ -35,7 +35,7 @@ let injectedProcessor: SpanProcessor | null = null;
 
 /**
  * SHA-256-derived stable identifier of the most recently resolved
- * API key. Used to detect credential rotation (DISC-1568 / Wave 15C)
+ * API key. Used to detect credential rotation
  * so the export-path circuit breaker can reset to CLOSED on rotation.
  */
 let resolvedApiKeyHash: string = "";
@@ -149,7 +149,7 @@ async function tryImport(moduleId: string): Promise<Record<string, unknown> | nu
 /**
  * Emits a verbose-only diagnostic when `@prisma/instrumentation` could not be
  * registered, so developers can see why Prisma query spans are missing instead
- * of getting a silent skip (DISC-1308).
+ * of getting a silent skip.
  *
  * Default-quiet by design: the SDK cannot know whether the consuming app uses
  * Prisma, so an unconditional warning would be noise for the majority of apps
@@ -177,8 +177,8 @@ function warnPrismaInstrumentationUnavailable(verbose: boolean, detail: string):
  *   1. Yield one tick (let synchronous Sentry.init() complete)
  *   2. Probe for existing provider
  *   3. If provider exists → shared coexistence path via
- *      {@link tryAutoAttachGlasstraceProcessor} (resolves DISC-493 Issues 2
- *      and 4 — Next.js 16 production pre-registration and Sentry hoisting)
+ *      {@link tryAutoAttachGlasstraceProcessor} (resolves the Next.js 16
+ *      production pre-registration and Sentry hoisting cases)
  *   4. If no provider → registration path (Vercel or bare)
  */
 export async function configureOtel(
@@ -242,7 +242,7 @@ export async function configureOtel(
 }
 
 /**
- * Shared coexistence path for DISC-493 Issues 2 and 4.
+ * Shared coexistence path for pre-registered OTel providers.
  *
  * Used whenever `configureOtel()` detects a pre-registered OTel provider.
  * Delegates processor construction to {@link tryAutoAttachGlasstraceProcessor}

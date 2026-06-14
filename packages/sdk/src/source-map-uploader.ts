@@ -389,7 +389,7 @@ type BlobClientModule = {
  * The indirection hides the specifier from static bundler analysis — webpack,
  * tsup, esbuild, and rollup all resolve literal `await import("...")` targets
  * at build time and would raise `Module not found` for consumers without
- * `@vercel/blob` installed (it is an optional peer dependency). See DISC-1255.
+ * `@vercel/blob` installed (it is an optional peer dependency).
  *
  * **CSP note:** `Function()` is semantically equivalent to `eval()` and will
  * trigger `unsafe-eval` CSP violations in restricted environments. Source-map
@@ -413,7 +413,7 @@ let _blobClientLoader: () => Promise<BlobClientModule> = defaultBlobClientLoader
  * Replaces the blob client loader. For test use only.
  *
  * The production loader uses a `Function()`-based dynamic import to evade
- * static bundler analysis (DISC-1255), which in turn bypasses Vitest's
+ * static bundler analysis, which in turn bypasses Vitest's
  * module-mock interceptor. Tests that need to stub `@vercel/blob/client`
  * call this helper to install a fake loader, then restore the default
  * with {@link _resetBlobClientLoaderForTesting}.

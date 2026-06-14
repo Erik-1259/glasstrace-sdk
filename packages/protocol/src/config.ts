@@ -14,7 +14,7 @@ export const CaptureConfigSchema = z.object({
   consoleErrors: z.boolean().optional().default(false),
   errorResponseBodies: z.boolean().optional().default(false),
   /**
-   * Account opt-in for side-effect evidence emission (SDK-049).
+   * Account opt-in for side-effect evidence emission.
    *
    * When `false` (default), `recordSideEffect()` is a silent no-op:
    * no allowlist evaluation runs and no `glasstrace.side_effect.*`

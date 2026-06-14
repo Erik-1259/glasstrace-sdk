@@ -147,10 +147,9 @@ export function generateMcpConfig(
  * that could be smuggled into the agent instruction file via a
  * malformed callsite.
  *
- * The stamp is the SDK semver string and nothing else (DISC-1592 / SDK-050
- * Required Semantics Item 1: "the stamp encodes only the SDK semver
- * string ... it must not embed user-controlled or environment-derived
- * content"). Reject anything outside this charset at the render site
+ * The stamp is the SDK semver string and nothing else: it encodes only
+ * the SDK semver string and must not embed user-controlled or
+ * environment-derived content. Reject anything outside this charset at the render site
  * rather than relying on the upstream `__SDK_VERSION__` define being
  * well-formed.
  */
@@ -194,7 +193,7 @@ function hashMarkers(sdkVersion: string): MarkerPair {
  * managed section's content is identical across destinations — only
  * the marker shape differs (HTML comments for Markdown / `.md` /
  * `.mdc` targets; `.cursorrules` legacy uses hash-prefix markers
- * preserved from the SDK-050 contract for backward-compat with
+ * preserved from the original contract for backward-compat with
  * already-rendered managed sections). It contains a
  * tight, agent-facing decision policy + workflow + tool list — no
  * endpoint URL, no auth tokens, no setup instructions (those live in
@@ -213,7 +212,7 @@ function hashMarkers(sdkVersion: string): MarkerPair {
  * in the server-side MCP contract maintained in the private
  * `glasstrace-product` repo's `shared/types/wire-mcp.ts` —
  * `ToolDiagnosticSchema` / `CandidateDiagnosticSchema`) and it
- * prevents the bail-to-source failure mode that the prior SDK-050
+ * prevents the bail-to-source failure mode that the prior
  * cost-aware decision paragraph did not surface.
  *
  * The body itself lives in a sibling module
@@ -221,15 +220,15 @@ function hashMarkers(sdkVersion: string): MarkerPair {
  * single-file edit and don't disturb the marker / version-stamp /
  * per-agent-format machinery in this file.
  *
- * The start marker carries a `v=<sdkVersion>` stamp (DISC-1592 /
- * SDK-050) so a later `glasstrace upgrade-instructions` run — and
+ * The start marker carries a `v=<sdkVersion>` stamp
+ * so a later `glasstrace upgrade-instructions` run — and
  * the SDK's stale-section warning at init — can detect that the
  * file was rendered by an older SDK and refresh the block.
  *
  * @param agent - The detected agent to generate info for.
  * @param endpoint - The Glasstrace MCP endpoint URL. (Validated for
  *   non-emptiness here for backwards compatibility with the prior
- *   SDK-050 contract; not currently inlined in the body — agents
+ *   contract; not currently inlined in the body — agents
  *   reach Glasstrace via the MCP server name `glasstrace` configured
  *   separately in `.glasstrace/mcp.json` or per-agent native config.)
  * @param sdkVersion - The SDK semver string to embed in the start marker
@@ -298,17 +297,17 @@ export function generateInfoSection(
  * (transitional fallback companion to the canonical
  * `.cursor/rules/glasstrace.mdc` write).
  *
- * Uses hash-prefix markers preserved from the SDK-050 contract — pre-
- * Wave-18 SDK versions rendered `.cursorrules` with hash markers, so
+ * Uses hash-prefix markers preserved from the original contract —
+ * earlier SDK versions rendered `.cursorrules` with hash markers, so
  * the legacy file's already-rendered managed sections need to be
  * recognized and idempotently replaced by the new SDK. Switching to
  * HTML markers on `.cursorrules` would break in-place replacement for
  * existing users (the new SDK wouldn't find the old marker pair) and
  * append a duplicate section.
  *
- * Wave 18 writes `.cursorrules` UNCONDITIONALLY alongside the
- * `.cursor/rules/glasstrace.mdc` canonical (per Codex P2 review of
- * DISC-1782 v3 — mixed-version Cursor scenarios may have Agent mode
+ * The SDK writes `.cursorrules` UNCONDITIONALLY alongside the
+ * `.cursor/rules/glasstrace.mdc` canonical — mixed-version Cursor
+ * scenarios may have Agent mode
  * reading legacy rules inconsistently across versions, so a
  * conditional fallback is too narrow).
  */
@@ -349,7 +348,7 @@ export function generateInfoSectionForCursorrulesLegacy(
  * Recon caveat (Wave 18 impl-time, 2026-05-10): Cursor's official
  * docs do not address whether `.mdc` parser preserves HTML comments.
  * This implementation defaults to HTML comment markers (consistent
- * with the SDK-050 contract for `CLAUDE.md` and other Markdown
+ * with the marker contract for `CLAUDE.md` and other Markdown
  * targets which have soaked in production). If a Cursor version
  * strips HTML comments from `.mdc` body content, the marker contract
  * breaks; track via the wave's closeout-gate items.

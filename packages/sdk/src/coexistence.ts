@@ -277,7 +277,7 @@ export function emitNudgeMessage(): void {
  *
  * Log level escalates to `error` under `process.env.NODE_ENV ===
  * "production"` so the message survives common production log-level
- * filters that suppress `warn` (DISC-1556 Option C). Development and
+ * filters that suppress `warn`. Development and
  * test runs keep the `warn` level to avoid console-noise regressions
  * for local Sentry/Datadog users who routinely see this branch.
  */

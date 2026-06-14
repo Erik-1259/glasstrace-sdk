@@ -21,8 +21,7 @@ export interface UninitOptions {
   dryRun: boolean;
   /**
    * When true, skip interactive confirmation before destructive actions
-   * such as removing a claimed developer API key from `.env.local`
-   * (DISC-1247 Scenario 6).
+   * such as removing a claimed developer API key from `.env.local`.
    */
   force?: boolean;
   /**
@@ -52,9 +51,9 @@ const MCP_CONFIG_FILES = [".mcp.json", ".cursor/mcp.json", ".gemini/settings.jso
 /**
  * Agent info files that may contain glasstrace marker sections.
  * Both HTML-style (`<!-- glasstrace:mcp:start -->`) and hash-style
- * (`# glasstrace:mcp:start`) markers are supported. Wave 18
- * (DISC-1782) expanded the canonical set to follow the 2026
- * cross-tool standard; uninit removes managed sections from BOTH
+ * (`# glasstrace:mcp:start`) markers are supported. The canonical
+ * set follows the 2026 cross-tool standard; uninit removes managed
+ * sections from BOTH
  * canonical 2026 destinations AND legacy destinations so a clean
  * uninstall doesn't leave stale sections behind.
  */
@@ -478,8 +477,8 @@ export function removeRegisterGlasstrace(content: string): string {
 
 /**
  * Removes content between glasstrace marker comments from a file.
- * Supports both legacy unstamped markers (pre-SDK-050) and SDK-050+
- * stamped markers (`<!-- glasstrace:mcp:start v=<sdkVersion> -->` /
+ * Supports both legacy unstamped markers and version-stamped
+ * markers (`<!-- glasstrace:mcp:start v=<sdkVersion> -->` /
  * `# glasstrace:mcp:start v=<sdkVersion>`) for both HTML and hash
  * conventions, by deferring marker recognition to the shared parser
  * in `agent-detection/inject.ts`.
@@ -637,8 +636,7 @@ export function processTomlMcpConfig(content: string): {
 /**
  * Writes the `.glasstrace/shutdown-requested` marker file atomically so
  * that a running SDK heartbeat tick (or equivalent lifecycle hook) can
- * detect that uninit has been invoked and trigger shutdown (DISC-1247
- * Scenario 1).
+ * detect that uninit has been invoked and trigger shutdown.
  *
  * Uses write-temp + rename semantics so a mid-write crash cannot leave
  * a truncated marker that the running process might misread.
@@ -705,7 +703,7 @@ async function defaultPrompt(question: string, defaultValue: boolean): Promise<b
  *
  * Steps (in order):
  * 1. Write `.glasstrace/shutdown-requested` marker so a running SDK can
- *    drain and exit cleanly (DISC-1247 Scenario 1)
+ *    drain and exit cleanly
  * 2. Unwrap `withGlasstraceConfig` from next.config
  * 3. Remove `registerGlasstrace` from instrumentation.ts (or delete if init-created)
  * 4. Remove `.glasstrace/` directory

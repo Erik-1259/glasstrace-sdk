@@ -21,9 +21,9 @@
  * Allowlisted side-effect operation kinds (v1).
  *
  * Each kind names a category of side effect the receiver projects in
- * MCP tool responses. New kinds require a coordinated bump across
- * SCHEMA-036 (product), this tuple (SDK), and any downstream consumer
- * that switches on the kind.
+ * MCP tool responses. New kinds require a coordinated bump across the
+ * wire-schema definition, this tuple, and any downstream consumer that
+ * switches on the kind.
  */
 export const SIDE_EFFECT_OPERATION_KINDS = [
   "email",
@@ -164,7 +164,7 @@ export type SideEffectSemanticFieldKey =
  *
  * The SDK records counts under these reasons rather than the rejected
  * values themselves so unsafe input never appears anywhere on the
- * wire. The set is fixed by SCHEMA-036; new reasons require a
+ * wire. The set is fixed by the wire schema; new reasons require a
  * coordinated cross-repo bump.
  */
 export const SIDE_EFFECT_OMISSION_REASONS = [

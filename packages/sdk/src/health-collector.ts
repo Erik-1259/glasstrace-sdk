@@ -18,7 +18,7 @@ let lastConfigSyncAt: number | null = null;
 
 /**
  * Records that spans were submitted to the delegate exporter.
- * Counts submission, not confirmed delivery (DISC-1118).
+ * Counts submission, not confirmed delivery.
  * Called by GlasstraceExporter after delegate.export() is invoked.
  */
 export function recordSpansExported(count: number): void {
@@ -93,7 +93,7 @@ export function collectHealthReport(sdkVersion: string): SdkHealthReport | null 
  * (e.g., spans exported during the init HTTP call). Values are clamped
  * to 0 to guard against edge cases.
  *
- * Core invariant (DISC-1123): for any finite counter C and finite reported
+ * Core invariant: for any finite counter C and finite reported
  * value, after acknowledge:
  *   C_new = max(0, C_before_ack - reported_value)
  * This guarantees:

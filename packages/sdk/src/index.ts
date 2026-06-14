@@ -152,8 +152,7 @@ export { withGlasstraceConfig } from "./config-wrapper.js";
  *
  * {@link getStatus} returns a simplified public view of the SDK state —
  * ready/mode/tracing — suitable for display or programmatic checks.
- * All fields are now backed by real runtime code (auth wired in SDK-024,
- * OTel wired in SDK-025).
+ * All fields are now backed by real runtime code.
  */
 export { isReady, waitForReady, getStatus } from "./lifecycle.js";
 
@@ -178,8 +177,7 @@ export { captureError } from "./capture-error.js";
  * Reads the `x-gt-cid` header from an incoming request and sets it as
  * `glasstrace.correlation.id` on the active OTel span. Call it from a
  * Next.js `middleware.ts` or a custom server request hook so Server
- * Action traces can be correlated with Glasstrace browser extension data
- * (DISC-1253).
+ * Action traces can be correlated with Glasstrace browser extension data.
  */
 export { captureCorrelationId } from "./correlation-id.js";
 

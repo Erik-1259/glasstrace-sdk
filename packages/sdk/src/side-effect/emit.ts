@@ -1,6 +1,5 @@
 /**
- * Side-effect evidence attribute emission and per-span counter state
- * (SDK-049).
+ * Side-effect evidence attribute emission and per-span counter state.
  *
  * Pure observer: this module never executes a side effect, never
  * creates a span, never throws to the caller. All failure modes route
@@ -24,7 +23,7 @@ import { MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN } from "./allowlist.js";
 
 /**
  * Per-span side-effect bookkeeping. `operationsRecorded` enforces the
- * SCHEMA-036 budget of 5 operations per span; `omissions` carries one
+ * wire-schema budget of 5 operations per span; `omissions` carries one
  * counter per omission reason so final `glasstrace.side_effect.omitted.*`
  * attributes can be flushed on the span as integer counts.
  */
@@ -171,8 +170,8 @@ const FIELD_ATTRIBUTE_BY_KEY: Readonly<Record<string, string>> = {
 
 /**
  * Resolve the OTel attribute name for a semantic field key. Keys in
- * the explicit `FIELD_ATTRIBUTE_BY_KEY` map (stable-core + the three
- * DISC-1853 keys) use the existing `GLASSTRACE_ATTRIBUTE_NAMES`
+ * the explicit `FIELD_ATTRIBUTE_BY_KEY` map (stable-core keys plus the
+ * extended evidence keys) use the existing `GLASSTRACE_ATTRIBUTE_NAMES`
  * constants for backward compatibility. Pattern-admitted keys
  * derive `glasstrace.side_effect.field.${key}` at emission. Callers
  * MUST verify the key is admissible (via `checkSemanticFieldKey` or
@@ -188,7 +187,7 @@ function resolveFieldAttribute(key: string): string {
 
 /**
  * Returns `true` when the key has an explicit entry in
- * `FIELD_ATTRIBUTE_BY_KEY` (stable-core keys or DISC-1853-era keys).
+ * `FIELD_ATTRIBUTE_BY_KEY` (stable-core or extended evidence keys).
  * Returns `false` for pattern-admitted keys that derive their
  * attribute name at emission. Used by vocabulary-governance signals
  * to distinguish explicitly-mapped keys from pattern-only ones.

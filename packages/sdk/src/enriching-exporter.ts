@@ -87,8 +87,8 @@ export class GlasstraceExporter implements SpanExporter {
   private pendingSpanCount = 0;
   private overflowLogged = false;
   /**
-   * Lazily-bound reference to the export-path circuit breaker
-   * (DISC-1568 / Wave 15C). Resolved on first export so this
+   * Lazily-bound reference to the export-path circuit breaker.
+   * Resolved on first export so this
    * constructor stays side-effect-free. The breaker is a module-
    * singleton — every `GlasstraceExporter` instance shares the same
    * one so a rotation event observed in `init-client.ts` reaches
@@ -904,7 +904,7 @@ function createEnrichedSpan(
  * Returns true if the span has at least one "exception" event.
  * This signals that `span.recordException()` was called, even if
  * `span.setStatus(ERROR)` was not yet applied due to the timing race
- * in Next.js dev server (DISC-1204).
+ * in Next.js dev server.
  */
 function hasExceptionEvent(span: ReadableSpan): boolean {
   return span.events?.some((e) => e.name === "exception") ?? false;
@@ -940,7 +940,7 @@ function getExceptionEventDetails(span: ReadableSpan): {
 
 /**
  * Extracts the leading path from a route-or-span-name string so the
- * Server Action heuristic (DISC-1253) can match reliably regardless of
+ * Server Action heuristic can match reliably regardless of
  * whether the value came from `http.route` (bare path, e.g. "/login")
  * or from `span.name` (Next.js-formatted, e.g. "POST /login" or
  * "middleware POST /login").
@@ -973,7 +973,7 @@ export function extractLeadingPath(raw: string | undefined): string | undefined 
 
 /**
  * Strips a trailing `/` from a path so two paths that differ only in
- * trailing-slash form compare equal. Used by the SDK-041 framework-
+ * trailing-slash form compare equal. Used by the framework-
  * fallback differ check; frameworks/proxies inconsistently round-trip
  * trailing slashes between `http.route` and `http.url`, and a
  * literal-string compare without normalization would produce
@@ -992,7 +992,7 @@ function stripTrailingSlash(path: string | undefined): string | undefined {
 
 /**
  * Extracts the path component (no query, no fragment) from a URL or
- * a bare path. Used by the SDK-041 framework-fallback handler to
+ * a bare path. Used by the framework-fallback handler to
  * compute `glasstrace.error.original_path` from the upstream
  * `http.url` / `url.full` / `http.target` value when a request gets
  * rewritten to a fallback route like `/_error`.

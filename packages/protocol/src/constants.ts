@@ -22,8 +22,8 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   /**
    * Boolean audit attribute set to `true` only when the SDK's
    * boundary-masked-error heuristic at `enriching-exporter.ts`
-   * fires (SDK-051 / DISC-1125 — same-span scope; descendant-traversal
-   * scope is tracked in a follow-up DISC).
+   * fires. Scoped to the same span; descendant-traversal scope is a
+   * planned follow-up.
    *
    * Strict additivity: backend ingestion ignores unknown attributes
    * today; this attribute is for audit/observability. Downstream
@@ -76,7 +76,7 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   TRPC_PROCEDURE: "glasstrace.trpc.procedure",
   /**
    * Zero-based positional index of the current member within a tRPC
-   * HTTP-batch dispatch (SDK-052 / DISC-1534 SDK-side slice). Set on
+   * HTTP-batch dispatch. Set on
    * member spans by `tracedMiddleware` when the SDK's
    * `wrapBatchedHttpHandler` envelope is in scope. Numeric.
    *
@@ -88,7 +88,7 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   TRPC_BATCH_MEMBER_INDEX: "glasstrace.trpc.batch.member_index",
   /**
    * Ordered list of all procedure names in the current tRPC HTTP
-   * batch (SDK-052 / DISC-1534 SDK-side slice). Stored as an OTel
+   * batch. Stored as an OTel
    * typed string array (`string[]`), NOT a JSON-encoded string —
    * the typed-array form preserves first-class queryability in the
    * OTel ingest pipeline.
@@ -150,7 +150,7 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   CAUSAL_AFFECTS_HTTP_STATUS: "glasstrace.causal.affects_http_status",
   CAUSAL_AFFECTS_HTTP_DURATION: "glasstrace.causal.affects_http_duration",
 
-  // Side-effect evidence (SDK-049 / SCHEMA-036).
+  // Side-effect evidence attributes.
   // Top-level operation attributes attached to the active span when a
   // side-effect is recorded via `recordSideEffect()`. The wire-string
   // set aligns verbatim with the product-side filter in
@@ -161,7 +161,7 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   SIDE_EFFECT_PHASE: "glasstrace.side_effect.phase",
 
   // Allowlisted semantic field attributes — one per allowlisted key.
-  // Wire keys are camelCase to match the SCHEMA-036 enum members
+  // Wire keys are camelCase to match the wire-schema enum members
   // exactly; the SDK constant names are SCREAMING_SNAKE per the rest
   // of GLASSTRACE_ATTRIBUTE_NAMES.
   SIDE_EFFECT_FIELD_TEMPLATE_KEY: "glasstrace.side_effect.field.templateKey",

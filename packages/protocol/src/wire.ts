@@ -132,7 +132,7 @@ export type SourceMapUploadResponse = z.infer<typeof SourceMapUploadResponseSche
  * Per-file `filePath` is bounded to {@link MAX_SOURCE_MAP_FILE_PATH_LENGTH}
  * characters; `sizeBytes` is bounded to {@link MAX_SOURCE_MAP_FILE_SIZE} bytes.
  * The `files` array carries between 1 and {@link MAX_SOURCE_MAP_FILE_COUNT}
- * entries. These bounds mirror the backend canonical bounds (DISC-1562) so
+ * entries. These bounds mirror the backend's canonical acceptance bounds so
  * external tooling that validates against the SDK schema observes the same
  * acceptance envelope the backend enforces at write time.
  */
@@ -170,7 +170,7 @@ export type PresignedUploadRequest = z.infer<typeof PresignedUploadRequestSchema
  * Response containing presigned upload tokens and storage pathnames.
  *
  * Each entry in `files` carries a Vercel Blob `access` mode that pins the
- * storage visibility for the resulting blob in the wire contract (DISC-756).
+ * storage visibility for the resulting blob in the wire contract.
  * The current Glasstrace SDK upload path passes a fixed `access: "public"`
  * to `@vercel/blob/client` `put()`; carrying the field on the response
  * keeps the protocol shape canonical so any future visibility mode is
@@ -180,7 +180,7 @@ export type PresignedUploadRequest = z.infer<typeof PresignedUploadRequestSchema
  * the canonical timestamp validator (`int().nonnegative()`) shared with the
  * backend wire schema.
  *
- * Per-file bounds mirror the backend canonical bounds (DISC-1562):
+ * Per-file bounds mirror the backend's canonical acceptance bounds:
  *
  * - `filePath` ≤ {@link MAX_SOURCE_MAP_FILE_PATH_LENGTH} characters
  * - `clientToken` ≤ 2048 characters
@@ -227,7 +227,7 @@ export const PresignedUploadResponseSchema = z.object({
             MAX_SOURCE_MAP_FILE_SIZE,
             `maxBytes exceeds maximum of ${MAX_SOURCE_MAP_FILE_SIZE} bytes (${MAX_SOURCE_MAP_FILE_SIZE / (1024 * 1024)} MiB)`,
           ),
-        /** Vercel Blob access mode — explicit in the contract per DISC-756. */
+        /** Vercel Blob access mode — explicit in the wire contract. */
         access: z.enum(["public"]),
       }),
     )
@@ -246,7 +246,7 @@ export type PresignedUploadResponse = z.infer<typeof PresignedUploadResponseSche
  * characters; `sizeBytes` is bounded to {@link MAX_SOURCE_MAP_FILE_SIZE}
  * bytes. The `files` array carries between 1 and
  * {@link MAX_SOURCE_MAP_FILE_COUNT} entries. These bounds mirror the
- * backend canonical bounds (DISC-1562).
+ * backend's canonical acceptance bounds.
  */
 export const SourceMapManifestRequestSchema = z.object({
   uploadId: z.string().uuid(),

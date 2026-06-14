@@ -12,7 +12,7 @@
  * Vercel Edge without Node compat, browsers) do not provide the
  * `process` global. A module that reads `process.env.X` crashes on
  * import when that read happens at top level, and crashes on call
- * when it happens inside a function body. The original SDK-028
+ * when it happens inside a function body. The original
  * reconnaissance only probed import closures; the `process`-global
  * scan was added in response to P1/P2 Codex review findings after
  * observing that `session.ts`, `fetch-classifier.ts`, and the
@@ -21,7 +21,7 @@
  * behind `node-entry.ts`.
  *
  * Symbols blocked from the edge surface by this second constraint
- * (reclaim via DISC-1281):
+ * (reclaimable in a future revision):
  *   - `deriveSessionId`, `getOrigin`, `getDateString`, `SessionManager`
  *     — `session.ts` top-level `process.env` reads
  *   - `classifyFetchTarget` — `fetch-classifier.ts` top-level
@@ -34,8 +34,8 @@
  *     `resolveConfig` to keep the boundary crisp.
  *
  * This entry point is **not wired into `package.json#exports` yet** —
- * SDK-030 wires the subpath. SDK-028 only proves the bundle can be
- * emitted cleanly.
+ * a follow-up wires the subpath. This stage only proves the bundle can
+ * be emitted cleanly.
  *
  * Implementation note: the re-exports below deliberately use the
  * `import { ... }; export { ... };` two-step form rather than the
@@ -45,8 +45,7 @@
  * producing a `dist/edge-entry.js` that fails to resolve at runtime
  * (the referenced sibling files never get emitted). The two-step form
  * forces esbuild to treat the bindings as real imports and inline the
- * symbols into the entry's chunk graph. See DISC-1280 for the
- * underlying tsup/esbuild behavior.
+ * symbols into the entry's chunk graph.
  */
 
 import { SdkError } from "./errors.js";
