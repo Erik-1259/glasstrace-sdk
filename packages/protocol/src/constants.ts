@@ -204,6 +204,19 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
     "glasstrace.side_effect.omitted.unhashed_id",
   SIDE_EFFECT_OMITTED_NON_FINITE:
     "glasstrace.side_effect.omitted.non_finite",
+
+  // Drop-class omission reasons that split `unsupported_key`. Counts
+  // only; the rejected value is never echoed.
+  // `scalar_cap_exceeded` = a scalar dropped because the per-operation
+  // scalar budget was already full. `allowlist_denied` = a value
+  // dropped by a default-deny allowlist gate. Mirrored verbatim by the
+  // consuming omission-reason schema. Sequencing: the consumer must
+  // accept a reason before any producer emits it, so these attribute
+  // names ship ahead of the producers that will record them.
+  SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED:
+    "glasstrace.side_effect.omitted.scalar_cap_exceeded",
+  SIDE_EFFECT_OMITTED_ALLOWLIST_DENIED:
+    "glasstrace.side_effect.omitted.allowlist_denied",
 } as const;
 
 /** Default SDK capture config (conservative defaults). */

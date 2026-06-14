@@ -190,6 +190,22 @@ export const SIDE_EFFECT_OMISSION_REASONS = [
   "raw_timestamp",
   "unhashed_id",
   "non_finite",
+  // Drop-class reasons that split what was previously folded into
+  // `unsupported_key`. `scalar_cap_exceeded` is recorded when a scalar
+  // is dropped because the per-operation scalar budget
+  // (`MAX_SIDE_EFFECT_SCALARS_PER_OPERATION`) is already full — a
+  // cap-overflow drop, distinct from a value that is individually
+  // inadmissible. `allowlist_denied` is recorded when a value is
+  // dropped by a default-deny allowlist gate — the value was rejected
+  // because it was not explicitly permitted, distinct from a value
+  // that failed a key/shape/length check. Like the rest of this tuple
+  // these are mirrored verbatim by the consuming
+  // `SideEffectOmissionReasonSchema` (hand-maintained on both sides;
+  // see @drift-check above). The schema mirror admits these reasons
+  // before any producer emits them — see the sequencing note on
+  // `SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED` in `constants.ts`.
+  "scalar_cap_exceeded",
+  "allowlist_denied",
 ] as const;
 
 /**
