@@ -59,6 +59,7 @@ import { capture, captureOmission } from "../side-effect/capture.js";
 import {
   getActiveConfig,
   getAttrHmacKey,
+  isAttrHmacKeyProvisioned,
   isCaptureEnabled,
 } from "../init-client.js";
 import { hashIdWeb } from "../side-effect/hash-id-web.js";
@@ -216,15 +217,41 @@ function deriveScalarKey(column: string, intent: ScalarIntent): string {
 }
 
 /**
+ * Whether identifier capture is suppressed for this bundle instance because
+ * the per-account key was provisioned but applied in a different bundle copy
+ * (Turbopack dev split), so it is not available here. In that state the id
+ * path neither hashes a token nor records an omission — it behaves exactly
+ * like `strict`.
+ *
+ * Used in two places that must agree: the pre-span eligibility gate (so an
+ * id-only model opens no owned span, matching strict's zero-overhead path)
+ * and {@link projectIdentifier} (so it skips rather than emitting a spurious
+ * `unhashed_id` omission). A genuinely key-less `full` account
+ * (`isAttrHmacKeyProvisioned()` is `false`) is NOT suppressed: it still opens
+ * the span and records the observable misconfiguration omission.
+ */
+function isIdCaptureSuppressedAsStrict(): boolean {
+  return getAttrHmacKey() === undefined && isAttrHmacKeyProvisioned();
+}
+
+/**
  * Project an allowlisted identifier column as a pseudonymized `gthid_` token.
  * Identifier capture is an operator escalation, so it is silent unless the
  * account is on `captureFidelity: "full"`. Under `full`, a provisioned
  * per-account `attrHmacKey` plus a non-empty `string`/`number` raw id yields a
  * `gthid_` token — the raw id is hashed under the key and only the token is
- * emitted, so the raw value never reaches the wire. A missing key, a
- * non-hashable id, or a Web Crypto failure records a count-only `unhashed_id`
- * omission — never emitting the raw value, even one already shaped like a
- * `gthid_` token — so a misconfigured `full` account is observable.
+ * emitted, so the raw value never reaches the wire. A genuinely missing key
+ * (a `full` account the backend served with no key), a non-hashable id, or a
+ * Web Crypto failure records a count-only `unhashed_id` omission — never
+ * emitting the raw value, even one already shaped like a `gthid_` token — so a
+ * misconfigured `full` account is observable.
+ *
+ * The one case that does NOT record an omission is a `full` account whose key
+ * IS provisioned but simply not available in this bundle instance (the key was
+ * applied in a different bundle copy under Turbopack dev, or has been
+ * superseded by a later apply). That is a cross-instance artifact, not an
+ * account misconfiguration, so this path behaves like strict (skips id
+ * projection) rather than emitting a spurious omission.
  */
 async function projectIdentifier(
   span: Span,
@@ -244,9 +271,14 @@ async function projectIdentifier(
       return;
     }
   }
-  // Fail-closed: no usable key, no hashable id, or a hash failure. Record the
-  // miss via `captureOmission` rather than routing the raw value through
-  // `capture()` — a raw value that happens to be `gthid_`-shaped would
+  // The key is provisioned for this account but not available in this bundle
+  // instance: a cross-instance artifact, not a misconfiguration. Behave like
+  // strict (skip) instead of emitting a spurious omission. A genuinely key-
+  // less account falls through to the omission below.
+  if (isIdCaptureSuppressedAsStrict()) return;
+  // Fail-closed: genuinely missing key, no hashable id, or a hash failure.
+  // Record the miss via `captureOmission` rather than routing the raw value
+  // through `capture()` — a raw value that happens to be `gthid_`-shaped would
   // otherwise pass strict validation and emit an unkeyed token, bypassing the
   // operator gate. `captureOmission` re-checks the capture gate at emit, so a
   // mid-operation config rotation that disables capture writes nothing.
@@ -361,12 +393,17 @@ export function prismaAdapter(
           // An id-only model adds no span volume until the operator enables
           // full fidelity: under `strict` its sole `id` intent captures nothing
           // and records nothing, so opening a span would be pure overhead.
-          // Under `full` (even without a provisioned key) the span is warranted
-          // — projection either captures the `gthid_` token or records a
-          // visible `unhashed_id` omission for the misconfiguration.
+          // Under `full` with a usable or genuinely-absent key the span is
+          // warranted — projection either captures the `gthid_` token or
+          // records a visible `unhashed_id` omission for the misconfiguration.
+          // But when the key is provisioned yet not available in this bundle
+          // instance (Turbopack dev split), the id path behaves like strict
+          // (no token, no omission), so opening a span would be the same pure
+          // overhead — skip it here too, before `openOwnedSpan`.
           if (
             !eagerModels.has(model) &&
-            getActiveConfig().captureFidelity !== "full"
+            (getActiveConfig().captureFidelity !== "full" ||
+              isIdCaptureSuppressedAsStrict())
           ) {
             return query(args);
           }
