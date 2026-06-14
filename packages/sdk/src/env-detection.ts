@@ -8,6 +8,13 @@ export interface ResolvedConfig {
   endpoint: string;
   forceEnable: boolean;
   verbose: boolean;
+  /**
+   * Whether the explicit decision-trace opt-in is set. Optional on the
+   * exported shape so existing consumers that construct a `ResolvedConfig`
+   * literal for the public helpers keep compiling; `resolveConfig` always
+   * populates it, and the gate reads it as falsy when absent.
+   */
+  decisionTrace?: boolean;
   environment: string | undefined;
   coverageMapEnabled: boolean;
   nodeEnv: string | undefined;
@@ -26,6 +33,7 @@ export function readEnvVars(): GlasstraceEnvVars {
     GLASSTRACE_FORCE_ENABLE: process.env.GLASSTRACE_FORCE_ENABLE,
     GLASSTRACE_ENV: process.env.GLASSTRACE_ENV,
     GLASSTRACE_COVERAGE_MAP: process.env.GLASSTRACE_COVERAGE_MAP,
+    GLASSTRACE_DECISION_TRACE: process.env.GLASSTRACE_DECISION_TRACE,
     NODE_ENV: process.env.NODE_ENV,
     VERCEL_ENV: process.env.VERCEL_ENV,
   };
@@ -43,6 +51,10 @@ export function resolveConfig(options?: GlasstraceOptions): ResolvedConfig {
     endpoint: options?.endpoint ?? DEFAULT_ENDPOINT,
     forceEnable: options?.forceEnable ?? env.GLASSTRACE_FORCE_ENABLE === "true",
     verbose: options?.verbose ?? false,
+    // Decision tracing resolves from the option or the env var; the
+    // `|| verbose` fold is applied at the gate (`decisionTraceEnabled`),
+    // not here, so the resolved flag records only the explicit opt-in.
+    decisionTrace: options?.decisionTrace ?? env.GLASSTRACE_DECISION_TRACE === "true",
     environment: env.GLASSTRACE_ENV,
     coverageMapEnabled: env.GLASSTRACE_COVERAGE_MAP === "true",
     nodeEnv: env.NODE_ENV,

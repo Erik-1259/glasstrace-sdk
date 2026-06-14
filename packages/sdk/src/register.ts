@@ -19,12 +19,13 @@ import { setSideEffectVerboseFlag } from "./side-effect/index.js";
 import { startRuntimeStateWriter, _resetRuntimeStateForTesting } from "./runtime-state.js";
 import { isProxyTracerProvider, isProxyTracer } from "./proxy-detection.js";
 import { maybeWarnStaleAgentInstructions, _resetUpgradeNoticeForTesting } from "./agent-detection/upgrade-notice.js";
-
-/** Mask an API key for safe event emission — shows prefix + last 4 chars. */
-function maskKey(key: string): string {
-  if (key.length <= 12) return key.slice(0, 4) + "...";
-  return key.slice(0, 8) + "..." + key.slice(-4);
-}
+import { maskKey } from "./mask-key.js";
+import {
+  decisionTrace,
+  decisionTraceEnabled,
+  setDecisionTraceFlag,
+  _resetDecisionTraceForTesting,
+} from "./decision-trace.js";
 
 /** Whether console capture has been installed in this registration cycle. */
 let consoleCaptureInstalled = false;
@@ -117,6 +118,10 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // Resolve config
     const config = resolveConfig(options);
     setSideEffectVerboseFlag(config.verbose);
+    // Decision tracing folds in `verbose`: a verbose session gets the
+    // decision lines for free, while a narrow `decisionTrace`/env opt-in
+    // shows only the decision lines without the full init firehose.
+    setDecisionTraceFlag(config.decisionTrace || config.verbose);
     if (config.verbose) {
       console.info("[glasstrace] Config resolved.");
     }
@@ -440,6 +445,57 @@ async function backgroundInit(
     setCoreState(didLastInitSucceed() ? CoreState.ACTIVE : CoreState.ACTIVE_DEGRADED);
   }
 
+  // Decision trace (cold path, once per init): record the capture posture
+  // the SDK actually applied. On success, read the backend-authoritative
+  // applied config via getActiveConfig() — NOT the pre-init `config`
+  // param, which predates the fetched account config. On failure, emit a
+  // distinct fail-closed line so a capture failure is one-run localizable:
+  // it answers "did the in-app SDK ever receive sideEffectEvidence=true?".
+  if (decisionTraceEnabled()) {
+    // Fenced so a throwing config read can never alter the control flow
+    // that follows (claim handling, heartbeat) — this stays observational
+    // even with the toggle ON.
+    try {
+      if (didLastInitSucceed()) {
+        const applied = getActiveConfig();
+        const outcome = applied.sideEffectEvidence === true ? "enabled" : "disabled";
+        decisionTrace("capture.sideEffectEvidence", outcome, {
+          reason: "config_applied",
+          inputs: {
+            surface: "configApply",
+            captureFidelity: applied.captureFidelity ?? "strict",
+          },
+          oneShotKey: `capture.sideEffectEvidence:configApply:${outcome}`,
+        });
+      } else {
+        // Init failed. A cached init response loaded before backgroundInit
+        // stays active, so capture can still be ON from the cache even
+        // though the fresh init failed — report the real posture rather
+        // than unconditionally claiming fail-closed. Only when no usable
+        // cached config keeps capture enabled is the gate truly fail-closed.
+        const active = getActiveConfig();
+        if (active.sideEffectEvidence === true) {
+          decisionTrace("capture.sideEffectEvidence", "enabled", {
+            reason: "init_failed_cached_config_active",
+            inputs: {
+              surface: "configApply",
+              captureFidelity: active.captureFidelity ?? "strict",
+            },
+            oneShotKey: "capture.sideEffectEvidence:configApply:init_failed_cached",
+          });
+        } else {
+          decisionTrace("capture.sideEffectEvidence", "disabled", {
+            reason: "init_failed_fail_closed",
+            inputs: { surface: "configApply" },
+            oneShotKey: "capture.sideEffectEvidence:configApply:init_failed",
+          });
+        }
+      }
+    } catch {
+      // Diagnostic deliverability is best-effort; never disrupt init.
+    }
+  }
+
   // If the backend reported an account claim, update the exporter
   // key so subsequent span exports authenticate with the dev key.
   if (initResult?.claimResult) {
@@ -535,4 +591,5 @@ export function _resetRegistrationForTesting(): void {
   _resetUpgradeNoticeForTesting();
   _sessionManager = null;
   resetLifecycleForTesting();
+  _resetDecisionTraceForTesting();
 }

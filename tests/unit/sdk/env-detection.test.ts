@@ -66,11 +66,18 @@ describe("readEnvVars", () => {
     expect(vars.VERCEL_ENV).toBe("preview");
   });
 
+  it("reads GLASSTRACE_DECISION_TRACE from process.env", () => {
+    process.env.GLASSTRACE_DECISION_TRACE = "true";
+    const vars = readEnvVars();
+    expect(vars.GLASSTRACE_DECISION_TRACE).toBe("true");
+  });
+
   it("error case: returns all fields undefined when no env vars set", () => {
     delete process.env.GLASSTRACE_API_KEY;
     delete process.env.GLASSTRACE_FORCE_ENABLE;
     delete process.env.GLASSTRACE_ENV;
     delete process.env.GLASSTRACE_COVERAGE_MAP;
+    delete process.env.GLASSTRACE_DECISION_TRACE;
     delete process.env.NODE_ENV;
     delete process.env.VERCEL_ENV;
     const vars = readEnvVars();
@@ -78,6 +85,7 @@ describe("readEnvVars", () => {
     expect(vars.GLASSTRACE_FORCE_ENABLE).toBeUndefined();
     expect(vars.GLASSTRACE_ENV).toBeUndefined();
     expect(vars.GLASSTRACE_COVERAGE_MAP).toBeUndefined();
+    expect(vars.GLASSTRACE_DECISION_TRACE).toBeUndefined();
     expect(vars.NODE_ENV).toBeUndefined();
     expect(vars.VERCEL_ENV).toBeUndefined();
   });
@@ -93,6 +101,7 @@ describe("resolveConfig", () => {
     delete process.env.GLASSTRACE_FORCE_ENABLE;
     delete process.env.GLASSTRACE_ENV;
     delete process.env.GLASSTRACE_COVERAGE_MAP;
+    delete process.env.GLASSTRACE_DECISION_TRACE;
     delete process.env.NODE_ENV;
     delete process.env.VERCEL_ENV;
   });
@@ -107,8 +116,32 @@ describe("resolveConfig", () => {
     expect(config.endpoint).toBe("https://api.glasstrace.dev");
     expect(config.forceEnable).toBe(false);
     expect(config.verbose).toBe(false);
+    expect(config.decisionTrace).toBe(false);
     expect(config.environment).toBeUndefined();
     expect(config.coverageMapEnabled).toBe(false);
+  });
+
+  it("decisionTrace from env var GLASSTRACE_DECISION_TRACE=true", () => {
+    process.env.GLASSTRACE_DECISION_TRACE = "true";
+    expect(resolveConfig().decisionTrace).toBe(true);
+  });
+
+  it("decisionTrace is false for a non-'true' env value", () => {
+    process.env.GLASSTRACE_DECISION_TRACE = "1";
+    expect(resolveConfig().decisionTrace).toBe(false);
+  });
+
+  it("explicit decisionTrace option overrides the env var", () => {
+    process.env.GLASSTRACE_DECISION_TRACE = "true";
+    expect(resolveConfig({ decisionTrace: false }).decisionTrace).toBe(false);
+  });
+
+  it("decisionTrace option enables tracing with no env var", () => {
+    expect(resolveConfig({ decisionTrace: true }).decisionTrace).toBe(true);
+  });
+
+  it("decisionTrace resolution is independent of verbose (the fold is applied at the gate)", () => {
+    expect(resolveConfig({ verbose: true }).decisionTrace).toBe(false);
   });
 
   it("reads apiKey from env vars", () => {

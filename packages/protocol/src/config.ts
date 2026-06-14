@@ -81,6 +81,16 @@ export const GlasstraceOptionsSchema = z.object({
   ).optional(),
   forceEnable: z.boolean().optional(),
   verbose: z.boolean().optional(),
+  /**
+   * Opt into decision tracing: the SDK logs a single, greppable
+   * `[glasstrace] decision:` line (and emits an in-process lifecycle
+   * event) at each instrumented config-decision point — which capture
+   * gate closed, which fidelity branch ran, which config tier resolved.
+   * Defaults to `false`. Also turns on when `verbose` is `true`. Purely
+   * diagnostic and off by default: behavior is byte-for-byte identical
+   * whether this is set or not.
+   */
+  decisionTrace: z.boolean().optional(),
 });
 export type GlasstraceOptions = z.infer<typeof GlasstraceOptionsSchema>;
 
@@ -90,6 +100,13 @@ export const GlasstraceEnvVarsSchema = z.object({
   GLASSTRACE_FORCE_ENABLE: z.string().optional(),
   GLASSTRACE_ENV: z.string().optional(),
   GLASSTRACE_COVERAGE_MAP: z.string().optional(),
+  /**
+   * Env-only switch for decision tracing (`"true"` to enable). The
+   * environment counterpart of {@link GlasstraceOptions.decisionTrace},
+   * for turning diagnostics on without editing the `registerGlasstrace`
+   * call — for example when debugging a deployed app.
+   */
+  GLASSTRACE_DECISION_TRACE: z.string().optional(),
   NODE_ENV: z.string().optional(),
   VERCEL_ENV: z.string().optional(),
 });

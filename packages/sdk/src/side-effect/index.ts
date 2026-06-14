@@ -42,6 +42,11 @@ import {
   recordOmission,
 } from "./emit.js";
 import { getActiveConfig } from "../init-client.js";
+import {
+  decisionTrace,
+  decisionTraceEnabled,
+  _resetDecisionTraceForTesting,
+} from "../decision-trace.js";
 
 // ---------------------------------------------------------------------------
 // Vocabulary-governance signals (DISC-1878 + DISC-1879)
@@ -250,6 +255,9 @@ export function _resetSideEffectVocabState(): void {
   _recentPatternKeys.length = 0;
   _proliferationWarned = false;
   _noActiveSpanWarned = false;
+  // Clear decision-trace toggle + dedup state so the capture-gate
+  // decision lines do not leak across describe blocks.
+  _resetDecisionTraceForTesting();
 }
 
 /**
@@ -442,6 +450,18 @@ function runRecordSideEffect(
     captureEnabled = getActiveConfig().sideEffectEvidence === true;
   } catch {
     captureEnabled = false;
+  }
+  // Decision trace (hot path): record which branch this call-site gate
+  // took. Call-site guarded so the detail object is not built when the
+  // toggle is OFF. Keyed by surface AND outcome so the `recordSideEffect`
+  // surface stays distinct from the `capture()` / `prismaAdapter` value
+  // paths, and an enabled→disabled rotation re-emits once.
+  if (decisionTraceEnabled()) {
+    const outcome = captureEnabled ? "enabled" : "disabled";
+    decisionTrace("capture.sideEffectEvidence", outcome, {
+      inputs: { surface: "recordSideEffect" },
+      oneShotKey: `capture.sideEffectEvidence:recordSideEffect:${outcome}`,
+    });
   }
   if (!captureEnabled) {
     // Note: we deliberately do NOT increment a `capture_disabled`
