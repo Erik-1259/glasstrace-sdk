@@ -2,7 +2,15 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
-    "outDir": "dist",
+    // Typecheck (`tsc -b`) emits its full per-module declaration tree to a
+    // dedicated, gitignored, never-published directory rather than `dist/`.
+    // The published surface in `dist/` is produced solely by tsup (a single
+    // bundled `.d.ts` per entry, configured via tsconfig.build.json). Keeping
+    // tsc's per-module output out of `dist/` ensures the no-internal-ids guard
+    // only ever scans what actually ships, and prevents stray per-module
+    // declarations from being published via the package's `files: ["dist"]`.
+    "outDir": "tsc-out",
+    "tsBuildInfoFile": "tsc-out/tsconfig.tsbuildinfo",
     "rootDir": "src"
   },
   "include": ["src"],

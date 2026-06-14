@@ -20,7 +20,12 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ["**/dist/", "**/node_modules/", "**/coverage/"],
+    ignores: [
+      "**/dist/",
+      "**/tsc-out/",
+      "**/node_modules/",
+      "**/coverage/",
+    ],
   },
   {
     files: ["packages/sdk/src/**/*.{ts,tsx,js,mjs,cjs}"],
