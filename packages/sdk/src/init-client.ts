@@ -24,6 +24,15 @@ import {
   refreshGenericMcpConfigAtRuntime,
 } from "./mcp-runtime.js";
 import { atomicWriteFile } from "./atomic-write.js";
+import {
+  getActiveConfigResponse,
+  setActiveConfig,
+  isConfigCacheChecked,
+  markConfigCacheChecked,
+  getStoredAttrHmacKey,
+  isAttrHmacKeyProvisioned as isAttrHmacKeyProvisionedInStore,
+  _resetActiveConfigForTesting,
+} from "./active-config-store.js";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const CONFIG_FILE = "config";
@@ -79,11 +88,15 @@ function loadFsSyncOrNull(): { readFileSync: typeof import("node:fs").readFileSy
 type HttpsPostJsonFn = typeof httpsPostJson;
 let transportOverride: HttpsPostJsonFn | null = null;
 
-/** In-memory config from the latest successful init response. */
-let currentConfig: SdkInitResponse | null = null;
-
-/** Whether the disk cache has already been checked by getActiveConfig(). */
-let configCacheChecked = false;
+// The resolved active capture-config (`currentConfig`) and the once-per-
+// process disk-cache-checked flag (`configCacheChecked`) live in the
+// `active-config-store` globalThis singleton, not in module-level state.
+// Under Turbopack `next dev` HMR and the edge/node bundle split the
+// bundler can evaluate more than one copy of this module, and plain
+// module-level state would let the copy that applies the served config
+// diverge from the copy the in-request emitter reads — silently dropping
+// capture at the call site. The singleton makes every bundle instance
+// share one record. See `active-config-store.ts`.
 
 /** Whether the next init call should be skipped (rate-limit backoff). */
 let rateLimitBackoff = false;
@@ -479,8 +492,8 @@ export async function performInit(
         undefined,
       );
 
-      // Update in-memory config
-      currentConfig = result;
+      // Update the shared active config (visible to every bundle instance)
+      setActiveConfig(result);
       recordConfigSync(Date.now());
       if (healthReport) {
         acknowledgeHealthReport(healthReport);
@@ -609,21 +622,24 @@ export async function performInit(
  *
  * Internal: the returned object may still carry the per-account `attrHmacKey`
  * secret, so it must not be handed to callers outside this module. The disk
- * read is cached via `configCacheChecked` to avoid repeated synchronous I/O on
- * the hot path (called by GlasstraceExporter on every span export batch).
+ * read is cached via the shared store's cache-checked flag to avoid repeated
+ * synchronous I/O on the hot path (called by GlasstraceExporter on every span
+ * export batch). State is read through the `active-config-store` singleton so
+ * every bundle instance resolves the same config.
  */
 function resolveActiveConfig(): CaptureConfig {
-  // Tier 1: in-memory
-  if (currentConfig) {
-    return currentConfig.config;
+  // Tier 1: in-memory (shared across bundle instances)
+  const current = getActiveConfigResponse();
+  if (current) {
+    return current.config;
   }
 
-  // Tier 2: file cache (only attempt once)
-  if (!configCacheChecked) {
-    configCacheChecked = true;
+  // Tier 2: file cache (only attempt once per process)
+  if (!isConfigCacheChecked()) {
+    markConfigCacheChecked();
     const cached = loadCachedConfig();
     if (cached) {
-      currentConfig = cached;
+      setActiveConfig(cached);
       return cached.config;
     }
   }
@@ -638,6 +654,11 @@ function resolveActiveConfig(): CaptureConfig {
  * application code importing the SDK can never read the tenant secret through
  * it. The passive value-capture adapter reads the key via the internal
  * {@link getAttrHmacKey} accessor instead.
+ *
+ * The shared store no longer carries the secret (it is split off into
+ * module-local state on apply), so this redaction is a defensive safety net
+ * for any path that surfaces a config still holding the field — it is kept
+ * to preserve the invariant regardless of how the config reaches here.
  */
 export function getActiveConfig(): CaptureConfig {
   const config = resolveActiveConfig();
@@ -654,9 +675,26 @@ export function getActiveConfig(): CaptureConfig {
  * `undefined` when none is provisioned. Internal — deliberately NOT exported
  * from the package barrel, so the secret stays off the public API surface;
  * only the passive value-capture adapter reads it.
+ *
+ * Read from module-local state, not the shared `globalThis` record: the
+ * secret is split off when a config is applied so it never lands on the
+ * well-known global symbol where in-isolate code could recover it. See
+ * `active-config-store.ts`.
  */
 export function getAttrHmacKey(): string | undefined {
-  return resolveActiveConfig().attrHmacKey;
+  return getStoredAttrHmacKey();
+}
+
+/**
+ * Whether the active config was served with a per-account `attrHmacKey`,
+ * regardless of whether the key is available in this bundle instance. The id-
+ * projection path uses this to distinguish a genuinely key-less `full` account
+ * (an observable misconfiguration) from a `full` account whose key was applied
+ * in a different bundle copy (which should behave like strict). Internal — not
+ * exported from the package barrel. See `active-config-store.ts`.
+ */
+export function isAttrHmacKeyProvisioned(): boolean {
+  return isAttrHmacKeyProvisionedInStore();
 }
 
 /**
@@ -682,7 +720,7 @@ export function isCaptureEnabled(): boolean {
  * should be included in the response.
  */
 export function getLinkedAccountId(): string | undefined {
-  return currentConfig?.linkedAccountId;
+  return getActiveConfigResponse()?.linkedAccountId;
 }
 
 /**
@@ -694,15 +732,14 @@ export function getLinkedAccountId(): string | undefined {
  * `linkedAccountId` being set yet.
  */
 export function getClaimResult(): SdkInitResponse["claimResult"] {
-  return currentConfig?.claimResult;
+  return getActiveConfigResponse()?.claimResult;
 }
 
 /**
  * Resets the in-memory config store. For testing only.
  */
 export function _resetConfigForTesting(): void {
-  currentConfig = null;
-  configCacheChecked = false;
+  _resetActiveConfigForTesting();
   rateLimitBackoff = false;
   lastInitSucceeded = false;
   transportOverride = null;
@@ -722,9 +759,10 @@ export function _setTransportForTesting(fn: HttpsPostJsonFn | null): void {
 
 /**
  * Sets the in-memory config directly. Used by performInit and the orchestrator.
+ * Writes through the shared store so every bundle instance sees the value.
  */
 export function _setCurrentConfig(config: SdkInitResponse): void {
-  currentConfig = config;
+  setActiveConfig(config);
 }
 
 /**

@@ -628,6 +628,40 @@ describe("prismaAdapter — id intent (full-fidelity pseudonymized capture)", ()
     ).toBe(1);
   });
 
+  it("behaves like strict for an id-only model when the key is provisioned but not local to this bundle instance: opens no span, no token, no omission", async () => {
+    // Simulate a reader bundle copy under Turbopack dev: the account is `full`
+    // and key-provisioned, but the key was applied in a different copy, so it
+    // is not available here. The id path must behave exactly like strict —
+    // open no owned span and record neither a token nor a spurious unhashed-id
+    // omission. Supersede the shared pairing token after applying the keyed
+    // config to reproduce the stale/no-local-key state in a single test
+    // instance.
+    const store = await import(
+      "../../../packages/sdk/src/active-config-store.js"
+    );
+    setFullConfig(HMAC_KEY);
+    expect(store.getStoredAttrHmacKey()).toBe(HMAC_KEY);
+    // Another copy applies a config: overwrite the shared token so this
+    // instance's local key no longer matches (now unavailable here), while the
+    // account stays full + key-provisioned.
+    const shared = (globalThis as Record<symbol, unknown>)[
+      Symbol.for("glasstrace.active-config")
+    ] as { keyToken: object };
+    shared.keyToken = {};
+    expect(store.getStoredAttrHmacKey()).toBeUndefined();
+    expect(store.isAttrHmacKeyProvisioned()).toBe(true);
+
+    await runOperation({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => ({ owner: "u-1" }),
+    });
+    // Strict-equivalent: no owned db span is opened for the id-only model,
+    // matching the zero-overhead strict path (no token, no omission either).
+    expect(exporter.getFinishedSpans().map((s) => s.name)).toEqual(["request"]);
+  });
+
   it("remains a pure observer: returns the result unchanged and ends the owned span despite the async hash", async () => {
     setFullConfig(HMAC_KEY);
     const row = { owner: "u-9" };
