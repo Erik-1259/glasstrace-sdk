@@ -140,43 +140,66 @@ export interface SdkLifecycleEvents {
   "core:shutdown_started": Record<string, never>;
   "core:shutdown_completed": Record<string, never>;
   /**
-   * The boundary-masked-error heuristic fired for an HTTP server span
-   * (same-span scope). Emitted from the enriching
-   * exporter when ALL of the following hold for an HTTP server span:
+   * `core:error_boundary_detected` — fired once per boundary-masked-error promotion.
    *
-   *   1. At least one error signal is present on the span — any of:
-   *      `span.status.code === SpanStatusCode.ERROR`, an `exception`
-   *      event from `recordException()`, OR an `exception.type` /
-   *      `exception.message` span attribute.
-   *   2. `http.status_code` is in the trigger set `{200, 0, undefined}`.
-   *   3. `span.status.code` is not explicitly `OK`.
+   * @property spanId            The OTel spanId of the HTTP **server** span that was promoted to 500.
+   * @property inferredStatus    The promoted status (500, or a 400-599 value parsed from a numeric
+   *                             `error.type` on the server span when present).
+   * @property source            'same_span' when the error signal is on the server span itself;
+   *                             'descendant' when it is on a transitive child span.
+   * @property exceptionSpanId   Present ONLY when source === 'descendant'. The spanId of the
+   *                             earliest-exception descendant (smallest startTimeMs, tie-break
+   *                             smallest spanId). Omitted for same_span. NOTE: this is a DIFFERENT
+   *                             span from `spanId` (the server span).
+   * @property exceptionMessage  First 256 chars of the exception event message (truncated at storage).
+   *                             For source === 'same_span' this is the same content already on the
+   *                             span. For source === 'descendant' it comes from the DESCENDANT span,
+   *                             not the server span, and MAY surface information not otherwise present
+   *                             at the HTTP boundary — a new PII-disclosure surface for descendant source.
    *
-   * When all three hold, the SDK promotes the inferred
+   * The heuristic fires from the enriching exporter when an HTTP server
+   * span (`http.method` present, `span.kind === SpanKind.SERVER`) has a
+   * resolved `glasstrace.http.status_code` in the trigger set
+   * `{200, 0, undefined}`, `span.status.code` is not explicitly `OK`,
+   * and an error signal is found. Two scopes produce the signal:
+   *
+   *   - **same_span:** the server span itself carries the error signal —
+   *     any of `span.status.code === SpanStatusCode.ERROR`, an
+   *     `exception` event from `recordException()`, or an
+   *     `exception.type` / `exception.message` span attribute.
+   *   - **descendant:** a transitive child of the server span recorded an
+   *     `exception` event (the page-route boundary case where the
+   *     exception lives in a framework render span while the request
+   *     renders an HTTP 200), the child is not a known framework
+   *     control-flow throw, and — for render-route children — the
+   *     exception is in the unexpected/infrastructure class rather than a
+   *     generic expected application `Error`.
+   *
+   * When the heuristic fires, the SDK promotes the inferred
    * `glasstrace.http.status_code` (typically to 500, or to a value
-   * parsed from a numeric `error.type` attribute when present) and
-   * fires this event. Informational only — subscribers MAY use it for
+   * parsed from a numeric `error.type` attribute when present) and fires
+   * this event. Informational only — subscribers MAY use it for
    * observability (e.g., heuristic activation rate dashboards) but the
    * heuristic's behavior does NOT depend on subscribers.
    *
-   * **Same-span scope:** this event fires when the HTTP server span
-   * itself carries the error signal (the case the existing
-   * inference block already handled). Descendant-traversal detection
-   * (the page-route boundary case where the exception lives in a
-   * child span) is tracked separately and does NOT emit this event
-   * today.
-   *
-   * **PII-safety:** `exceptionMessage` is truncated to 256 characters
-   * and is the same content already present on the span's exception
-   * event or `exception.message` attribute — no new disclosure surface
-   * beyond what already ships in the trace itself. `exceptionMessage`
-   * is OMITTED from the payload entirely when no exception event /
-   * attribute is present (the `status.code === ERROR`-only case).
-   * `spanId` is the OTel span identifier for the HTTP server span
-   * where the heuristic fired.
+   * **PII-safety (load-bearing).** `exceptionMessage` is truncated to 256
+   * characters. For `source === 'same_span'` it is the same content
+   * already present on the server span's exception event or
+   * `exception.message` attribute — no new disclosure surface beyond what
+   * already ships in the trace itself. For `source === 'descendant'`,
+   * `spanId` (the server span) and `exceptionMessage` (the descendant
+   * span) reference DIFFERENT spans: the message is taken from the
+   * descendant and MAY disclose information that is not otherwise present
+   * at the HTTP boundary — a new PII-disclosure surface for descendant
+   * source. `exceptionMessage` is OMITTED from the payload entirely when
+   * no exception message is available (e.g. the `status.code === ERROR`-only
+   * same-span case).
    */
   "core:error_boundary_detected": {
     spanId: string;
     inferredStatus: number;
+    source: "same_span" | "descendant";
+    exceptionSpanId?: string;
     exceptionMessage?: string;
   };
   /**

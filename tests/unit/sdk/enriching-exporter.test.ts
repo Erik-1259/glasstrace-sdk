@@ -34,16 +34,27 @@ function createMockSpan(overrides?: {
   instrumentationScope?: { name: string; version?: string };
   status?: { code: SpanStatusCode; message?: string };
   events?: Array<{ time: [number, number]; name: string; attributes?: Record<string, string | number | boolean> }>;
+  // Trace-shape overrides for the descendant boundary-masked tests. Runtime
+  // reads `spanContext().traceId` / `spanContext().spanId` and the parent via
+  // `parentSpanContext?.spanId`, so wire both here.
+  traceId?: string;
+  spanId?: string;
+  parentSpanId?: string;
 }): ReadableSpan {
+  const traceId = overrides?.traceId ?? "0af7651916cd43dd8448eb211c80319c";
+  const spanId = overrides?.spanId ?? "b7ad6b7169203331";
   return {
     name: overrides?.name ?? "GET /api/users",
     kind: overrides?.kind ?? SpanKind.SERVER,
     spanContext: () => ({
-      traceId: "0af7651916cd43dd8448eb211c80319c",
-      spanId: "b7ad6b7169203331",
+      traceId,
+      spanId,
       traceFlags: 1,
     }),
-    parentSpanId: undefined,
+    parentSpanContext:
+      overrides?.parentSpanId !== undefined
+        ? { traceId, spanId: overrides.parentSpanId, traceFlags: 1 }
+        : undefined,
     startTime: overrides?.startTime ?? [1700000000, 0],
     endTime: overrides?.endTime ?? [1700000000, 150_000_000], // 150ms
     status: overrides?.status ?? { code: SpanStatusCode.OK },
@@ -1803,10 +1814,11 @@ describe("GlasstraceExporter", () => {
     // and a `core:error_boundary_detected` lifecycle event so the
     // heuristic's activation is observable downstream.
     //
-    // Same-span scope only — the descendant-traversal case (DISC-1125
-    // page-route boundary, where the exception lives in a child span)
-    // is tracked in a follow-up DISC and does NOT emit this attribute
-    // today.
+    // This block covers the same-span scope (the error signal is on the
+    // server span itself). The descendant-traversal page-route case, where
+    // the exception lives on a transitive child span, has its own coverage
+    // in the "descendant scope" block below and in
+    // boundary-masked-opt-out.test.ts.
 
     it("sets boundary_masked: true when the inference block fires (status_code=200)", () => {
       const { exporter, delegate } = createExporter();
@@ -2135,6 +2147,325 @@ describe("GlasstraceExporter", () => {
         "core:error_boundary_detected",
         handler,
       );
+    });
+  });
+
+  describe("Boundary-masked-error audit — descendant (page-route) scope", () => {
+    // The page-route boundary case: an HTTP SERVER span renders a 200 while a
+    // transitive child span (e.g. a Next.js render-route span) carries the
+    // exception. The descendant consult runs only in the else-branch where the
+    // server span had no same-span error signal, applies the full false-
+    // positive fence, and promotes the SERVER span (never the descendant) on a
+    // qualifying transitive-descendant exception.
+
+    const D_TRACE = "11111111111111111111111111111111";
+    const D_SERVER = "aaaaaaaaaaaaaaaa";
+    const D_RENDER = "bbbbbbbbbbbbbbbb";
+
+    function descendantServerSpan(overrides?: {
+      status?: { code: SpanStatusCode };
+      attributes?: Record<string, string | number | boolean>;
+    }): ReadableSpan {
+      return createMockSpan({
+        name: "GET /[locale]/dashboard",
+        kind: SpanKind.SERVER,
+        traceId: D_TRACE,
+        spanId: D_SERVER,
+        status: overrides?.status ?? { code: SpanStatusCode.UNSET },
+        attributes: overrides?.attributes ?? {
+          "http.method": "GET",
+          "http.route": "/[locale]/dashboard",
+          "http.status_code": 200,
+        },
+        events: [],
+      });
+    }
+
+    function renderRouteDescendant(overrides?: {
+      spanId?: string;
+      parentSpanId?: string;
+      startTime?: [number, number];
+      attributes?: Record<string, string | number | boolean>;
+      exceptionType?: string;
+      exceptionMessage?: string;
+    }): ReadableSpan {
+      return createMockSpan({
+        name: "render route (app) /[locale]/dashboard",
+        kind: SpanKind.INTERNAL,
+        traceId: D_TRACE,
+        spanId: overrides?.spanId ?? D_RENDER,
+        parentSpanId: overrides?.parentSpanId ?? D_SERVER,
+        startTime: overrides?.startTime ?? [1700000000, 50_000_000],
+        status: { code: SpanStatusCode.ERROR },
+        attributes:
+          overrides?.attributes ?? { "next.span_type": "AppRender.getBodyResult" },
+        events: [
+          createExceptionEvent(
+            overrides?.exceptionType ?? "PrismaClientKnownRequestError",
+            overrides?.exceptionMessage ?? "Can't reach database server (P1001)",
+          ),
+        ],
+      });
+    }
+
+    function findEnrichedServer(
+      delegate: ReturnType<typeof createMockDelegate>,
+    ): ReadableSpan {
+      return delegate.exportedSpans[0].find(
+        (s) => s.spanContext().spanId === D_SERVER,
+      )!;
+    }
+
+    it("promotes a SERVER 200 from a qualifying infra render-route descendant (true positive)", () => {
+      const { exporter, delegate } = createExporter();
+      exporter.export([descendantServerSpan(), renderRouteDescendant()], vi.fn());
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBe(true);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe("descendant");
+    });
+
+    it("leaves a render-route descendant with a generic Error at 200 (false-positive fence)", () => {
+      const { exporter, delegate } = createExporter();
+      exporter.export(
+        [
+          descendantServerSpan(),
+          renderRouteDescendant({
+            exceptionType: "Error",
+            exceptionMessage: "expected error boundary fallback",
+          }),
+        ],
+        vi.fn(),
+      );
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBeUndefined();
+    });
+
+    // P1 #1 — fence #2 (status.code !== OK) must be enforced on the descendant
+    // path too. An explicitly-OK SERVER 200 means the handler recovered; a
+    // qualifying infra descendant must NOT false-promote it to 500.
+    it("does NOT promote an explicitly-OK SERVER 200 even with a qualifying infra descendant (fence #2)", async () => {
+      const lifecycle = await import("../../../packages/sdk/src/lifecycle.js");
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const { exporter, delegate } = createExporter();
+      exporter.export(
+        [
+          descendantServerSpan({
+            status: { code: SpanStatusCode.OK },
+            attributes: {
+              "http.method": "GET",
+              "http.route": "/[locale]/dashboard",
+              "http.status_code": 200,
+            },
+          }),
+          renderRouteDescendant(),
+        ],
+        vi.fn(),
+      );
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBeUndefined();
+      expect(handler).not.toHaveBeenCalled();
+
+      lifecycle.offLifecycleEvent("core:error_boundary_detected", handler);
+    });
+
+    // P1 #2 — the expected-error escape hatch must be honored on the
+    // DESCENDANT exception-bearer, not only on the SERVER span. An app marks
+    // the boundary itself; the server span is typically unmarked.
+    it("does NOT promote when the DESCENDANT carries glasstrace.error.expected (server unmarked)", async () => {
+      const lifecycle = await import("../../../packages/sdk/src/lifecycle.js");
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const { exporter, delegate } = createExporter();
+      exporter.export(
+        [
+          descendantServerSpan(),
+          renderRouteDescendant({
+            attributes: {
+              "next.span_type": "AppRender.getBodyResult",
+              "glasstrace.error.expected": true,
+            },
+          }),
+        ],
+        vi.fn(),
+      );
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBeUndefined();
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBeUndefined();
+      expect(handler).not.toHaveBeenCalled();
+
+      lifecycle.offLifecycleEvent("core:error_boundary_detected", handler);
+    });
+
+    // P3 #5 — the earliest-exception ranking considers ONLY the qualifying
+    // set. An earlier non-qualifying generic-Error descendant must not win the
+    // earliest slot over a later qualifying infra descendant.
+    it("ranks only qualifying descendants: a later Prisma span wins over an earlier generic Error", async () => {
+      const lifecycle = await import("../../../packages/sdk/src/lifecycle.js");
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const EARLY_RENDER = "cccccccccccccccc";
+      const LATE_RENDER = "dddddddddddddddd";
+      const { exporter, delegate } = createExporter();
+      exporter.export(
+        [
+          descendantServerSpan(),
+          // Earlier (startTime 40ms) render-route span with a NON-qualifying
+          // generic Error.
+          renderRouteDescendant({
+            spanId: EARLY_RENDER,
+            startTime: [1700000000, 40_000_000],
+            exceptionType: "Error",
+            exceptionMessage: "expected boundary",
+          }),
+          // Later (startTime 60ms) render-route span with a qualifying Prisma
+          // infra exception.
+          renderRouteDescendant({
+            spanId: LATE_RENDER,
+            startTime: [1700000000, 60_000_000],
+            exceptionType: "PrismaClientKnownRequestError",
+            exceptionMessage: "Can't reach database server (P1001)",
+          }),
+        ],
+        vi.fn(),
+      );
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe("descendant");
+      expect(handler).toHaveBeenCalledTimes(1);
+      const payload = handler.mock.calls[0][0] as { exceptionSpanId?: string };
+      // The later Prisma span wins the earliest-qualifying slot, not the
+      // earlier non-qualifying generic Error.
+      expect(payload.exceptionSpanId).toBe(LATE_RENDER);
+
+      lifecycle.offLifecycleEvent("core:error_boundary_detected", handler);
+    });
+
+    // P3 #6 — a numeric error.type (400-599) on the SERVER span overrides the
+    // default 500 on the descendant path, mirroring the same-span path.
+    it("honors a numeric error.type override (503) on the SERVER span for descendant promotion", async () => {
+      const lifecycle = await import("../../../packages/sdk/src/lifecycle.js");
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const { exporter, delegate } = createExporter();
+      exporter.export(
+        [
+          descendantServerSpan({
+            attributes: {
+              "http.method": "GET",
+              "http.route": "/[locale]/dashboard",
+              "http.status_code": 200,
+              "error.type": "503",
+            },
+          }),
+          renderRouteDescendant(),
+        ],
+        vi.fn(),
+      );
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(503);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe("descendant");
+      expect(handler).toHaveBeenCalledTimes(1);
+      const payload = handler.mock.calls[0][0] as { inferredStatus: number };
+      expect(payload.inferredStatus).toBe(503);
+
+      lifecycle.offLifecycleEvent("core:error_boundary_detected", handler);
+    });
+
+    // P4 #10 — a non-render qualifying descendant whose exception event has a
+    // type but no message: promotes, lifecycle source 'descendant',
+    // exceptionSpanId set, exceptionMessage key omitted from the payload.
+    it("omits exceptionMessage when the descendant exception has a type but no message", async () => {
+      const lifecycle = await import("../../../packages/sdk/src/lifecycle.js");
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const NON_RENDER = "eeeeeeeeeeeeeeee";
+      const { exporter, delegate } = createExporter();
+      // Non-render descendant (no next.span_type): promotes on any
+      // non-control-flow exception event. Its exception event has a type but
+      // no message.
+      const nonRender = createMockSpan({
+        name: "db query",
+        kind: SpanKind.INTERNAL,
+        traceId: D_TRACE,
+        spanId: NON_RENDER,
+        parentSpanId: D_SERVER,
+        startTime: [1700000000, 50_000_000],
+        status: { code: SpanStatusCode.ERROR },
+        attributes: { "db.system": "postgresql" },
+        events: [createExceptionEvent("ECONNREFUSED")],
+      });
+      exporter.export([descendantServerSpan(), nonRender], vi.fn());
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe("descendant");
+      expect(handler).toHaveBeenCalledTimes(1);
+      const payload = handler.mock.calls[0][0] as {
+        source: string;
+        exceptionSpanId?: string;
+        exceptionMessage?: string;
+      };
+      expect(payload.source).toBe("descendant");
+      expect(payload.exceptionSpanId).toBe(NON_RENDER);
+      expect("exceptionMessage" in payload).toBe(false);
+
+      lifecycle.offLifecycleEvent("core:error_boundary_detected", handler);
+    });
+
+    it("does NOT enter the descendant consult when the SERVER span has its own exception event (no double emit)", async () => {
+      // Same-span-first gate (#3): a server span with its own exception event
+      // promotes via the same-span path and emits exactly once. The descendant
+      // consult must not run in addition.
+      const lifecycle = await import("../../../packages/sdk/src/lifecycle.js");
+      const handler = vi.fn();
+      lifecycle.onLifecycleEvent("core:error_boundary_detected", handler);
+
+      const { exporter, delegate } = createExporter();
+      const serverWithOwnException = createMockSpan({
+        name: "GET /[locale]/dashboard",
+        kind: SpanKind.SERVER,
+        traceId: D_TRACE,
+        spanId: D_SERVER,
+        status: { code: SpanStatusCode.UNSET },
+        attributes: {
+          "http.method": "GET",
+          "http.route": "/[locale]/dashboard",
+          "http.status_code": 200,
+        },
+        events: [createExceptionEvent("TypeError", "own-span boom")],
+      });
+      exporter.export([serverWithOwnException, renderRouteDescendant()], vi.fn());
+
+      const enriched = findEnrichedServer(delegate);
+      expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+      expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe("same_span");
+      expect(handler).toHaveBeenCalledTimes(1);
+      const payload = handler.mock.calls[0][0] as {
+        source: string;
+        exceptionSpanId?: string;
+      };
+      expect(payload.source).toBe("same_span");
+      expect("exceptionSpanId" in payload).toBe(false);
+
+      lifecycle.offLifecycleEvent("core:error_boundary_detected", handler);
     });
   });
 

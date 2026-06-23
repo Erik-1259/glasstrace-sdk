@@ -42,6 +42,325 @@ export type ExportCircuitFailureCategory =
 /** Three-state machine per the Wave 15C design memo. */
 export type ExportCircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
+// ---------------------------------------------------------------------------
+// Per-trace boundary-masked error tracking
+//
+// The descendant boundary-masked-error detection in `enriching-exporter.ts`
+// needs to correlate an exception recorded on a transitive child span with
+// the HTTP server span that rendered it — and the two can arrive in
+// different export batches. The breaker singleton hosts this per-trace
+// state so it survives multiple `createGlasstraceSpanProcessor()` calls in
+// one process and shares the singleton's key-rotation lifecycle.
+//
+// Memory is bounded three ways: per-trace caps on the recorded parent links
+// (`MAX_LINKS_PER_TRACE`) and the recorded exception entries
+// (`MAX_EXCEPTIONS_PER_TRACE`), plus a process-wide cap on tracked traces
+// (`MAX_TRACKED_TRACES`) with TTL-then-LRU eviction. Every bound degrades
+// to a documented detection miss (the parent stays at its original status),
+// never a false promotion: a dropped link, dropped exception entry, or evicted
+// entry can only *prevent* a promotion, never fabricate one.
+// ---------------------------------------------------------------------------
+
+/**
+ * One exception-bearing span recorded in a trace, used to confirm a
+ * candidate is a transitive descendant of an HTTP server span and to pick
+ * the deterministic earliest-exception span.
+ */
+export interface ExceptionLineageEntry {
+  /** The descendant span that recorded the exception. */
+  spanId: string;
+  /** Parent span id for the ancestor walk; undefined for a trace root. */
+  parentSpanId?: string;
+  /** hrTime → ms; used for the deterministic earliest-exception tie-break. */
+  startTimeMs: number;
+  /** First 256 chars of the exception message, pre-truncated at write time. */
+  message?: string;
+  /** The exception type string, when present. */
+  type?: string;
+  /** The descendant's `next.span_type` attribute, when present (render-route detection). */
+  nextSpanType?: string;
+  /**
+   * True when the descendant span carried `glasstrace.error.expected === true`.
+   * An expected boundary is never promotable — the escape hatch must be honored
+   * on the exception-bearer itself, not only on the HTTP server span.
+   */
+  expected?: boolean;
+}
+
+/**
+ * Aggregated per-trace state used by descendant boundary-masked detection.
+ */
+export interface TraceErrorState {
+  /**
+   * All exception-bearing spans in this trace, keyed by spanId for O(1)
+   * lineage lookup. Capped at {@link MAX_EXCEPTIONS_PER_TRACE}; overflow drops
+   * further entries and sets {@link lineageOverflow} (a documented miss).
+   */
+  lineageBySpanId: Map<string, ExceptionLineageEntry>;
+  /**
+   * parentSpanId for EVERY span seen in this trace (error AND non-error),
+   * keyed by spanId, so the ancestor walk can bridge a non-error
+   * intermediate span that ended in an earlier batch. Capped at
+   * {@link MAX_LINKS_PER_TRACE}.
+   */
+  parentLinks: Map<string, string | undefined>;
+  /** spanId of the earliest exception span (smallest startTimeMs; tie-break smallest spanId). */
+  firstExceptionSpanId?: string;
+  /** Start time (ms) of the earliest exception span — the tie-break key. */
+  firstExceptionStartMs?: number;
+  /** Message of the earliest exception span, pre-truncated to 256 chars at write time. */
+  firstExceptionMessage?: string;
+  /** Whether the per-trace parentLinks cap has been hit (a documented miss). */
+  parentLinkOverflow: boolean;
+  /** Whether the per-trace lineage cap has been hit (a documented miss). */
+  lineageOverflow: boolean;
+  createdAtMs: number;
+  lastAccessedAtMs: number;
+}
+
+/** Counters exposed for observability and tests. */
+export interface TraceErrorCounters {
+  evictions: number;
+  keyValidationFailures: number;
+  parentLinkOverflow: number;
+  lineageOverflow: number;
+}
+
+/**
+ * Per-trace boundary-masked error store hosted on the breaker singleton.
+ * Pure in-memory logic (no I/O); shares the singleton's lifecycle so a
+ * credential rotation drops stale `${traceId}#${sessionId}` entries.
+ */
+export interface TraceErrorStore {
+  /** Records a span's parent link (every span — error and non-error). */
+  recordParentLink(key: string, spanId: string, parentSpanId: string | undefined, nowMs: number): void;
+  /** Records an exception-bearing span and updates the earliest-exception bookkeeping. */
+  recordException(key: string, entry: ExceptionLineageEntry, nowMs: number): void;
+  /** Reads a trace's state, touching its LRU timestamp. Returns undefined if absent. */
+  consult(key: string, nowMs: number): TraceErrorState | undefined;
+  /** Empties the whole store (key rotation / test reset). */
+  clear(): void;
+  /** Current number of tracked traces. */
+  size(): number;
+  /** Reads (without touching LRU) for tests/observability. */
+  peek(key: string): TraceErrorState | undefined;
+  /** Increments the key-validation-failure counter. */
+  recordKeyValidationFailure(): void;
+  /** Snapshot of the counters. */
+  getCounters(): TraceErrorCounters;
+}
+
+/**
+ * Maximum number of `parentLinks` entries kept per trace. Bounds worst-case
+ * per-trace link memory; covers normal page-route depths
+ * (SERVER → route/component → ORM exception is depth 3). Overflow drops
+ * further links and increments the `parentLinkOverflow` counter — a dropped
+ * link can only suppress a promotion, never cause one.
+ */
+export const MAX_LINKS_PER_TRACE = 512;
+
+/**
+ * Maximum number of exception-lineage entries kept per trace. Bounds worst-case
+ * per-trace exception memory independently of {@link MAX_LINKS_PER_TRACE}
+ * (a trace can record far more parent links than exceptions). Overflow drops
+ * further exception entries and increments the `exceptionOverflow` counter
+ * while preserving the earliest-exception bookkeeping — a dropped entry can
+ * only suppress a promotion, never cause one.
+ */
+export const MAX_EXCEPTIONS_PER_TRACE = 256;
+
+/**
+ * Maximum number of distinct traces tracked at once. Sized to the concurrent
+ * in-flight trace cardinality. On overflow the store evicts by TTL first,
+ * then LRU (tie-broken by oldest-inserted) — both deterministic.
+ */
+export const MAX_TRACKED_TRACES = 1024;
+
+/**
+ * How long (ms) a trace's error state is retained before it ages out. Generous
+ * enough that a normal late descendant is still present when the parent server
+ * span is consulted, while error-only traces with no server span age out.
+ */
+export const TRACE_ERROR_TTL_MS = 300_000;
+
+/** Message-storage cap shared with the lifecycle emit boundary. */
+const MAX_EXCEPTION_MESSAGE_CHARS = 256;
+
+function createTraceErrorStore(): TraceErrorStore {
+  const traces = new Map<string, TraceErrorState>();
+  let evictions = 0;
+  let keyValidationFailures = 0;
+  let parentLinkOverflow = 0;
+  let lineageOverflow = 0;
+
+  function isStale(state: TraceErrorState, nowMs: number): boolean {
+    return nowMs - state.createdAtMs > TRACE_ERROR_TTL_MS;
+  }
+
+  function makeFreshState(nowMs: number): TraceErrorState {
+    return {
+      lineageBySpanId: new Map(),
+      parentLinks: new Map(),
+      parentLinkOverflow: false,
+      lineageOverflow: false,
+      createdAtMs: nowMs,
+      lastAccessedAtMs: nowMs,
+    };
+  }
+
+  function expireAndEvict(nowMs: number): void {
+    // TTL sweep first: drop entries older than the TTL regardless of size.
+    for (const [key, state] of traces) {
+      if (isStale(state, nowMs)) {
+        traces.delete(key);
+        evictions += 1;
+      }
+    }
+    // LRU eviction if still over the cap: evict least-recently-accessed,
+    // tie-broken by oldest-inserted (smallest createdAtMs) so the order is
+    // deterministic and tests cannot flake.
+    while (traces.size > MAX_TRACKED_TRACES) {
+      let victimKey: string | undefined;
+      let victim: TraceErrorState | undefined;
+      for (const [key, state] of traces) {
+        if (
+          victim === undefined ||
+          state.lastAccessedAtMs < victim.lastAccessedAtMs ||
+          (state.lastAccessedAtMs === victim.lastAccessedAtMs &&
+            state.createdAtMs < victim.createdAtMs)
+        ) {
+          victim = state;
+          victimKey = key;
+        }
+      }
+      if (victimKey === undefined) break;
+      traces.delete(victimKey);
+      evictions += 1;
+    }
+  }
+
+  function getOrCreate(key: string, nowMs: number): TraceErrorState {
+    const existing = traces.get(key);
+    if (existing !== undefined && !isStale(existing, nowMs)) {
+      existing.lastAccessedAtMs = nowMs;
+      return existing;
+    }
+    // Either no entry, or the existing one has aged past the TTL but was not
+    // yet swept (TTL eviction runs lazily, on new-key inserts). Reusing the
+    // same `${traceId}#${sessionId}` after the TTL — a traceId collision, a
+    // long-delayed retry, or a deterministic fixture — must NOT resurrect a
+    // stale descendant exception to promote a fresh server span (a false 500).
+    // Evict the aged entry and start fresh so old lineage can only be dropped,
+    // never reused (fail-open).
+    if (existing !== undefined) {
+      evictions += 1;
+    }
+    const state = makeFreshState(nowMs);
+    traces.set(key, state);
+    expireAndEvict(nowMs);
+    // expireAndEvict cannot drop the entry just inserted (createdAtMs === nowMs
+    // so it is not stale, and it is the most-recently-accessed so never the LRU
+    // victim). Re-read to stay correct if that invariant ever changes.
+    return traces.get(key) ?? state;
+  }
+
+  return {
+    recordParentLink(key, spanId, parentSpanId, nowMs): void {
+      const state = getOrCreate(key, nowMs);
+      if (state.parentLinks.has(spanId)) return;
+      if (state.parentLinks.size >= MAX_LINKS_PER_TRACE) {
+        if (!state.parentLinkOverflow) {
+          state.parentLinkOverflow = true;
+        }
+        parentLinkOverflow += 1;
+        return;
+      }
+      state.parentLinks.set(spanId, parentSpanId);
+    },
+
+    recordException(key, entry, nowMs): void {
+      const state = getOrCreate(key, nowMs);
+      const stored: ExceptionLineageEntry = {
+        ...entry,
+        message:
+          entry.message !== undefined
+            ? entry.message.slice(0, MAX_EXCEPTION_MESSAGE_CHARS)
+            : undefined,
+      };
+      // Per-trace lineage cap: a new spanId past the cap is dropped (and the
+      // overflow counter bumped) rather than admitted. Re-recording an already
+      // tracked spanId always overwrites in place — it never counts against the
+      // cap. A dropped entry can only suppress a promotion, never cause one.
+      if (
+        !state.lineageBySpanId.has(entry.spanId) &&
+        state.lineageBySpanId.size >= MAX_EXCEPTIONS_PER_TRACE
+      ) {
+        if (!state.lineageOverflow) state.lineageOverflow = true;
+        lineageOverflow += 1;
+        return;
+      }
+      state.lineageBySpanId.set(entry.spanId, stored);
+      // Also record its parent link so the walk can traverse it.
+      if (!state.parentLinks.has(entry.spanId)) {
+        if (state.parentLinks.size < MAX_LINKS_PER_TRACE) {
+          state.parentLinks.set(entry.spanId, entry.parentSpanId);
+        } else {
+          if (!state.parentLinkOverflow) state.parentLinkOverflow = true;
+          parentLinkOverflow += 1;
+        }
+      }
+      // Update earliest-exception bookkeeping (smallest startTimeMs, tie-break
+      // smallest spanId lexicographically) — deterministic across runs.
+      const isEarlier =
+        state.firstExceptionStartMs === undefined ||
+        entry.startTimeMs < state.firstExceptionStartMs ||
+        (entry.startTimeMs === state.firstExceptionStartMs &&
+          (state.firstExceptionSpanId === undefined ||
+            entry.spanId < state.firstExceptionSpanId));
+      if (isEarlier) {
+        state.firstExceptionSpanId = entry.spanId;
+        state.firstExceptionStartMs = entry.startTimeMs;
+        state.firstExceptionMessage = stored.message;
+      }
+    },
+
+    consult(key, nowMs): TraceErrorState | undefined {
+      const state = traces.get(key);
+      if (state === undefined) return undefined;
+      // Evict-on-access: an entry aged past the TTL but not yet swept must not
+      // promote a fresh server span from stale lineage (a false 500). Drop it
+      // and report no lineage (fail-open) rather than returning stale state.
+      if (isStale(state, nowMs)) {
+        traces.delete(key);
+        evictions += 1;
+        return undefined;
+      }
+      state.lastAccessedAtMs = nowMs;
+      return state;
+    },
+
+    clear(): void {
+      traces.clear();
+    },
+
+    size(): number {
+      return traces.size;
+    },
+
+    peek(key): TraceErrorState | undefined {
+      return traces.get(key);
+    },
+
+    recordKeyValidationFailure(): void {
+      keyValidationFailures += 1;
+    },
+
+    getCounters(): TraceErrorCounters {
+      return { evictions, keyValidationFailures, parentLinkOverflow, lineageOverflow };
+    },
+  };
+}
+
 /**
  * Initial backoff timer applied on the first OPEN transition. Doubled
  * on each successive HALF_OPEN→OPEN transition until {@link MAX_BACKOFF_MS}.
@@ -195,11 +514,23 @@ export interface ExportCircuitBreaker {
    * pending probe timer, and emits `otel:circuit_closed` if the
    * breaker was non-CLOSED. Bumps the generation counter so any
    * in-flight HALF_OPEN probe completion handler is observed as
-   * stale and discarded.
+   * stale and discarded. Also clears the per-trace boundary-masked
+   * error store — key rotation changes the session id, so stale
+   * `${traceId}#${sessionId}` entries must drop (an old-session
+   * descendant error must not promote a new-context server span).
    *
    * Called on credential rotation per memo §Decision 7.
    */
   resetForKeyRotation(): void;
+  /**
+   * The per-trace boundary-masked error store used by descendant
+   * status inference. Hosted on the breaker singleton so it survives
+   * multiple span-processor constructions in one process and shares
+   * this breaker's key-rotation lifecycle.
+   */
+  readonly traceErrors: TraceErrorStore;
+  /** Empties the per-trace boundary-masked error store. */
+  clearTraceErrors(): void;
   /**
    * Returns the current generation counter. The HALF_OPEN probe
    * captures this value at probe-issue time and compares it on
@@ -357,6 +688,7 @@ export function createExportCircuitBreaker(
     ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 
   // ---- Internal mutable state ----------------------------------------------
+  const traceErrors = createTraceErrorStore();
   let state: ExportCircuitState = "CLOSED";
   let consecutiveFailures = 0;
   let currentBackoffMs = INITIAL_BACKOFF_MS;
@@ -558,6 +890,10 @@ export function createExportCircuitBreaker(
       consecutiveFailures = 0;
       currentBackoffMs = INITIAL_BACKOFF_MS;
       clearPendingTimer();
+      // Drop stale per-trace boundary-masked entries: rotation changes
+      // the session id, so an old-session descendant error must not
+      // promote a new-context server span.
+      traceErrors.clear();
       if (wasNonClosed) {
         transitionToClosed();
       }
@@ -565,6 +901,12 @@ export function createExportCircuitBreaker(
 
     getGeneration(): number {
       return generation;
+    },
+
+    traceErrors,
+
+    clearTraceErrors(): void {
+      traceErrors.clear();
     },
   };
 }

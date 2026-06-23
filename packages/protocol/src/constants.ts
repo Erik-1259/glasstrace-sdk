@@ -22,8 +22,9 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
   /**
    * Boolean audit attribute set to `true` only when the SDK's
    * boundary-masked-error heuristic at `enriching-exporter.ts`
-   * fires. Scoped to the same span; descendant-traversal scope is a
-   * planned follow-up.
+   * fires. Both same-span and descendant-aware scopes are supported;
+   * the companion {@link GLASSTRACE_ATTRIBUTE_NAMES.HTTP_BOUNDARY_MASKED_SCOPE}
+   * attribute records which scope produced the promotion.
    *
    * Strict additivity: backend ingestion ignores unknown attributes
    * today; this attribute is for audit/observability. Downstream
@@ -34,6 +35,28 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
    * Absent on spans where the heuristic did not fire.
    */
   HTTP_BOUNDARY_MASKED: "glasstrace.http.boundary_masked",
+  /**
+   * Scope discriminator set alongside
+   * {@link GLASSTRACE_ATTRIBUTE_NAMES.HTTP_BOUNDARY_MASKED} whenever the
+   * boundary-masked-error heuristic promotes a span. Two values:
+   *
+   *   - `'same_span'` — the error signal (ERROR status, an `exception`
+   *     event, or an `exception.*` attribute) is on the HTTP server
+   *     span itself.
+   *   - `'descendant'` — the error signal is on a transitive child of
+   *     the HTTP server span (the page-route boundary case, where a
+   *     framework render span carries the exception while the request
+   *     renders an HTTP 200).
+   *
+   * Strict additivity: the value persists through the current
+   * ingestion pipeline untouched — no allowlist or ingestion change is
+   * required for it to be stored. Surfacing it on the read path (so a
+   * consumer can distinguish the two scopes via a query tool) is a
+   * separate downstream prerequisite, not implied by storage.
+   *
+   * Absent on spans where the heuristic did not fire.
+   */
+  HTTP_BOUNDARY_MASKED_SCOPE: "glasstrace.http.boundary_masked_scope",
   ERROR_MESSAGE: "glasstrace.error.message",
   ERROR_CODE: "glasstrace.error.code",
   ERROR_CATEGORY: "glasstrace.error.category",

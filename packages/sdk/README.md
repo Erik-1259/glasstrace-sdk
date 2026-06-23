@@ -363,6 +363,80 @@ A future SDK release may extend the auto-attach detection to recognize
 additional Next 16 provider shapes; until that ships, the manual path
 above is the production-supported integration.
 
+## Next.js / boundary-masked error detection
+
+Some frameworks return an HTTP 200 to the browser even though the
+request actually failed — Next.js App Router is the common case: an
+unhandled exception is caught by an `error.tsx` boundary, the user sees
+a rendered error page, and the wire status stays 200. The underlying
+error is real, but a status-only view of the trace would never surface
+it. Glasstrace detects this and promotes the **stored** status so the
+failure is queryable.
+
+Detection has two scopes:
+
+- **Same-span** — the HTTP server span itself carries the error signal
+  (an OTel `ERROR` status, an `exception` event from
+  `recordException()`, or an `exception.*` attribute) while its reported
+  HTTP status is `200`, `0`, or absent.
+- **Descendant** (the page-route boundary case) — the server span
+  renders an HTTP 200, but a **transitive child span** (for example a
+  Next.js render-route span) recorded an `exception` event. This is the
+  case where the error lives one or more spans below the request span.
+
+When detection fires, the SDK sets, on the **server** span:
+
+```
+glasstrace.http.status_code        = 500
+glasstrace.http.boundary_masked    = true
+glasstrace.http.boundary_masked_scope = "same_span" | "descendant"
+```
+
+### Status asymmetry (important)
+
+The promotion writes the Glasstrace attribute
+`glasstrace.http.status_code = 500` but **leaves the OpenTelemetry
+`http.status_code` at its original `200`**. The browser already received
+a real HTTP 200 — that is not changed, and no user-facing behavior is
+affected. The original 200 is **not** separately preserved on the span;
+only the Glasstrace status reflects the inferred failure.
+
+### False-positive fences (descendant scope)
+
+Descendant detection requires an exception **event** (not merely an
+`ERROR`-status child) and applies extra fences so expected, intentional
+200s are not promoted:
+
+- **Next control-flow throws stay 200.** `notFound()` and `redirect()`
+  unwind rendering by throwing internally; descendants carrying
+  `NEXT_NOT_FOUND`, `NEXT_REDIRECT`, or `not_found` are never promoted.
+- **Expected `error.tsx` fallbacks stay 200.** A render-route descendant
+  whose only signal is a generic application `Error` (the usual shape of
+  an intentional error boundary) is **not** promoted. Promotion happens
+  only for unexpected/infrastructure failure classes — currently
+  database/driver errors such as a Prisma "can't reach database
+  server" failure. The class list is intentionally narrow and grows
+  additively; an unrecognized failure stays at 200 (a miss, never a
+  false 500).
+- **Explicit opt-out per boundary.** Setting the span attribute
+  `glasstrace.error.expected = true` on the boundary (or the server
+  span) suppresses promotion for that request.
+
+The heuristic is **framework-agnostic** — it fires on any framework that
+propagates an unexpected exception event to a descendant span via
+`recordException()` — but the render-route generic-`Error` suppression is
+specific to the Next.js render-route span shape.
+
+### Disabling detection entirely
+
+Set the environment variable `GLASSTRACE_DISABLE_BOUNDARY_MASKED=1` (or
+`true`, case-insensitive) to turn off boundary-masked promotion
+completely, for **both** the same-span and descendant scopes. With it
+set, the SDK performs no status promotion, sets neither
+`glasstrace.http.boundary_masked` nor
+`glasstrace.http.boundary_masked_scope`, and emits no detection event.
+The flag is read once at startup.
+
 ## Database query spans (Prisma)
 
 When Glasstrace manages the OpenTelemetry provider — the default when
