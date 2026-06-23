@@ -51,6 +51,33 @@ Before assigning work, write down the file zones and owners:
 
 If two items materially overlap, they do not belong in the same wave.
 
+Re-derive this table from the briefs and the current source, naming every
+file each item touches — including shared contract constants, event/lifecycle
+modules, and the README. Do not assert "file-disjoint" or "fully parallel"
+from memory: a single shared file (a constants module, the README) is enough
+to break parallelism. Where two same-wave items share a file, sequence them or
+merge the base branch in at the second merge rather than running both in
+parallel against it.
+
+## Existing-Surfaces Sweep
+
+Before implementing a change that touches a closed enum, an exhaustive
+mapping (e.g. a value keyed by a union type), a hard-coded count, or any
+behavior that a comment, docstring, or README describes, sweep every
+existing surface that encodes the OLD behavior and list each as an explicit
+edit in the implementation plan:
+
+- runtime assertions that pin an exact set or count (an equality check
+  against a literal array, an "exports exactly N keys" test) — a type check
+  will NOT catch these, so they fail the pre-push test gate mid-run;
+- test helpers whose technique depends on the prior internal shape;
+- JSDoc, inline comments, and README prose that state the prior behavior.
+
+Reason about the change by tracing it through every surface that asserts the
+old behavior, not only the new code path. A test or documentation plan that
+is purely additive will either fail the gate or ship documentation that
+contradicts the runtime.
+
 ## Post-PR Baseline
 
 Every branch in a wave must satisfy this common baseline before it is
