@@ -872,6 +872,106 @@ precedence) is dropped and recorded only as an integer omission count.
 Relations count against the same product-side per-operation field budget
 as `fields` (enforced at projection).
 
+### Passive Prisma value capture (`prismaAdapter`)
+
+`prismaAdapter` is a passive Prisma client extension that projects allowlisted
+result columns onto the same value-fidelity scalar channel as
+`recordSideEffect()`'s `scalars` map (see
+[Value-fidelity scalars](#value-fidelity-scalars)) — so an agent can read a
+query's key columns back from the trace without hand-written
+`recordSideEffect()` calls. It is a **pure observer**: it never runs a query
+itself, never reads or mutates the result, never widens your `select`, and
+never changes query behavior or errors — it reads only the allowlisted columns
+it projects. It adds no `@prisma/client` dependency (it is typed structurally).
+
+```ts
+import { PrismaClient } from "@prisma/client";
+import { prismaAdapter } from "@glasstrace/sdk";
+
+const prisma = new PrismaClient().$extends(
+  prismaAdapter({
+    allow: [
+      { model: "Poll", column: "muted", as: "flag" },      // → scalar `mutedFlag`
+      { model: "Poll", column: "voteCount", as: "value" }, // → scalar `voteCountValue`
+      { model: "Poll", column: "userId", as: "id" },       // → scalar `userId` (pseudonymized)
+    ],
+  }),
+);
+```
+
+Each `allow` entry is `{ model, column, as? }`. `as` selects the scalar intent
+and its key suffix (the same suffixes as the manual `scalars` map): `flag`
+(default → `*Flag` boolean), the numeric intents `value` / `amount` / `ms` /
+`bytes` / `ratio` (→ `*Value` / `*Amount` / `*Ms` / `*Bytes` / `*Ratio`), and
+`id` (→ `*Id`, a pseudonymized `gthid_` token). A value whose runtime type does
+not match its intent is dropped, never captured. List operations (`findMany`)
+are not captured (no per-row capture).
+
+`as: "id"` is an operator escalation: it emits a `gthid_` token (the raw id
+hashed under a provisioned per-account key — the raw value never reaches the
+wire) **only** when the account is on `captureFidelity: "full"` with a
+provisioned key. Under the default `strict` posture an `id` column captures
+nothing.
+
+#### The two-allowlist contract
+
+On top of the global side-effect capture gate (the account's
+`sideEffectEvidence` switch must be enabled and the query must run inside an
+active recording request span — see
+[Capturing side-effect evidence](#capturing-side-effect-evidence)), capturing a
+specific column requires **two** default-deny allowlists to agree, and the
+column to actually be returned:
+
+1. **Producer side — your `prismaAdapter({ allow })`** (above). Without a
+   matching entry the SDK emits nothing for that column.
+2. **Operator side — the server allowlist** in your account's capture
+   configuration. The backend re-enforces an independent per-tenant allowlist
+   at ingestion; a value the server allowlist does not list is dropped at
+   ingestion even if the SDK emitted it.
+3. **The column must be in the operation's *returned* row.** The adapter only
+   projects columns present in the result, so an operation that does not return
+   the column — a `create` / `update` with a narrowed `select`, or a `select`
+   that omits it — is silently skipped.
+
+The two allowlists are keyed on **different** things — conflating them is the
+most common misconfiguration:
+
+- The **producer** `allow` is keyed on the **source** column: configure it with
+  the actual result column name and intent (`{ model: "Poll", column: "muted",
+  as: "flag" }`). Do **not** put the derived scalar key here — an entry like
+  `{ column: "mutedFlag" }` matches no result column and captures nothing.
+- The **operator** (server) allowlist is keyed on the **emitted scalar key**
+  that the SDK derives from the source column and intent — `<column><Suffix>`,
+  not doubling a suffix the column already ends in. So
+  `{ column: "muted", as: "flag" }` emits `mutedFlag`,
+  `{ column: "voteCount", as: "value" }` emits `voteCountValue`, and
+  `{ column: "userId", as: "id" }` emits `userId` (it already ends in `Id`, so
+  it is not doubled to `userIdId`). The operator allowlist must list that
+  derived key.
+
+Worked example — capture `Poll.userId` as a pseudonymized id:
+
+```ts
+const prisma = new PrismaClient().$extends(
+  prismaAdapter({ allow: [{ model: "Poll", column: "userId", as: "id" }] }),
+);
+
+await prisma.poll.findUnique({ where: { id } });
+// ✅ returns `userId` → captured as the `userId` scalar (a `gthid_` token)
+
+await prisma.poll.update({ where: { id }, data, select: { muted: true } });
+// ❌ `userId` is not in the returned row → silently skipped
+```
+
+To surface this in the trace you need all of: (1) the `allow` entry above;
+(2) the operator allowlist listing the emitted key `userId`; (3) for the `id`
+intent, the account on `captureFidelity: "full"` with a provisioned key; and
+(4) the operation returning `userId`. Every misconfiguration is
+**fail-closed** — a missing allowlist entry, a missing return column, or a
+non-`full` posture yields no captured value (and, for a genuinely key-less
+`full` account, only a count-only omission marker), never a raw or unhashed
+identifier on the wire.
+
 ## Decision tracing
 
 Many of the SDK's capture, emit, and redact decisions are made silently:
