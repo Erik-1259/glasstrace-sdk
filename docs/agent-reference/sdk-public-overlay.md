@@ -45,10 +45,31 @@ The additional `400` passes should stress:
   worktree or equivalent isolated flow rather than writing into the main
   product working tree directly.
 
+## Release-Mechanics Verification
+
+Do not assert release or version semantics from memory — verify them against
+the repo's own configuration before stating them in a brief, plan, or PR:
+
+- read `.changeset/config.json` (the `updateInternalDependencies`, `linked`,
+  and `fixed` settings) before claiming that one package's bump re-versions
+  another;
+- check each dependency's TYPE in `package.json`. A package consumed only as
+  a bundled `devDependency` (the bundler inlines it via `noExternal`) ships
+  nothing *additional into the bundling package's consumers* on its own release
+  and triggers no internal force-patch — even though that package is itself
+  published, the inlined copy reaches consumers only when the bundling package
+  is republished, carrying the rebuilt output, via its own changeset;
+- classify the version bump against precedent in `CHANGELOG.md`: a newly
+  emitted attribute, marker, or capability is a minor, not a patch, even when
+  it ships alongside a bug fix;
+- enumerate the exact changeset set per package per change, and confirm any
+  public-API change carries its changeset in the same PR.
+
 ## Verification Additions
 
 Before final ready, also confirm:
 
 - the README is current for the public API surface
-- the changeset matches the intended release semantics
+- the changeset matches the intended release semantics (verified per
+  "Release-Mechanics Verification" above, not assumed)
 - the package/build output matches the claimed behavior
