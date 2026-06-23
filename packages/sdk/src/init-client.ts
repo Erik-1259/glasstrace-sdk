@@ -30,7 +30,6 @@ import {
   isConfigCacheChecked,
   markConfigCacheChecked,
   getStoredAttrHmacKey,
-  isAttrHmacKeyProvisioned as isAttrHmacKeyProvisionedInStore,
   _resetActiveConfigForTesting,
 } from "./active-config-store.js";
 
@@ -655,10 +654,11 @@ function resolveActiveConfig(): CaptureConfig {
  * it. The passive value-capture adapter reads the key via the internal
  * {@link getAttrHmacKey} accessor instead.
  *
- * The shared store no longer carries the secret (it is split off into
- * module-local state on apply), so this redaction is a defensive safety net
- * for any path that surfaces a config still holding the field — it is kept
- * to preserve the invariant regardless of how the config reaches here.
+ * The shared store no longer carries the secret in the config object (it is
+ * split into the active-config record's closure holder on apply), so this
+ * redaction is a defensive safety net for any path that surfaces a config still
+ * holding the field — it is kept to preserve the invariant regardless of how
+ * the config reaches here.
  */
 export function getActiveConfig(): CaptureConfig {
   const config = resolveActiveConfig();
@@ -676,25 +676,14 @@ export function getActiveConfig(): CaptureConfig {
  * from the package barrel, so the secret stays off the public API surface;
  * only the passive value-capture adapter reads it.
  *
- * Read from module-local state, not the shared `globalThis` record: the
- * secret is split off when a config is applied so it never lands on the
- * well-known global symbol where in-isolate code could recover it. See
- * `active-config-store.ts`.
+ * Read from the shared active-config record's closure holder, so it is
+ * reachable across bundle copies — including a copy that runs the Prisma
+ * projection without having applied the config itself (the Turbopack-dev bundle
+ * split). The raw key is held in a closure, off the record's enumerable
+ * surface, so it never lands in a serialized dump. See `active-config-store.ts`.
  */
 export function getAttrHmacKey(): string | undefined {
   return getStoredAttrHmacKey();
-}
-
-/**
- * Whether the active config was served with a per-account `attrHmacKey`,
- * regardless of whether the key is available in this bundle instance. The id-
- * projection path uses this to distinguish a genuinely key-less `full` account
- * (an observable misconfiguration) from a `full` account whose key was applied
- * in a different bundle copy (which should behave like strict). Internal — not
- * exported from the package barrel. See `active-config-store.ts`.
- */
-export function isAttrHmacKeyProvisioned(): boolean {
-  return isAttrHmacKeyProvisionedInStore();
 }
 
 /**
