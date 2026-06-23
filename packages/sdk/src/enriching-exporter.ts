@@ -18,6 +18,8 @@ import { getBuildHash } from "./build-info.js";
 import {
   getExportCircuitBreaker,
   type ExportCircuitBreaker,
+  type ExceptionLineageEntry,
+  type TraceErrorState,
 } from "./export-circuit-breaker.js";
 import {
   emitLifecycleEvent,
@@ -31,6 +33,73 @@ const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
  * Sentinel value indicating the API key has not yet been resolved.
  */
 export const API_KEY_PENDING = "pending" as const;
+
+/**
+ * Reads the `GLASSTRACE_DISABLE_BOUNDARY_MASKED` opt-out flag from the
+ * environment. When truthy (`'1'` or `'true'`, case-insensitive), the SDK
+ * skips boundary-masked-error promotion entirely — for both the same-span
+ * and the descendant paths — so a user who does not want any inferred 500
+ * status (and no `boundary_masked` / scope attribute, and no
+ * `core:error_boundary_detected` lifecycle event) can opt out cleanly.
+ *
+ * Read once at module load (not per span) to keep the export hot path free
+ * of a repeated `process.env` lookup.
+ */
+function readBoundaryMaskedDisabled(): boolean {
+  const raw = process.env.GLASSTRACE_DISABLE_BOUNDARY_MASKED;
+  if (typeof raw !== "string") return false;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
+const BOUNDARY_MASKED_DISABLED = readBoundaryMaskedDisabled();
+
+/**
+ * The `next.span_type` value Next.js sets on a render-route span. A
+ * boundary-masked exception on this span is the page-route case: the route
+ * renders an HTTP 200 while a descendant render span carries the exception.
+ */
+const RENDER_ROUTE_SPAN_TYPE = "AppRender.getBodyResult";
+
+/**
+ * Next.js App Router control-flow throw markers. These are NOT errors —
+ * `notFound()` / `redirect()` throw internally to unwind rendering — so a
+ * descendant carrying one of these must never be promoted. v1 matches
+ * case-sensitively against the recorded exception type and message only
+ * (defense-in-depth: these cases usually carry no exception event and so fail
+ * the exception-event gate already, which excludes the no-event control-flow
+ * paths).
+ */
+const NEXT_CONTROL_FLOW_MARKERS = [
+  "NEXT_NOT_FOUND",
+  "NEXT_REDIRECT",
+  "not_found",
+] as const;
+
+/**
+ * Unexpected/infrastructure exception class markers that promote a
+ * render-route descendant. A render-route descendant is suppressed by
+ * default (an expected `error.tsx` fallback over a generic application
+ * `Error` is a legitimate HTTP 200 that must stay 200); it is promoted only
+ * when its exception type or message matches one of these database /
+ * driver failure classes (e.g. a Prisma error or a database-unreachable
+ * failure). Other infrastructure families (network / fetch failures, etc.)
+ * are an intentional v1 omission — a non-match degrades to a documented miss
+ * (see below), and the list is extended additively as fixtures confirm a
+ * family. A boundary can still suppress promotion
+ * regardless of class via the `glasstrace.error.expected === true` escape
+ * hatch (checked by the caller). The list is an explicit, source-pinned
+ * heuristic: a non-match on a real infrastructure failure degrades to a
+ * documented miss, never a false 500.
+ */
+const RENDER_ROUTE_INFRA_MARKERS = [
+  "PrismaClientKnownRequestError",
+  "PrismaClientInitializationError",
+  "PrismaClientRustPanicError",
+  "DriverAdapterError",
+  "P1001",
+  "Can't reach database server",
+] as const;
 
 /**
  * Maximum number of spans to buffer while waiting for key resolution.
@@ -159,6 +228,18 @@ export class GlasstraceExporter implements SpanExporter {
       return;
     }
 
+    const breaker = this.getCircuitBreaker();
+
+    // Pass 1 (boundary-masked descendant tracking): record every span's
+    // parent link and any exception-bearing span into the per-trace error
+    // store BEFORE the circuit-breaker OPEN-drop gate below. The descendant,
+    // an intermediate non-error span, and the parent HTTP server span can
+    // each arrive in a different batch — and a batch dropped by an OPEN
+    // breaker would otherwise lose lineage that a later parent batch needs.
+    // Only the cheap map writes are hoisted; the parent's own enrichment
+    // still respects the OPEN gate.
+    this.recordTraceErrorPass(spans, breaker);
+
     // Circuit-breaker gate (DISC-1568 / Wave 15C). When OPEN, drop
     // the batch entirely: increment the dropped-spans health counter
     // and call back with `{ code: 0 }` so the BSP retries nothing
@@ -166,7 +247,6 @@ export class GlasstraceExporter implements SpanExporter {
     // (rather than buffer) is documented in the design memo §Decision 4
     // — buffering during OPEN created the permanent-export-disabled
     // failure mode the original PR #26 had to revert.
-    const breaker = this.getCircuitBreaker();
     if (!breaker.shouldExport()) {
       breaker.onSpansDropped(spans.length);
       resultCallback({ code: 0 });
@@ -174,7 +254,7 @@ export class GlasstraceExporter implements SpanExporter {
     }
 
     // Key is available — enrich and export
-    const enrichedSpans = spans.map((span) => this.enrichSpan(span));
+    const enrichedSpans = spans.map((span) => this.enrichSpan(span, spans));
     const exporter = this.ensureDelegate();
     if (exporter) {
       // Snapshot the breaker's generation counter so a credential
@@ -266,8 +346,13 @@ export class GlasstraceExporter implements SpanExporter {
    * and rely on the outer catch for any unexpected failure.
    *
    * On total failure, returns the original span unchanged.
+   *
+   * `batch` is the set of spans being enriched in the current export call;
+   * the descendant boundary-masked consult uses it as a same-batch fallback
+   * when resolving an ancestor span's parent link that pass-1 has not yet
+   * persisted.
    */
-  private enrichSpan(span: ReadableSpan): ReadableSpan {
+  private enrichSpan(span: ReadableSpan, batch: ReadableSpan[]): ReadableSpan {
     try {
       const attrs = span.attributes ?? {};
       const name = span.name ?? "";
@@ -445,8 +530,20 @@ export class GlasstraceExporter implements SpanExporter {
       // stack (`@opentelemetry/instrumentation-http` incoming, Next.js
       // request spans) are SERVER kind, so narrowing to SERVER fixes the
       // false positive without losing any legitimate promotion.
-      if (method && span.kind === SpanKind.SERVER && statusNotExplicitlyOK && (isErrorByStatus || isErrorByEvent || isErrorByAttrs)) {
-        if (statusCode === undefined || statusCode === 0 || statusCode === 200) {
+      // Boundary-masked-error promotion. The opt-out env flag disables the
+      // whole auto-promotion behavior (same-span AND descendant) — when set,
+      // no status promotion, no boundary_masked / scope attribute, and no
+      // lifecycle emit.
+      if (
+        !BOUNDARY_MASKED_DISABLED &&
+        method &&
+        span.kind === SpanKind.SERVER &&
+        (statusCode === undefined || statusCode === 0 || statusCode === 200)
+      ) {
+        const sameSpanSignal =
+          statusNotExplicitlyOK && (isErrorByStatus || isErrorByEvent || isErrorByAttrs);
+        if (sameSpanSignal) {
+          // ---- Same-span scope -------------------------------------------
           const httpErrorType = attrs["error.type"];
           if (typeof httpErrorType === "string") {
             const parsed = parseInt(httpErrorType, 10);
@@ -459,19 +556,20 @@ export class GlasstraceExporter implements SpanExporter {
             extra[ATTR.HTTP_STATUS_CODE] = 500;
           }
 
-          // SDK-051 / DISC-1125 — boundary-masked-error audit attribute.
-          // Set to true exactly when the inference block fires. Strict
+          // Boundary-masked-error audit attribute (set to true exactly when
+          // the inference block fires) plus the scope discriminator. Strict
           // additivity: backend ignores unknown attributes today; this
-          // surface is for downstream observability of heuristic
-          // activation rate. Same-span scope only — descendant-traversal
-          // (the page-route boundary case) is tracked in a follow-up DISC.
+          // surface is for downstream observability of heuristic activation
+          // rate. The same-span and descendant-aware scopes share the wire
+          // attribute and differ only on `boundary_masked_scope`.
           extra[ATTR.HTTP_BOUNDARY_MASKED] = true;
+          extra[ATTR.HTTP_BOUNDARY_MASKED_SCOPE] = "same_span";
 
           // Emit lifecycle event for subscribers (informational; the
           // heuristic's behavior does NOT depend on subscribers). The
           // payload's `exceptionMessage` is truncated to 256 chars and is
-          // the same content already on the span's exception event — no
-          // new disclosure surface beyond the trace itself.
+          // the same content already on the span's own exception event — no
+          // new disclosure surface beyond the trace itself for same-span.
           const inferredStatus = extra[ATTR.HTTP_STATUS_CODE] as number;
           const eventDetails = getExceptionEventDetails(span);
           const exceptionMessage = eventDetails.message
@@ -481,6 +579,7 @@ export class GlasstraceExporter implements SpanExporter {
           emitLifecycleEvent("core:error_boundary_detected", {
             spanId: span.spanContext().spanId,
             inferredStatus,
+            source: "same_span",
             ...(exceptionMessage !== undefined
               ? { exceptionMessage: exceptionMessage.slice(0, 256) }
               : {}),
@@ -492,6 +591,13 @@ export class GlasstraceExporter implements SpanExporter {
               `(was ${statusCode}), error.type=${attrs["error.type"]}`,
             );
           }
+        } else {
+          // ---- Descendant scope ------------------------------------------
+          // No same-span error signal on this SERVER span, so consult the
+          // per-trace error store for a transitive-descendant exception (the
+          // page-route boundary case). Runs only here, so exactly one
+          // promotion and one lifecycle emit happen per server span.
+          this.tryDescendantPromotion(span, attrs, name, statusCode, extra, batch);
         }
         // If statusCode is already >= 400, leave it alone (correct value)
       }
@@ -850,6 +956,12 @@ export class GlasstraceExporter implements SpanExporter {
     this.pendingSpanCount = 0;
 
     for (const batch of batches) {
+      // Pass 1 (boundary-masked descendant tracking): record parent links
+      // and exception-bearing spans BEFORE the per-batch OPEN-drop gate, so a
+      // dropped buffered batch still contributes lineage that a later parent
+      // batch may need. See the matching hoist in {@link export}.
+      this.recordTraceErrorPass(batch.spans, breaker);
+
       // Circuit-breaker gate: honor OPEN state on flush too (buffered
       // batches that survive a key-pending → key-resolved transition
       // arrive here and would otherwise bypass the gate).
@@ -859,7 +971,7 @@ export class GlasstraceExporter implements SpanExporter {
         continue;
       }
       // Enrich at flush time with the now-resolved key
-      const enriched = batch.spans.map((span) => this.enrichSpan(span));
+      const enriched = batch.spans.map((span) => this.enrichSpan(span, batch.spans));
       const generationAtIssue = breaker.getGeneration();
       exporter.export(enriched, (result) => {
         if (result.code !== 0) {
@@ -877,6 +989,166 @@ export class GlasstraceExporter implements SpanExporter {
         batch.resultCallback(result);
       });
       recordSpansExported(enriched.length);
+    }
+  }
+
+  /**
+   * Pass 1 of the descendant boundary-masked detection. For each span in the
+   * batch, records its `spanId → parentSpanId` link (every span — error and
+   * non-error) plus, for exception-bearing spans, a full lineage entry into
+   * the per-trace error store keyed by `${traceId}#${sessionId}`. Runs before
+   * the OPEN-drop gate in both entry points so lineage is captured even on a
+   * dropped batch. A no-op when the opt-out flag is set.
+   *
+   * Key validation is strict: the trace key is recorded only when `traceId`
+   * is 32 lowercase-hex chars and the resolved `sessionId` is a non-empty
+   * string. A failure increments the store's key-validation counter and
+   * skips the write — never synthesizing a placeholder key (which could risk
+   * cross-context promotion).
+   */
+  private recordTraceErrorPass(spans: ReadableSpan[], breaker: ExportCircuitBreaker): void {
+    if (BOUNDARY_MASKED_DISABLED) return;
+    let sessionId: string | undefined;
+    try {
+      sessionId = this.sessionManager.getSessionId(this.getApiKey());
+    } catch {
+      sessionId = undefined;
+    }
+    const store = breaker.traceErrors;
+    const nowMs = Date.now();
+    for (const span of spans) {
+      try {
+        const ctx = span.spanContext();
+        const traceId = ctx?.traceId;
+        const key = buildTraceKey(traceId, sessionId);
+        if (key === undefined) {
+          store.recordKeyValidationFailure();
+          continue;
+        }
+        const parentSpanId = span.parentSpanContext?.spanId;
+        store.recordParentLink(key, ctx.spanId, parentSpanId, nowMs);
+        if (hasExceptionEvent(span)) {
+          const details = getExceptionEventDetails(span);
+          const attrs = span.attributes ?? {};
+          const nextSpanType = attrs["next.span_type"];
+          const entry: ExceptionLineageEntry = {
+            spanId: ctx.spanId,
+            parentSpanId,
+            startTimeMs: hrTimeToMs(span.startTime),
+            message: details.message,
+            type: details.type,
+            nextSpanType: typeof nextSpanType === "string" ? nextSpanType : undefined,
+            // Capture the expected-error escape hatch on the exception-bearer
+            // itself. The descendant carrying `glasstrace.error.expected` (an
+            // app-marked, intentional boundary) must never be promoted — the
+            // server span may be unmarked, so reading the flag only on the
+            // server span at consult time would miss a per-descendant opt-out.
+            expected: attrs["glasstrace.error.expected"] === true,
+          };
+          store.recordException(key, entry, nowMs);
+        }
+      } catch {
+        // A malformed span must never break the export pipeline.
+      }
+    }
+  }
+
+  /**
+   * Descendant-scope boundary-masked promotion (the else-branch consult). The
+   * SERVER span had no same-span error signal; promote it to 500 only when a
+   * transitive-descendant exception passes the full fence:
+   *
+   *   - the descendant is in the same trace AND session (the namespaced key);
+   *   - it is a transitive child of this SERVER span (ancestor walk);
+   *   - it recorded an `exception` event (graceful-degradation fence);
+   *   - it is not a known Next control-flow throw;
+   *   - for a render-route descendant, the exception is in the
+   *     unexpected/infrastructure class (a generic expected `Error` from an
+   *     `error.tsx` fallback is NOT promoted);
+   *   - the expected-error escape hatch (`glasstrace.error.expected === true`
+   *     on the descendant or the SERVER span) is not set.
+   */
+  private tryDescendantPromotion(
+    span: ReadableSpan,
+    attrs: ReadableSpan["attributes"],
+    name: string,
+    statusCode: number | undefined,
+    extra: Record<string, string | number | boolean>,
+    batch: ReadableSpan[],
+  ): void {
+    // Status-trigger fence (#2): an explicitly-OK server span has already
+    // resolved its status — the handler recovered. Never promote it from a
+    // descendant exception. This mirrors the `statusNotExplicitlyOK` guard the
+    // same-span path applies before its own promotion.
+    if (span.status?.code === SpanStatusCode.OK) return;
+
+    const breaker = this.getCircuitBreaker();
+    const store = breaker.traceErrors;
+    let sessionId: string | undefined;
+    try {
+      sessionId = this.sessionManager.getSessionId(this.getApiKey());
+    } catch {
+      sessionId = undefined;
+    }
+    const ctx = span.spanContext();
+    const key = buildTraceKey(ctx?.traceId, sessionId);
+    if (key === undefined) {
+      store.recordKeyValidationFailure();
+      return;
+    }
+    const state = store.consult(key, Date.now());
+    if (state === undefined) return;
+
+    // Expected-error escape hatch on the SERVER span itself.
+    if (attrs["glasstrace.error.expected"] === true) return;
+
+    // Find the EARLIEST qualifying exception descendant (smallest startTimeMs,
+    // tie-break smallest spanId — deterministic). Only the qualifying set is
+    // ranked, so a non-qualifying earlier exception (control-flow, expected
+    // render-route Error) does not suppress a later real infrastructure one.
+    let chosen: ExceptionLineageEntry | undefined;
+    for (const entry of state.lineageBySpanId.values()) {
+      if (!isPromotableDescendant(entry)) continue;
+      if (!isTransitiveDescendant(entry, ctx.spanId, state, batch)) continue;
+      if (
+        chosen === undefined ||
+        entry.startTimeMs < chosen.startTimeMs ||
+        (entry.startTimeMs === chosen.startTimeMs && entry.spanId < chosen.spanId)
+      ) {
+        chosen = entry;
+      }
+    }
+    if (chosen === undefined) return;
+
+    // Promote. Mirror the same-span path: a numeric error.type on the SERVER
+    // span overrides the default 500 with a 400-599 wire status.
+    const httpErrorType = attrs["error.type"];
+    let inferredStatus = 500;
+    if (typeof httpErrorType === "string") {
+      const parsed = parseInt(httpErrorType, 10);
+      if (!isNaN(parsed) && parsed >= 400 && parsed <= 599) {
+        inferredStatus = parsed;
+      }
+    }
+    extra[ATTR.HTTP_STATUS_CODE] = inferredStatus;
+    extra[ATTR.HTTP_BOUNDARY_MASKED] = true;
+    extra[ATTR.HTTP_BOUNDARY_MASKED_SCOPE] = "descendant";
+
+    emitLifecycleEvent("core:error_boundary_detected", {
+      spanId: ctx.spanId,
+      inferredStatus,
+      source: "descendant",
+      exceptionSpanId: chosen.spanId,
+      ...(chosen.message !== undefined
+        ? { exceptionMessage: chosen.message.slice(0, 256) }
+        : {}),
+    });
+
+    if (this.verbose) {
+      sdkLog("info",
+        `[glasstrace] enrichSpan "${name}": inferred status_code=${inferredStatus} ` +
+        `(was ${statusCode}) from descendant exception span ${chosen.spanId}`,
+      );
     }
   }
 
@@ -908,6 +1180,130 @@ function createEnrichedSpan(
  */
 function hasExceptionEvent(span: ReadableSpan): boolean {
   return span.events?.some((e) => e.name === "exception") ?? false;
+}
+
+/**
+ * Builds the namespaced per-trace error-store key `${traceId}#${sessionId}`,
+ * or `undefined` when either component fails validation. `traceId` must be a
+ * 32-char lowercase-hex string; `sessionId` must be a non-empty string. The
+ * `#sessionId` namespace prevents UUID collisions in deterministic fixtures,
+ * distributed-trace retries that reuse a propagated `traceId`, and
+ * cross-tenant bleed.
+ */
+function buildTraceKey(
+  traceId: string | undefined,
+  sessionId: string | undefined,
+): string | undefined {
+  if (typeof traceId !== "string" || !/^[0-9a-f]{32}$/.test(traceId)) {
+    return undefined;
+  }
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    return undefined;
+  }
+  return `${traceId}#${sessionId}`;
+}
+
+/**
+ * Converts an OTel `HrTime` ([seconds, nanoseconds]) to milliseconds. Used
+ * for the deterministic earliest-exception tie-break. Returns 0 for a
+ * malformed input so a bad time value never makes ranking throw.
+ */
+function hrTimeToMs(hrTime: ReadableSpan["startTime"] | undefined): number {
+  if (!Array.isArray(hrTime) || hrTime.length < 2) return 0;
+  const [sec, nano] = hrTime;
+  if (typeof sec !== "number" || typeof nano !== "number") return 0;
+  return sec * 1000 + nano / 1_000_000;
+}
+
+/**
+ * Applies the load-bearing false-positive fence to a recorded
+ * exception-bearing descendant: returns true only if it should promote the
+ * SERVER span. Excludes Next control-flow throws; for render-route
+ * descendants, requires an unexpected/infrastructure exception class (a
+ * generic expected application `Error` from an `error.tsx` fallback is NOT
+ * promoted). The lineage/kind/transitivity checks are applied by the caller.
+ */
+function isPromotableDescendant(entry: ExceptionLineageEntry): boolean {
+  // 5c — expected-error escape hatch on the exception-bearer itself. A
+  // descendant marked `glasstrace.error.expected === true` is an app-declared
+  // intentional boundary and is never promoted, regardless of exception class.
+  if (entry.expected === true) return false;
+
+  const haystack = `${entry.type ?? ""}\n${entry.message ?? ""}`;
+
+  // 5a — control-flow exclusion (case-sensitive substring).
+  for (const marker of NEXT_CONTROL_FLOW_MARKERS) {
+    if (haystack.includes(marker)) return false;
+  }
+
+  // 5b — render-route generic-error suppression. A render-route descendant
+  // promotes only on an unexpected/infrastructure exception class.
+  if (entry.nextSpanType === RENDER_ROUTE_SPAN_TYPE) {
+    for (const marker of RENDER_ROUTE_INFRA_MARKERS) {
+      if (haystack.includes(marker)) return true;
+    }
+    return false;
+  }
+
+  // Non-render-route descendants promote on any non-control-flow exception.
+  return true;
+}
+
+/**
+ * Confirms `entry` is a transitive child of the SERVER span identified by
+ * `serverSpanId`, by threading `parentSpanId` links up the tree. Resolves
+ * each ancestor's parent in fixed precedence: the persistent `parentLinks`
+ * map first (lets the walk cross a non-error intermediate that ended in an
+ * earlier batch), then an exception-bearing ancestor's stored parent, then
+ * the current pass-2 batch. A visited-set guard makes a corrupt/cyclic chain
+ * safe. Bounded by trace depth; a missing link stops the walk (no promote).
+ */
+function isTransitiveDescendant(
+  entry: ExceptionLineageEntry,
+  serverSpanId: string,
+  state: TraceErrorState,
+  batch: ReadableSpan[],
+): boolean {
+  let curParent = entry.parentSpanId;
+  const visited = new Set<string>([entry.spanId]);
+  while (curParent !== undefined) {
+    if (curParent === serverSpanId) return true;
+    if (visited.has(curParent)) return false; // cycle guard
+    visited.add(curParent);
+    const next = resolveParent(curParent, state, batch);
+    curParent = next;
+  }
+  return false;
+}
+
+/**
+ * Resolves the parentSpanId of `spanId` for the ancestor walk, in the fixed
+ * precedence: persistent parentLinks → exception-bearer's stored parent →
+ * current pass-2 batch scan. Returns `undefined` (stop) when no link is
+ * found.
+ */
+function resolveParent(
+  spanId: string,
+  state: TraceErrorState,
+  batch: ReadableSpan[],
+): string | undefined {
+  if (state.parentLinks.has(spanId)) {
+    return state.parentLinks.get(spanId);
+  }
+  const lineage = state.lineageBySpanId.get(spanId);
+  if (lineage !== undefined) {
+    return lineage.parentSpanId;
+  }
+  for (const s of batch) {
+    try {
+      if (s.spanContext().spanId === spanId) {
+        return s.parentSpanContext?.spanId;
+      }
+    } catch {
+      // ignore malformed span
+    }
+  }
+  return undefined;
 }
 
 /**

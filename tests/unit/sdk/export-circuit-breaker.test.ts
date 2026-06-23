@@ -22,6 +22,7 @@ import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
 import type { CaptureConfig } from "@glasstrace/protocol";
+import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import {
   createExportCircuitBreaker,
   classifyExportFailure,
@@ -29,14 +30,18 @@ import {
   BACKOFF_FACTOR,
   MAX_BACKOFF_MS,
   FAILURE_THRESHOLD,
+  MAX_TRACKED_TRACES,
+  MAX_EXCEPTIONS_PER_TRACE,
+  TRACE_ERROR_TTL_MS,
   type ExportCircuitBreaker,
   type ExportCircuitEventSink,
   type ExportCircuitOpenedPayload,
   type ExportCircuitHalfOpenPayload,
   type ExportCircuitClosedPayload,
   _resetExportCircuitBreakerForTesting,
+  peekExportCircuitBreaker,
 } from "../../../packages/sdk/src/export-circuit-breaker.js";
-import { GlasstraceExporter } from "../../../packages/sdk/src/enriching-exporter.js";
+import { GlasstraceExporter, API_KEY_PENDING } from "../../../packages/sdk/src/enriching-exporter.js";
 import { SessionManager } from "../../../packages/sdk/src/session.js";
 import * as lifecycle from "../../../packages/sdk/src/lifecycle.js";
 import {
@@ -407,6 +412,417 @@ describe("ExportCircuitBreaker — pure logic", () => {
     expect(breaker.getState()).toBe("HALF_OPEN");
     expect(breaker.shouldExport()).toBe(true);
     expect(breaker.shouldExport()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-trace boundary-masked error store (hosted on the breaker singleton)
+// ---------------------------------------------------------------------------
+
+describe("ExportCircuitBreaker — per-trace boundary-masked error store", () => {
+  let nowMs: number;
+
+  function makeStoreBreaker(): ExportCircuitBreaker {
+    return createExportCircuitBreaker({
+      events: { emitOpened() {}, emitHalfOpen() {}, emitClosed() {} },
+      recordDropped: () => {},
+      now: () => nowMs,
+    });
+  }
+
+  beforeEach(() => {
+    nowMs = 1_700_000_000_000;
+  });
+
+  it("expires entries older than the TTL on the next operation (TTL-first sweep)", () => {
+    const breaker = makeStoreBreaker();
+    const store = breaker.traceErrors;
+    const key = "a".repeat(32) + "#sess";
+    store.recordParentLink(key, "span", undefined, nowMs);
+    expect(store.size()).toBe(1);
+
+    // Advance past the TTL, then touch a different key to drive a sweep.
+    nowMs += TRACE_ERROR_TTL_MS + 1;
+    store.recordParentLink("b".repeat(32) + "#sess", "span2", undefined, nowMs);
+    // The first (now-stale) entry is evicted; only the fresh one remains.
+    expect(store.peek(key)).toBeUndefined();
+    expect(store.getCounters().evictions).toBe(1);
+  });
+
+  it("consult() evicts a stale entry on access and reports no lineage (no false promotion on key reuse after TTL)", () => {
+    const breaker = makeStoreBreaker();
+    const store = breaker.traceErrors;
+    const key = "a".repeat(32) + "#sess";
+
+    // An old request records a descendant exception under this trace+session.
+    store.recordException(
+      key,
+      { spanId: "old-exc", parentSpanId: "srv", startTimeMs: 1 },
+      nowMs,
+    );
+    expect(store.peek(key)?.lineageBySpanId.size).toBe(1);
+
+    // The SAME key is reused after the TTL (a traceId collision, a long-delayed
+    // retry, or a deterministic fixture) with NO intervening new-key insert to
+    // drive a sweep. The read path the promotion uses must NOT return the stale
+    // lineage — it evicts on access and reports nothing (fail-open), so an aged
+    // exception can never promote a fresh server span (a false 500).
+    nowMs += TRACE_ERROR_TTL_MS + 1;
+    expect(store.consult(key, nowMs)).toBeUndefined();
+    expect(store.getCounters().evictions).toBe(1);
+    expect(store.peek(key)).toBeUndefined();
+  });
+
+  it("getOrCreate() starts fresh when a write reuses a key after the TTL (aged lineage dropped, not resurrected)", () => {
+    const breaker = makeStoreBreaker();
+    const store = breaker.traceErrors;
+    const key = "1".repeat(32) + "#sess";
+
+    store.recordException(
+      key,
+      { spanId: "old-exc", parentSpanId: "srv", startTimeMs: 1 },
+      nowMs,
+    );
+    expect(store.peek(key)?.lineageBySpanId.has("old-exc")).toBe(true);
+
+    // A write reuses the same key after the TTL, again with no sweep. The aged
+    // entry is evicted on access and a fresh state is started, so the new
+    // request's lineage never contains the old exception.
+    nowMs += TRACE_ERROR_TTL_MS + 1;
+    store.recordException(
+      key,
+      { spanId: "new-exc", parentSpanId: "srv2", startTimeMs: 1 },
+      nowMs,
+    );
+    const state = store.peek(key)!;
+    expect(state.lineageBySpanId.has("old-exc")).toBe(false);
+    expect(state.lineageBySpanId.has("new-exc")).toBe(true);
+    expect(state.lineageBySpanId.size).toBe(1);
+    expect(store.getCounters().evictions).toBe(1);
+  });
+
+  it("evicts by LRU (least-recently-accessed) when over the cap, tie-broken by oldest-inserted", () => {
+    const breaker = makeStoreBreaker();
+    const store = breaker.traceErrors;
+    // Insert exactly the cap; each gets a distinct, increasing access time.
+    for (let i = 0; i < MAX_TRACKED_TRACES; i++) {
+      const traceId = i.toString(16).padStart(32, "0");
+      store.recordParentLink(`${traceId}#s`, "x", undefined, nowMs++);
+    }
+    expect(store.size()).toBe(MAX_TRACKED_TRACES);
+
+    // Touch the FIRST-inserted (oldest LRU) so it is no longer the victim.
+    const firstKey = (0).toString(16).padStart(32, "0") + "#s";
+    store.consult(firstKey, nowMs++);
+
+    // Insert one more → over cap → LRU evicts the least-recently-accessed,
+    // which is now the SECOND-inserted entry (index 1), not the freshly
+    // touched first one.
+    const overflowTrace = (MAX_TRACKED_TRACES).toString(16).padStart(32, "0");
+    store.recordParentLink(`${overflowTrace}#s`, "x", undefined, nowMs++);
+
+    expect(store.size()).toBe(MAX_TRACKED_TRACES);
+    const secondKey = (1).toString(16).padStart(32, "0") + "#s";
+    expect(store.peek(secondKey)).toBeUndefined(); // LRU victim
+    expect(store.peek(firstKey)).toBeDefined(); // touched, survives
+    expect(store.getCounters().evictions).toBeGreaterThan(0);
+  });
+
+  it("clearTraceErrors() and resetForKeyRotation() both empty the store", () => {
+    const breaker = makeStoreBreaker();
+    const store = breaker.traceErrors;
+    store.recordParentLink("c".repeat(32) + "#s", "x", undefined, nowMs);
+    store.recordParentLink("d".repeat(32) + "#s", "y", undefined, nowMs);
+    expect(store.size()).toBe(2);
+
+    breaker.clearTraceErrors();
+    expect(store.size()).toBe(0);
+
+    store.recordParentLink("e".repeat(32) + "#s", "z", undefined, nowMs);
+    expect(store.size()).toBe(1);
+    breaker.resetForKeyRotation();
+    expect(store.size()).toBe(0);
+  });
+
+  it("records the deterministic earliest exception (smallest startTimeMs; tie-break smallest spanId)", () => {
+    const breaker = makeStoreBreaker();
+    const store = breaker.traceErrors;
+    const key = "f".repeat(32) + "#s";
+    store.recordException(
+      key,
+      { spanId: "late", parentSpanId: "p", startTimeMs: 100 },
+      nowMs,
+    );
+    store.recordException(
+      key,
+      { spanId: "early", parentSpanId: "p", startTimeMs: 50 },
+      nowMs,
+    );
+    store.recordException(
+      key,
+      { spanId: "aaa", parentSpanId: "p", startTimeMs: 50 },
+      nowMs,
+    );
+    const state = store.peek(key)!;
+    // startTime 50 wins over 100; among the two 50s, "aaa" < "early".
+    expect(state.firstExceptionSpanId).toBe("aaa");
+  });
+
+  it("caps lineageBySpanId at MAX_EXCEPTIONS_PER_TRACE; overflow drops new spanIds and bumps the counter", () => {
+    const breaker = makeStoreBreaker();
+    const store = breaker.traceErrors;
+    const key = "1".repeat(32) + "#s";
+    // Insert exactly the cap with distinct spanIds.
+    for (let i = 0; i < MAX_EXCEPTIONS_PER_TRACE; i++) {
+      const spanId = i.toString(16).padStart(16, "0");
+      store.recordException(key, { spanId, parentSpanId: "p", startTimeMs: i }, nowMs);
+    }
+    const state = store.peek(key)!;
+    expect(state.lineageBySpanId.size).toBe(MAX_EXCEPTIONS_PER_TRACE);
+    expect(state.lineageOverflow).toBe(false);
+    expect(store.getCounters().lineageOverflow).toBe(0);
+
+    // One distinct spanId past the cap is dropped, not admitted.
+    const overflowSpanId = "f".repeat(16);
+    store.recordException(
+      key,
+      { spanId: overflowSpanId, parentSpanId: "p", startTimeMs: 999 },
+      nowMs,
+    );
+    expect(state.lineageBySpanId.size).toBe(MAX_EXCEPTIONS_PER_TRACE);
+    expect(state.lineageBySpanId.has(overflowSpanId)).toBe(false);
+    expect(state.lineageOverflow).toBe(true);
+    expect(store.getCounters().lineageOverflow).toBe(1);
+
+    // Re-recording an already-tracked spanId overwrites in place — it never
+    // counts against the cap.
+    const existingSpanId = (0).toString(16).padStart(16, "0");
+    store.recordException(
+      key,
+      { spanId: existingSpanId, parentSpanId: "p", startTimeMs: 0, message: "updated" },
+      nowMs,
+    );
+    expect(state.lineageBySpanId.size).toBe(MAX_EXCEPTIONS_PER_TRACE);
+    expect(state.lineageBySpanId.get(existingSpanId)?.message).toBe("updated");
+    expect(store.getCounters().lineageOverflow).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-batch boundary-masked hoist — pass-1 lineage recording is hoisted
+// ABOVE the OPEN-drop gate in BOTH entry points (export() and flushPending()),
+// so a descendant batch dropped while the breaker is OPEN still contributes
+// the lineage a later parent batch needs to promote. A revert of either hoist
+// must fail this suite.
+// ---------------------------------------------------------------------------
+
+describe("ExportCircuitBreaker — cross-batch boundary-masked hoist over OPEN gate", () => {
+  const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
+  const XB_TRACE = "22222222222222222222222222222222";
+  const XB_SERVER = "1212121212121212";
+  const XB_RENDER = "3434343434343434";
+
+  interface CapturingDelegate extends SpanExporter {
+    exportedSpans: ReadableSpan[][];
+    exportedBatches: number;
+    setNextResult: (r: ExportResult) => void;
+  }
+
+  function createCapturingDelegate(): CapturingDelegate {
+    let fallback: ExportResult = { code: 0 };
+    const delegate: CapturingDelegate = {
+      exportedSpans: [],
+      exportedBatches: 0,
+      export(spans, resultCallback) {
+        delegate.exportedBatches += 1;
+        delegate.exportedSpans.push(spans);
+        resultCallback(fallback);
+      },
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      forceFlush: vi.fn().mockResolvedValue(undefined),
+      setNextResult(r: ExportResult) {
+        fallback = r;
+      },
+    };
+    return delegate;
+  }
+
+  function xbServerSpan(): ReadableSpan {
+    return {
+      name: "GET /[locale]/dashboard",
+      kind: SpanKind.SERVER,
+      spanContext: () => ({ traceId: XB_TRACE, spanId: XB_SERVER, traceFlags: 1 }),
+      parentSpanContext: undefined,
+      startTime: [1700000000, 0],
+      endTime: [1700000000, 150_000_000],
+      status: { code: SpanStatusCode.UNSET },
+      attributes: { "http.method": "GET", "http.route": "/[locale]/dashboard", "http.status_code": 200 },
+      links: [],
+      events: [],
+      duration: [0, 150_000_000],
+      ended: true,
+      resource: { attributes: {} },
+      instrumentationScope: { name: "test", version: "1.0.0" },
+      droppedAttributesCount: 0,
+      droppedEventsCount: 0,
+      droppedLinksCount: 0,
+    } as unknown as ReadableSpan;
+  }
+
+  function xbRenderDescendant(): ReadableSpan {
+    return {
+      name: "render route (app) /[locale]/dashboard",
+      kind: SpanKind.INTERNAL,
+      spanContext: () => ({ traceId: XB_TRACE, spanId: XB_RENDER, traceFlags: 1 }),
+      parentSpanContext: { traceId: XB_TRACE, spanId: XB_SERVER, traceFlags: 1 },
+      startTime: [1700000000, 50_000_000],
+      endTime: [1700000000, 120_000_000],
+      status: { code: SpanStatusCode.ERROR },
+      attributes: { "next.span_type": "AppRender.getBodyResult" },
+      links: [],
+      events: [
+        {
+          time: [1700000000, 50_000_000],
+          name: "exception",
+          attributes: {
+            "exception.type": "PrismaClientKnownRequestError",
+            "exception.message": "Can't reach database server (P1001)",
+          },
+        },
+      ],
+      duration: [0, 70_000_000],
+      ended: true,
+      resource: { attributes: {} },
+      instrumentationScope: { name: "test", version: "1.0.0" },
+      droppedAttributesCount: 0,
+      droppedEventsCount: 0,
+      droppedLinksCount: 0,
+    } as unknown as ReadableSpan;
+  }
+
+  function findServer(delegate: CapturingDelegate, batchIdx: number): ReadableSpan {
+    return delegate.exportedSpans[batchIdx].find(
+      (s) => s.spanContext().spanId === XB_SERVER,
+    )!;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    lifecycle.resetLifecycleForTesting();
+    _resetExportCircuitBreakerForTesting();
+    lifecycle.initLifecycle({ logger: vi.fn() });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    _resetExportCircuitBreakerForTesting();
+    lifecycle.resetLifecycleForTesting();
+  });
+
+  // Reads the shared production singleton's state through the public peek API.
+  function peekState(): string {
+    const b = peekExportCircuitBreaker();
+    return b ? b.getState() : "CLOSED";
+  }
+
+  function tripBreakerOpen(exporter: GlasstraceExporter, delegate: CapturingDelegate): void {
+    delegate.setNextResult({ code: 1, error: Object.assign(new Error("boom"), { status: 500 }) });
+    for (let i = 0; i < FAILURE_THRESHOLD; i++) {
+      exporter.export([createMockSpan()], vi.fn());
+    }
+    expect(peekState()).toBe("OPEN");
+  }
+
+  it("export(): descendant batch dropped while OPEN still lets a later parent batch promote (both hoisted)", async () => {
+    const delegate = createCapturingDelegate();
+    const exporter = new GlasstraceExporter({
+      getApiKey: () => TEST_API_KEY,
+      sessionManager: new SessionManager(),
+      getConfig: () => DEFAULT_CONFIG,
+      environment: "test",
+      endpointUrl: "https://api.glasstrace.dev/v1/traces",
+      createDelegate: () => delegate,
+    });
+
+    tripBreakerOpen(exporter, delegate);
+    const batchesAfterTrip = delegate.exportedBatches;
+
+    // Descendant batch arrives while OPEN: pass-1 hoist records its lineage,
+    // but the OPEN gate drops it from export (no delegate call).
+    exporter.export([xbRenderDescendant()], vi.fn());
+    expect(delegate.exportedBatches).toBe(batchesAfterTrip);
+
+    // Recover the breaker: advance past the backoff so the probe is admitted,
+    // then a successful export closes it.
+    delegate.setNextResult({ code: 0 });
+    await vi.advanceTimersByTimeAsync(INITIAL_BACKOFF_MS);
+    exporter.export([createMockSpan()], vi.fn()); // probe → close
+    expect(peekState()).toBe("CLOSED");
+
+    // The parent SERVER batch arrives later. Even though the descendant batch
+    // was dropped, its hoisted lineage promotes the parent.
+    exporter.export([xbServerSpan()], vi.fn());
+    const enriched = findServer(delegate, delegate.exportedSpans.length - 1);
+    expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe("descendant");
+  });
+
+  it("export(): reverse order (parent before descendant) leaves the parent at 200 (fail-open miss, no false 500)", () => {
+    const delegate = createCapturingDelegate();
+    const exporter = new GlasstraceExporter({
+      getApiKey: () => TEST_API_KEY,
+      sessionManager: new SessionManager(),
+      getConfig: () => DEFAULT_CONFIG,
+      environment: "test",
+      endpointUrl: "https://api.glasstrace.dev/v1/traces",
+      createDelegate: () => delegate,
+    });
+
+    // Parent first (no lineage yet) → stays 200. Descendant later → too late.
+    exporter.export([xbServerSpan()], vi.fn());
+    const enrichedParent = findServer(delegate, delegate.exportedSpans.length - 1);
+    expect(enrichedParent.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+    expect(enrichedParent.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBeUndefined();
+
+    exporter.export([xbRenderDescendant()], vi.fn());
+  });
+
+  it("flushPending(): descendant buffered while key pending + breaker OPEN still lets a later parent promote", async () => {
+    let apiKey = API_KEY_PENDING;
+    const delegate = createCapturingDelegate();
+    const exporter = new GlasstraceExporter({
+      getApiKey: () => apiKey,
+      sessionManager: new SessionManager(),
+      getConfig: () => DEFAULT_CONFIG,
+      environment: "test",
+      endpointUrl: "https://api.glasstrace.dev/v1/traces",
+      createDelegate: () => delegate,
+    });
+
+    // Buffer the descendant batch while the key is pending (no enrichment yet).
+    exporter.export([xbRenderDescendant()], vi.fn());
+    expect(delegate.exportedBatches).toBe(0);
+
+    // Resolve the key and trip the breaker OPEN BEFORE flushing.
+    apiKey = TEST_API_KEY;
+    tripBreakerOpen(exporter, delegate);
+
+    // Flush: the per-batch pass-1 hoist records the buffered descendant's
+    // lineage even though the OPEN gate drops the batch from export.
+    const batchesAfterTrip = delegate.exportedBatches;
+    exporter.notifyKeyResolved();
+    expect(delegate.exportedBatches).toBe(batchesAfterTrip);
+
+    // Recover and export the parent later → promotes via the hoisted lineage.
+    delegate.setNextResult({ code: 0 });
+    await vi.advanceTimersByTimeAsync(INITIAL_BACKOFF_MS);
+    exporter.export([createMockSpan()], vi.fn()); // probe → close
+    expect(peekState()).toBe("CLOSED");
+
+    exporter.export([xbServerSpan()], vi.fn());
+    const enriched = findServer(delegate, delegate.exportedSpans.length - 1);
+    expect(enriched.attributes[ATTR.HTTP_STATUS_CODE]).toBe(500);
+    expect(enriched.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe("descendant");
   });
 });
 
