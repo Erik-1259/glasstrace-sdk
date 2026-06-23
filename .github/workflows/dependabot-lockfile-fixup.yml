@@ -197,7 +197,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # `github.event.pull_request.head.ref` is the Dependabot
           # branch name (e.g. `dependabot/npm_and_yarn/...`). Checking
