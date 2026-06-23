@@ -132,7 +132,7 @@ describe("active-config store — cross-bundle-instance sharing", () => {
     expect("attrHmacKey" in seenByB).toBe(false);
   });
 
-  it("never places the attrHmacKey secret on the well-known global symbol", async () => {
+  it("holds the attrHmacKey in a closure: absent from the serialized record, but readable", async () => {
     const instanceA = await freshInitClientInstance();
 
     instanceA._setCurrentConfig({
@@ -144,11 +144,11 @@ describe("active-config store — cross-bundle-instance sharing", () => {
       },
     } as SdkInitResponse);
 
-    // The shared record is reachable by any in-isolate code via the
-    // well-known symbol. Walk every field of the stored value and assert
-    // the secret is nowhere in it — confirming the split keeps the tenant
-    // secret off the global slot. Capture flags ARE shared (so the gate
-    // works cross-instance); only the secret is withheld.
+    // The key lives on the shared record behind a closure accessor (not an
+    // enumerable field), so it is absent from a serialized dump of the record
+    // even though it is intentionally reachable cross-copy via the accessor.
+    // Capture flags ARE shared (so the gate works cross-instance); the raw
+    // secret is just kept off the enumerable surface (no accidental logging).
     const record = (globalThis as Record<symbol, unknown>)[STORE_SYMBOL];
     const serialized = JSON.stringify(record);
     expect(serialized).not.toContain("super-secret-key");
@@ -157,40 +157,37 @@ describe("active-config store — cross-bundle-instance sharing", () => {
     expect(stored.config?.config?.sideEffectEvidence).toBe(true);
     expect(stored.config?.config).not.toHaveProperty("attrHmacKey");
 
-    // The applying instance can still recover the key for id pseudonymization
-    // (it lives in module-local state, not on the global record).
+    // The applying instance recovers the key for id pseudonymization.
     expect(instanceA.getAttrHmacKey()).toBe("super-secret-key");
   });
 
-  it("marks the account key-provisioned for a reader instance that lacks the local key", async () => {
+  it("a reader instance reads the shared key applied by another bundle copy", async () => {
     const instanceA = await freshInitClientInstance();
     const instanceB = await freshInitClientInstance();
 
-    // Instance A applies a full-fidelity config WITH a key. The key is local
-    // to A; the shared record carries only the non-secret provisioned flag.
+    // Instance A (the init-path copy) applies a full-fidelity config WITH a key.
     instanceA._setCurrentConfig(makeFullConfig("tenant-a-key"));
 
-    // Instance B (a reader copy that never applied) sees `full` and
-    // key-provisioned=true, but cannot read the key. This lets the id path
-    // distinguish "key applied in another bundle copy" (behave like strict)
-    // from a genuinely key-less `full` account (record the observable
-    // misconfiguration omission). B has no local key, but the account IS
-    // provisioned.
+    // Instance B (a reader copy that never applied the config) — a different
+    // module evaluation — sees `full` AND can read the key through the shared
+    // record's closure holder. This is the cross-bundle fix: before, the key
+    // was module-local to A, so B read `undefined` and id capture silently
+    // dropped (no token AND no omission) under Turbopack dev.
     expect(instanceB.getActiveConfig().captureFidelity).toBe("full");
-    expect(instanceB.getAttrHmacKey()).toBeUndefined();
-    expect(instanceB.isAttrHmacKeyProvisioned()).toBe(true);
+    expect(instanceB.getAttrHmacKey()).toBe("tenant-a-key");
 
-    // A genuinely key-less `full` config (no key served) reports
-    // key-provisioned=false, so the id path records the omission instead.
+    // A genuinely key-less `full` config (no key served) leaves the key unset,
+    // so a reader gets `undefined` — the id path then records an `unhashed_id`
+    // omission rather than a token.
     instanceA._setCurrentConfig({
       ...makeInitResponse(true),
       config: { ...makeInitResponse(true).config, captureFidelity: "full" },
     } as SdkInitResponse);
     expect(instanceB.getActiveConfig().captureFidelity).toBe("full");
-    expect(instanceB.isAttrHmacKeyProvisioned()).toBe(false);
+    expect(instanceB.getAttrHmacKey()).toBeUndefined();
   });
 
-  it("invalidates a stale module-local key after another instance applies a different config", async () => {
+  it("the latest applied key wins across instances (no stale per-copy key)", async () => {
     const instanceA = await freshInitClientInstance();
     const instanceB = await freshInitClientInstance();
 
@@ -198,30 +195,26 @@ describe("active-config store — cross-bundle-instance sharing", () => {
     instanceA._setCurrentConfig(makeFullConfig("tenant-a-key"));
     expect(instanceA.getAttrHmacKey()).toBe("tenant-a-key");
 
-    // Instance B then applies a different full-fidelity config (e.g. a key
-    // rotation or a dev key resolving to another tenant). This overwrites the
-    // shared pairing token.
+    // Instance B then applies a different full-fidelity config (a key rotation
+    // or a dev key resolving to another tenant). There is a single shared key,
+    // so the latest apply wins: BOTH copies read tenant B's key. No copy can
+    // hash with a stale per-instance key, because there is no per-instance key.
     instanceB._setCurrentConfig(makeFullConfig("tenant-b-key"));
-
-    // Instance A's cached key is now stale: its pairing token no longer
-    // matches the shared record, so the getter fail-closes to undefined
-    // instead of hashing identifiers with the wrong account's key. Instance B,
-    // the latest applier, still gets its own key.
-    expect(instanceA.getAttrHmacKey()).toBeUndefined();
+    expect(instanceA.getAttrHmacKey()).toBe("tenant-b-key");
     expect(instanceB.getAttrHmacKey()).toBe("tenant-b-key");
   });
 
-  it("invalidates a stale module-local key when a later config carries no key", async () => {
+  it("a later key-less config clears the shared key for every instance", async () => {
     const instanceA = await freshInitClientInstance();
     const instanceB = await freshInitClientInstance();
 
     instanceA._setCurrentConfig(makeFullConfig("tenant-a-key"));
     expect(instanceA.getAttrHmacKey()).toBe("tenant-a-key");
 
-    // A later keyless config (e.g. a downgrade to strict, or a disk-cache
-    // promotion that never carries the secret) clears the shared token.
+    // A later key-less config (a downgrade to strict, or a disk-cache promotion
+    // that never carries the secret) clears the shared key (last-writer-wins),
+    // so every copy reads `undefined`.
     instanceB._setCurrentConfig(makeInitResponse(true));
-
     expect(instanceA.getAttrHmacKey()).toBeUndefined();
     expect(instanceB.getAttrHmacKey()).toBeUndefined();
   });
