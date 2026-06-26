@@ -135,7 +135,12 @@ the Linux Foundation (`agents.md`), the SDK writes:
 The section opens with explicit "Call Glasstrace FIRST when" / "SKIP
 Glasstrace when" decision rules telling your AI agent **when**
 Glasstrace MCP is worth calling and **which** tool is the cheapest
-first call for each symptom class.
+first call for each symptom class. It then teaches the agent how to
+**use** what the tools return — treating side-effect evidence as
+first-class runtime facts, reading boolean (`*Holds`) and categorical
+trace fields directly, continuing from the trace summary when a
+follow-up tool comes back thin, and narrowing to the smallest source
+path the trace identifies before broad exploration.
 
 ### Migration from legacy filenames
 
@@ -840,10 +845,11 @@ categorical field channel. `recordSideEffect()` accepts a `relations` map
 of `boolean`s keyed by camelCase names ending in `Holds`; values are
 coerced to `"true"`/`"false"`:
 
-> **Availability:** the SDK emits `*Holds` relations now, but the Glasstrace
-> backend admits them only once a coordinated release lands; until then a
-> `*Holds` field is dropped at ingestion (like any unrecognized key) and is
-> not yet surfaced in traces. Capture is also gated by the account
+> **Availability:** `*Holds` relations are emitted by the SDK, admitted by the
+> Glasstrace backend, and surfaced to agents through the MCP read path —
+> `get_trace` / `get_root_cause` return them in
+> `sideEffectSummary.operations[].semanticFields`, and `find_trace_candidates`
+> lists the relation key names. Capture is gated by the account
 > `sideEffectEvidence` flag.
 
 ```ts
