@@ -339,28 +339,35 @@ describe("generateInfoSection", () => {
       expect(info).not.toContain("gt_dev_");
     });
 
-    it("references all six current MCP tools (Wave 17 — get_test_suggestions retired from the tools list)", () => {
+    it("references the current MCP tools list (get_test_suggestions retired; get_span_attributes drill-down included)", () => {
       const info = generateInfoSection(makeAgent("claude"), ENDPOINT, SDK_VERSION);
       expect(info).toContain("get_latest_error");
       expect(info).toContain("find_trace_candidates");
       expect(info).toContain("get_error_list");
       expect(info).toContain("get_trace");
       expect(info).toContain("get_root_cause");
+      // get_span_attributes is a registered MCP tool (the scalar
+      // span-attribute drill-down); the body names it so the agent can
+      // reach the Layer-2 evidence the Workflow follow-up guidance
+      // refers to. Pin it to the primary Tools list line (mirrors the
+      // get_test_suggestions OFF-list guard below) so dropping the list
+      // entry is caught even if the §5 prose mention survives.
+      expect(
+        info.split("\n").some((l) => /^- `get_span_attributes`/.test(l)),
+        "get_span_attributes appears on the primary Tools list",
+      ).toBe(true);
       expect(info).toContain("get_session_timeline");
-      // Wave 17 deliberately drops get_test_suggestions from the
-      // primary Tools list — the Workflow §2 / §4 cover the
-      // discovery-then-deep-dive path without needing a separate
-      // test-suggestions bullet. (DISC-1571's traceId-source assertion
-      // is preserved in spirit: get_root_cause and get_test_suggestions
-      // still require a traceId at the MCP server contract level; the
-      // agent learns about traceId via `suggestedFollowups` from
-      // find_trace_candidates per Workflow §2.)
+      // get_test_suggestions stays OFF the primary Tools list — the
+      // Workflow covers the discovery-then-deep-dive path without a
+      // separate test-suggestions bullet (it still requires a traceId at
+      // the MCP server contract level; the agent learns the traceId via
+      // `suggestedFollowups`).
       const line = info
         .split("\n")
         .find((l) => /^- `get_test_suggestions`/.test(l));
       expect(
         line,
-        "Wave 17 retires get_test_suggestions from the primary Tools list",
+        "get_test_suggestions stays off the primary Tools list",
       ).toBeUndefined();
     });
 
@@ -600,14 +607,13 @@ describe("generateInfoSection", () => {
             ENDPOINT,
             SDK_VERSION,
           );
-          // Workflow §3 — sideEffectSummary plus all seven
-          // allowlisted keys from the server-side
-          // `agent-evidence.ts` SIDE_EFFECT_ALLOWED_KEYS list (lines
-          // 500-506: templateKey, providerOperation, role, locale,
-          // timezone, status, phase). These are the ones that
-          // disambiguate payload bugs. (`providerOperation` was
-          // missing from the wave's first draft and added on
-          // Copilot's review.)
+          // Workflow §3 — sideEffectSummary plus all seven allowlisted
+          // keys. These keys live in the SDK `@glasstrace/protocol`
+          // package (`packages/protocol/src/side-effect.ts`,
+          // SIDE_EFFECT_SEMANTIC_FIELD_STABLE_CORE_KEYS: templateKey,
+          // providerOperation, role, locale, timezone, status, phase) —
+          // the SDK consumes the matching server-side vocabulary. These
+          // are the ones that disambiguate payload bugs.
           expect(info).toContain("`sideEffectSummary`");
           expect(info).toContain("`templateKey`");
           expect(info).toContain("`providerOperation`");
@@ -616,6 +622,122 @@ describe("generateInfoSection", () => {
           expect(info).toContain("`timezone`");
           expect(info).toContain("`status`");
           expect(info).toContain("`phase`");
+        });
+
+        // Evidence-interpretation guidance: teach the agent to act on
+        // returned trace evidence rather than skim past it, and to keep
+        // using a trace when a follow-up tool comes back thin. Wording is
+        // candidate-agnostic — the generic `*Holds` boolean-key pattern
+        // and contract field/tool names only, never a specific domain
+        // field or the validation candidate.
+        it("frames side-effect evidence as first-class and `*Holds` keys as semantic booleans", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toContain("first-class runtime evidence");
+          expect(info).toContain("`Holds`");
+          expect(info).toMatch(/true\/false claim/);
+        });
+
+        it("distinguishes `sideEffectEvidence` (presence on candidates) from `sideEffectSummary` (values on get_latest_error / get_trace / get_root_cause)", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toContain("`sideEffectEvidence`");
+          expect(info).toContain("`sideEffectSummary`");
+          // The values come from all three carriers — naming get_latest_error
+          // prevents the redundant-second-call behavior (an active-failure
+          // agent enters via get_latest_error and already holds the values).
+          expect(info).toContain("`get_latest_error`");
+          // Presence on candidates is a signal to pull the trace, not a dead end.
+          expect(info).toMatch(/signal to pull the trace/);
+        });
+
+        it("teaches that categorical fields identify the operation and its state", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toMatch(/identify which operation ran and what state/);
+        });
+
+        it("tells the agent to cross-check trace facts against source and direct verification", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toMatch(/[Cc]ross-check/);
+          expect(info).toContain("direct verification");
+        });
+
+        it("explains that an empty `get_span_attributes` result does not invalidate side-effect evidence", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toContain("`get_span_attributes`");
+          expect(info).toMatch(/does NOT invalidate side-effect evidence/);
+        });
+
+        it("tells the agent to continue from trace evidence when `get_root_cause` is unavailable, without retrying or attaching recommendedNextStep", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toContain('`status: "unavailable"`');
+          expect(info).toMatch(/rather than retrying the same call or discarding the trace/);
+          // recommendedNextStep lives on the diagnostic/miss envelope (Workflow
+          // §4), NOT on the unavailable get_root_cause payload — the §5 line must
+          // not associate it with get_root_cause's unavailable response. Anchor
+          // the slice on the §5 header and assert it exists first, so a renamed/
+          // removed header fails loudly instead of making the guard pass on a
+          // -1 slice.
+          const followupsAnchor = info.indexOf("5. Follow-up tools");
+          expect(
+            followupsAnchor,
+            "Workflow §5 'Follow-up tools' header must be present to anchor this guard",
+          ).toBeGreaterThan(-1);
+          const followups = info.slice(followupsAnchor);
+          expect(followups).not.toContain("recommendedNextStep");
+        });
+
+        it("routes named-operation evidence into the smallest source path, and compares multiple traces for stateful bugs", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toMatch(/smallest source path/);
+          expect(info).toMatch(/framework \/ auth \/ UI exploration/);
+          expect(info).toMatch(/[Ss]tateful bugs/);
+          expect(info).toMatch(/compare the relevant traces in sequence/);
+        });
+
+        // Guard: the public, user-installed body must never leak the
+        // validation-candidate specifics that motivated this guidance.
+        it("does not leak candidate-specific terms into the installed body", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          for (const term of [
+            "Rallly",
+            "BetterAuth",
+            "revalidateTag",
+            "cache invalidation",
+            "MFG-RLY",
+          ]) {
+            expect(info).not.toContain(term);
+          }
         });
 
         it("uses the correct `suggestedFollowups` field name", () => {

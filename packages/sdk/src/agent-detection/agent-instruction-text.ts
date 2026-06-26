@@ -54,7 +54,16 @@
  * load-bearing recovery contract (codified in the server-side MCP
  * `ToolDiagnosticSchema` and `CandidateDiagnosticSchema`), and it
  * prevents the bail-to-source failure mode the prior cost-aware
- * decision paragraph did not surface.
+ * decision paragraph did not surface. Beyond routing the first call,
+ * the Workflow also teaches how to USE what the tools return: it frames
+ * `sideEffectEvidence` (compact presence on candidates) and
+ * `sideEffectSummary` (the per-operation values on `get_latest_error` /
+ * `get_trace` / `get_root_cause`) as first-class runtime evidence,
+ * reads `*Holds` keys as boolean claims, treats a thin follow-up (an
+ * empty `get_span_attributes`, an `unavailable` `get_root_cause`) as
+ * still-usable rather than a dead end, and narrows to the smallest
+ * source path the evidence names — while cross-checking every trace
+ * fact against source.
  */
 
 /**
@@ -95,7 +104,10 @@ export function buildAgentInstructionBody(): string {
     "   - **Known route or procedure with suspected misbehavior** (you have a name to filter on, and a rough time window) → `find_trace_candidates` with that name and a **tight time window**. Pass the route name as you see it in source — the server normalizes vocabulary and, on miss, returns close matches and a sample of routes actually present in the window.",
     "   - **Historical exploration** (no known recent failure, you're checking whether a code path ever ran) → `find_trace_candidates` with an **open window**. Same tool, wider lens.",
     "2. Take the highest-confidence candidate's `suggestedFollowups` and pass them straight to `get_trace` or `get_root_cause`.",
-    "3. For side-effect bugs, read `sideEffectSummary` in the `get_trace` / `get_root_cause` response. The allowlisted fields (`templateKey`, `providerOperation`, `role`, `locale`, `timezone`, `status`, `phase`) are the ones that disambiguate payload bugs.",
+    "3. Side-effect evidence is first-class runtime evidence, not metadata. `find_trace_candidates` candidates (and trace summaries) carry a compact `sideEffectEvidence` — which operation kinds and field keys were observed; that is a signal to pull the trace, not a dead end. The actual per-operation values come from `sideEffectSummary`, returned by `get_latest_error`, `get_trace`, and `get_root_cause` (present when the trace captured side-effect evidence). Read both directly:",
+    "   - **Semantic booleans** — any field whose key ends in `Holds` is a true/false claim about what the trace observed. Interpret it as that claim, not as opaque metadata.",
+    "   - **Categorical fields** — `templateKey`, `providerOperation`, and the operation `status` / `phase` (on each `sideEffectSummary.operations[]` entry) identify which operation ran and what state transition it reached. The allowlisted disambiguators are `templateKey`, `providerOperation`, `role`, `locale`, `timezone`, `status`, `phase`.",
+    "   - Cross-check what the trace asserts against source and direct verification — trace facts are observations to confirm in code, not a substitute for reading it.",
     "4. If a tool returns empty, READ the response's empty-result envelope before pivoting to source — each field disambiguates a different reason for the empty result:",
     "   - `closeMatches` / `recentRoutesSample` — your filter vocabulary doesn't match server-side names; the server returns the closest known names + a sample of routes actually present.",
     "   - `windowActivity` — load-bearing four-way distinguisher. `totalTracesInWindow === 0` AND `totalTracesInTenantEver > 0` means \"your time window missed the activity\"; `totalTracesInTenantEver === 0` means \"this tenant has never produced traces\" (SDK not registered, or never hit); `captureConfigBlocksRequest === true` means \"the SDK's capture config dropped this route\"; otherwise the empty result is a vocabulary miss — see `closeMatches`.",
@@ -103,11 +115,17 @@ export function buildAgentInstructionBody(): string {
     "   - `recoveryActions` — concrete next-call shapes.",
     "   - `diagnosticValue` / `recommendedNextStep` — whether to keep searching or stop.",
     "   Empty results carry `notAbsenceProof: true` — they are never proof the bug did not occur.",
+    "5. Follow-up tools refine evidence; they do not invalidate it:",
+    "   - `get_span_attributes` is a scalar drill-down for span attributes. An empty result (no scalars returned) only means there was no scalar drill-down for that trace — it does NOT invalidate side-effect evidence already present in a candidate or trace summary.",
+    "   - If `get_root_cause` returns `status: \"unavailable\"`, the trace is still usable: continue from the candidate summaries and the trace detail it still ships — `summary` and `spans` (always), plus `sideEffectSummary` when the trace captured side-effect evidence — rather than retrying the same call or discarding the trace.",
+    "6. Once trace evidence names a route, procedure, or operation, open the smallest source path tied to that operation first. Widen to broad framework / auth / UI exploration only if that path does not explain the evidence.",
+    "7. Stateful bugs often span more than one request — for example a write or update request followed by a later read, render, or action request. When a single trace looks correct in isolation, compare the relevant traces in sequence before concluding.",
     "",
     "### Tools",
     "- `find_trace_candidates` — discovery, vocabulary-tolerant filter",
     "- `get_trace` — exact trace by `traceId`",
     "- `get_root_cause` — root-cause analysis for a `traceId`",
+    "- `get_span_attributes` — scalar span-attribute drill-down for a `traceId`",
     "- `get_session_timeline` — events for a session",
     "- `get_latest_error` / `get_error_list` — recent server errors",
     "",
