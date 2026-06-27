@@ -841,9 +841,12 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
       registerGlasstrace();
-      await waitForBackgroundWork();
 
-      expect(startSpy).toHaveBeenCalledTimes(1);
+      // DISC-1930: deterministically wait for the backgroundInit -> heartbeat
+      // wiring to fire by polling the spy, rather than a fixed wall-clock
+      // `waitForBackgroundWork()` sleep that intermittently fails under CI load
+      // (the assertion could run before the heartbeat wiring fired).
+      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
       expect(startSpy).toHaveBeenCalledWith(
         expect.any(Object),    // config
         expect.anything(),     // anonKey
@@ -855,14 +858,18 @@ describe("registerGlasstrace() Orchestrator", () => {
 
     it("should NOT start heartbeat after failed backgroundInit", async () => {
       const startSpy = vi.spyOn(heartbeat, "startHeartbeat");
-      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       _setTransportForTesting(vi.fn(async () => { throw new HttpsTransportError("fetch failed: network down"); }) as never);
 
       process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
       registerGlasstrace();
-      await waitForBackgroundWork();
 
+      // DISC-1930: deterministically wait for backgroundInit to FAIL and settle
+      // (the failure is logged as a warning) rather than a fixed sleep, then
+      // assert the heartbeat was never wired. This pins the assertion to the
+      // point after the failure path has run, so it cannot pass spuriously.
+      await vi.waitFor(() => expect(warnSpy).toHaveBeenCalled());
       expect(startSpy).not.toHaveBeenCalled();
     });
 
