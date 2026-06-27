@@ -16,14 +16,19 @@
  *     trace's HTTP span).
  *   - Validation: invalid `name` and non-function `fn` throw.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
   type ReadableSpan,
 } from "@opentelemetry/sdk-trace-base";
-import { trace, SpanStatusCode, SpanKind } from "@opentelemetry/api";
+import {
+  trace,
+  SpanStatusCode,
+  SpanKind,
+  type AttributeValue,
+} from "@opentelemetry/api";
 import {
   withAsyncCausality,
   _resetForTesting,
@@ -293,6 +298,89 @@ describe("withAsyncCausality — validation", () => {
         "not-a-fn",
       ),
     ).toThrow(TypeError);
+  });
+});
+
+describe("withAsyncCausality — attribute snapshot + name validation hardening", () => {
+  it.each(["   ", "\t", "\n"])(
+    "rejects a whitespace-only name (%j)",
+    (name) => {
+      expect(() =>
+        withAsyncCausality({ name }, async () => undefined),
+      ).toThrow(TypeError);
+    },
+  );
+
+  it("snapshots options.name at construction — name mutation before the continuation runs is not observed", async () => {
+    const options = { name: "original-task" };
+    let cont: (() => Promise<unknown>) | undefined;
+    await withHttpServerSpan("HTTP", () => {
+      cont = withAsyncCausality(options, async () => undefined);
+    });
+    options.name = "mutated-task";
+    await cont!();
+    const span = getSpan(exporter.getFinishedSpans(), "original-task");
+    expect(span.name).toBe("original-task");
+  });
+
+  it("snapshots options.attributes at construction — mutation before the continuation runs is not observed", async () => {
+    const attributes: Record<string, AttributeValue> = { "task.kind": "email" };
+    let cont: (() => Promise<unknown>) | undefined;
+    await withHttpServerSpan("HTTP", () => {
+      cont = withAsyncCausality({ name: "task", attributes }, async () => undefined);
+    });
+    // Mutate the caller's object AFTER construction but BEFORE the
+    // continuation runs.
+    attributes["task.kind"] = "sms";
+    attributes["added.after"] = "later";
+    await cont!();
+
+    const span = getSpan(exporter.getFinishedSpans(), "task");
+    expect(span.attributes["task.kind"]).toBe("email");
+    expect(span.attributes["added.after"]).toBeUndefined();
+  });
+
+  it("strips caller-supplied wrapper-owned causal attributes when no originating context was captured", async () => {
+    // Constructed outside any active span → capturedContext is undefined → the
+    // wrapper sets no causal attributes, so caller-spoofed values must not
+    // survive (the wrapper owns these attributes).
+    const cont = withAsyncCausality(
+      {
+        name: "task",
+        attributes: {
+          [ATTR.CAUSAL_POST_RESPONSE_ASYNC]: "spoofed-trace-id",
+          [ATTR.CAUSAL_AFFECTS_HTTP_STATUS]: true,
+          [ATTR.CAUSAL_AFFECTS_HTTP_DURATION]: true,
+        },
+      },
+      async () => undefined,
+    );
+    await cont();
+    const span = getSpan(exporter.getFinishedSpans(), "task");
+    expect(span.attributes[ATTR.CAUSAL_POST_RESPONSE_ASYNC]).toBeUndefined();
+    expect(span.attributes[ATTR.CAUSAL_AFFECTS_HTTP_STATUS]).toBeUndefined();
+    expect(span.attributes[ATTR.CAUSAL_AFFECTS_HTTP_DURATION]).toBeUndefined();
+  });
+
+  it("runs fn directly when tracer.startSpan throws (coverage)", async () => {
+    const throwing = {
+      startSpan: () => {
+        throw new Error("provider boom");
+      },
+    } as unknown as ReturnType<typeof trace.getTracer>;
+    const spy = vi.spyOn(trace, "getTracer").mockReturnValue(throwing);
+    try {
+      let ran = false;
+      const cont = withAsyncCausality({ name: "task" }, async () => {
+        ran = true;
+        return 7;
+      });
+      const res = await cont();
+      expect(ran).toBe(true);
+      expect(res).toBe(7);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

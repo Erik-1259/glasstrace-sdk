@@ -140,11 +140,11 @@ export type RequestMiddlewareFunction = (req: any, ...rest: any[]) => unknown;
  */
 export interface TracedRequestMiddlewareOptions {
   /**
-   * Span name. Required, non-empty string. Used as the OTel span name
-   * and appears in trace timelines. Names should be stable across
-   * runs so the product-side transform can reason about middleware
-   * identity (e.g., "auth-middleware", "rate-limiter"); avoid
-   * embedding request data in the name.
+   * Span name. Required, non-empty, non-whitespace string. Used as the
+   * OTel span name and appears in trace timelines. Names should be
+   * stable across runs so the product-side transform can reason about
+   * middleware identity (e.g., "auth-middleware", "rate-limiter");
+   * avoid embedding request data in the name.
    */
   name: string;
   /**
@@ -153,6 +153,13 @@ export interface TracedRequestMiddlewareOptions {
    * The SDK does not redact, sanitize, or scan values here — callers
    * MUST avoid placing tokens, credentials, or other sensitive data
    * in `attributes`.
+   *
+   * This object is snapshotted (shallow) at wrapper-construction time;
+   * adding, removing, or reassigning a top-level key afterward has no
+   * effect on the emitted span (in-place mutation of an array-valued
+   * attribute is not isolated). The wrapper owns the `glasstrace.causal.*`
+   * attributes (e.g. `glasstrace.causal.middleware_for_request`) — do not
+   * set those keys here; the wrapper's value takes precedence.
    *
    * Sensitive request/response data is captured through gated SDK
    * paths (e.g., `glasstrace.error.response_body`), not through this
@@ -216,6 +223,26 @@ function extractRequestPath(req: unknown): string | undefined {
 }
 
 /**
+ * Maximum length (UTF-16 code units) for the
+ * `glasstrace.causal.middleware_for_request` path attribute. Pathnames
+ * beyond this are clamped with a trailing ellipsis so a pathological URL
+ * cannot produce an oversized attribute value at the SDK boundary.
+ */
+const MAX_CAUSAL_PATH_LENGTH = 2048;
+
+function clampPathAttribute(path: string): string {
+  if (path.length <= MAX_CAUSAL_PATH_LENGTH) return path;
+  // Leave one code unit for the ellipsis. If the cut would orphan the high
+  // half of a surrogate pair, back off one more unit so the result is never
+  // a lone surrogate (which is invalid UTF-8 on the OTLP wire).
+  let cut = MAX_CAUSAL_PATH_LENGTH - 1;
+  if ((path.charCodeAt(cut - 1) & 0xfc00) === 0xd800) {
+    cut -= 1;
+  }
+  return path.slice(0, cut) + "…";
+}
+
+/**
  * Sentinel trace ID returned by the OTel API's noop tracer
  * (`@opentelemetry/api`'s `NonRecordingSpan`). Per the OTel
  * specification's noop semantics, the noop SpanContext exposes
@@ -259,9 +286,11 @@ function isNoopSpan(
  *
  * **Privacy:** the value of
  * `glasstrace.causal.middleware_for_request` is the raw URL
- * pathname. Pathnames can carry user-controlled data (IDs, emails,
- * opaque keys). The SDK does NOT redact this attribute. Callers MUST
- * NOT place secrets, tokens, or other sensitive data in URL paths;
+ * pathname (clamped to 2048 characters with a trailing ellipsis for
+ * unusually long URLs). Pathnames can carry user-controlled data (IDs,
+ * emails, opaque keys). Apart from that length clamp, the SDK does NOT
+ * redact this attribute. Callers MUST NOT place secrets, tokens, or
+ * other sensitive data in URL paths;
  * the same general HTTP best practice that keeps secrets out of
  * server logs keeps them out of Glasstrace trace evidence.
  *
@@ -326,10 +355,26 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
   // Eager validation: a mis-typed call site fails at wrapper-
   // construction time (typically at module load) rather than at
   // first request, when the failure is harder to diagnose.
-  if (typeof options.name !== "string" || options.name.length === 0) {
+  if (typeof options.name !== "string" || options.name.trim().length === 0) {
     throw new TypeError(
-      "tracedRequestMiddleware: options.name must be a non-empty string",
+      "tracedRequestMiddleware: options.name must be a non-empty, non-whitespace string",
     );
+  }
+
+  // Snapshot the span name and caller attributes at construction time so a
+  // post-construction mutation of the passed options object is not observed at
+  // request time. The attributes snapshot is shallow: adding, removing, or
+  // reassigning a top-level key afterward has no effect, but in-place mutation
+  // of an array-valued attribute is not isolated.
+  const spanName = options.name;
+  const attributesSnapshot =
+    options.attributes !== undefined ? { ...options.attributes } : undefined;
+  // The wrapper owns `glasstrace.causal.middleware_for_request`. Drop any
+  // caller-supplied value so it cannot spoof or survive when no path is
+  // extractable — the wrapper sets the real value only when it has a path,
+  // and prefers omission over guessed evidence.
+  if (attributesSnapshot) {
+    delete attributesSnapshot[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST];
   }
 
   // Capture options + handler lexically. Do not read from `this` —
@@ -353,7 +398,7 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
     // handler-error rethrow.
     let callbackInvoked = false;
     try {
-      return tracer.startActiveSpan(options.name, (span) => {
+      return tracer.startActiveSpan(spanName, (span) => {
       callbackInvoked = true;
       // SDK-not-registered fast path. Detecting via the public
       // `isRecording()` method on the started span is the canonical
@@ -377,12 +422,15 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
       // Set caller-supplied attributes first so they appear on the
       // span before any internal attribute we add below.
       try {
-        if (options.attributes) {
-          span.setAttributes(options.attributes);
+        if (attributesSnapshot) {
+          span.setAttributes(attributesSnapshot);
         }
         const path = extractRequestPath(req);
         if (path !== undefined) {
-          span.setAttribute(ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST, path);
+          span.setAttribute(
+            ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST,
+            clampPathAttribute(path),
+          );
         }
       } catch {
         // Attribute-setting failures are advisory; never block the
