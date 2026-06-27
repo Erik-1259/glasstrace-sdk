@@ -398,12 +398,17 @@ describe("decision-trace wiring — sideEffect.fieldRejected", () => {
     otelApi.trace.setGlobalTracerProvider(provider);
     tracer = otelApi.trace.getTracer("glasstrace-wiring-rejection");
     _resetSideEffectVocabState();
+    // Reset the process-global decision-trace dedup set too — otherwise a
+    // `sideEffect.fieldRejected:<reason>` one-shot key recorded by an earlier
+    // test suppresses the same event in later tests (order-dependent failure).
+    _resetDecisionTraceForTesting();
     _setCurrentConfig(configWith());
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
     _resetSideEffectVocabState();
+    _resetDecisionTraceForTesting();
     _resetConfigForTesting();
     await provider.shutdown();
     otelApi.trace.disable();
