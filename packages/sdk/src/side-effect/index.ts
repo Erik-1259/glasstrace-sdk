@@ -41,6 +41,7 @@ import {
   isRecordingSpan,
   recordOmission,
 } from "./emit.js";
+import type { SideEffectOmissionReason } from "@glasstrace/protocol";
 import { getActiveConfig } from "../init-client.js";
 import {
   decisionTrace,
@@ -435,6 +436,25 @@ export function recordSideEffect(
   }
 }
 
+/**
+ * Record a field/scalar omission on the target span and, when decision
+ * tracing is on, emit a `sideEffect.fieldRejected` decision keyed by the
+ * closed omission reason. This is the hot-path rejection site, so the key
+ * is the reason ONLY — never the rejected field key or value — which bounds
+ * the one-shot cardinality to the fixed omission-reason set and keeps unsafe
+ * input off the decision channel. The decision emit is call-site guarded so
+ * no detail is built when the toggle is OFF, and it never alters the
+ * omission bookkeeping.
+ */
+function recordRejection(span: Span, reason: SideEffectOmissionReason): void {
+  recordOmission(span, reason);
+  if (decisionTraceEnabled()) {
+    decisionTrace("sideEffect.fieldRejected", reason, {
+      oneShotKey: `sideEffect.fieldRejected:${reason}`,
+    });
+  }
+}
+
 function runRecordSideEffect(
   input: unknown,
   options?: RecordSideEffectOptions,
@@ -502,7 +522,7 @@ function runRecordSideEffect(
 
   const labelOutcome = checkOperationLabel(candidate.operation);
   if (!labelOutcome.accepted) {
-    recordOmission(targetSpan, labelOutcome.reason);
+    recordRejection(targetSpan, labelOutcome.reason);
     return;
   }
 
@@ -511,7 +531,7 @@ function runRecordSideEffect(
     if (checkOperationStatus(candidate.status)) {
       acceptedStatus = candidate.status;
     } else {
-      recordOmission(targetSpan, "unsupported_key");
+      recordRejection(targetSpan, "unsupported_key");
     }
   }
 
@@ -520,7 +540,7 @@ function runRecordSideEffect(
     if (checkOperationPhase(candidate.phase)) {
       acceptedPhase = candidate.phase;
     } else {
-      recordOmission(targetSpan, "unsupported_key");
+      recordRejection(targetSpan, "unsupported_key");
     }
   }
 
@@ -532,7 +552,7 @@ function runRecordSideEffect(
   });
 
   if (outcome.kind === "over_budget") {
-    recordOmission(targetSpan, "value_too_long");
+    recordRejection(targetSpan, "value_too_long");
     return;
   }
 
@@ -546,12 +566,12 @@ function runRecordSideEffect(
   if (fields && typeof fields === "object") {
     for (const [rawKey, rawValue] of Object.entries(fields)) {
       if (!checkSemanticFieldKey(rawKey)) {
-        recordOmission(targetSpan, "unsupported_key");
+        recordRejection(targetSpan, "unsupported_key");
         continue;
       }
       const valueOutcome = checkSemanticFieldValue(rawKey, rawValue);
       if (!valueOutcome.accepted) {
-        recordOmission(targetSpan, valueOutcome.reason);
+        recordRejection(targetSpan, valueOutcome.reason);
         continue;
       }
       // Vocabulary-governance signals are diagnostic-only. Wrap in a
@@ -583,16 +603,16 @@ function runRecordSideEffect(
   if (relations && typeof relations === "object") {
     for (const [rawKey, rawValue] of Object.entries(relations)) {
       if (attachedFieldKeys.has(rawKey)) {
-        recordOmission(targetSpan, "unsupported_key");
+        recordRejection(targetSpan, "unsupported_key");
         continue;
       }
       if (!rawKey.endsWith("Holds") || !checkSemanticFieldKey(rawKey)) {
-        recordOmission(targetSpan, "unsupported_key");
+        recordRejection(targetSpan, "unsupported_key");
         continue;
       }
       if (typeof rawValue !== "boolean") {
         // Relations must be real booleans; a non-boolean is malformed.
-        recordOmission(targetSpan, "raw_payload");
+        recordRejection(targetSpan, "raw_payload");
         continue;
       }
       const valueOutcome = checkSemanticFieldValue(
@@ -600,7 +620,7 @@ function runRecordSideEffect(
         rawValue ? "true" : "false",
       );
       if (!valueOutcome.accepted) {
-        recordOmission(targetSpan, valueOutcome.reason);
+        recordRejection(targetSpan, valueOutcome.reason);
         continue;
       }
       // Same diagnostic governance as `fields` (the casing warn no-ops
@@ -632,13 +652,13 @@ function runRecordSideEffect(
         // Per-operation scalar budget exhausted. Record a single
         // count (mirroring the operation over-budget path) and stop;
         // no rejected value is echoed.
-        recordOmission(targetSpan, "value_too_long");
+        recordRejection(targetSpan, "value_too_long");
         break;
       }
       scalarCount += 1;
       const scalarOutcome = checkScalarField(rawKey, rawValue);
       if (!scalarOutcome.accepted) {
-        recordOmission(targetSpan, scalarOutcome.reason);
+        recordRejection(targetSpan, scalarOutcome.reason);
         continue;
       }
       attachScalar(targetSpan, rawKey, scalarOutcome.value);

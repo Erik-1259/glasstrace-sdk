@@ -79,10 +79,18 @@ const VALID_INPUT = {
   phase: "request" as const,
 };
 
+// These tests target the `capture.sideEffectEvidence` gate at the top of
+// `recordSideEffect`. The same call path also resolves the active config,
+// which emits its own `config.tier` decision when the toggle is ON, so both
+// the line spy and the event collector are scoped to the capture point to
+// keep the assertions about this gate alone.
+const CAPTURE_POINT = "capture.sideEffectEvidence";
+const CAPTURE_LINE_PREFIX = `[glasstrace] decision: ${CAPTURE_POINT}=`;
+
 function decisionLineSpy(): { lines: string[]; restore: () => void } {
   const lines: string[] = [];
   const spy = vi.spyOn(console, "info").mockImplementation((...args) => {
-    if (typeof args[0] === "string" && args[0].startsWith("[glasstrace] decision:")) {
+    if (typeof args[0] === "string" && args[0].startsWith(CAPTURE_LINE_PREFIX)) {
       lines.push(args[0]);
     }
   });
@@ -95,7 +103,7 @@ function collectDecisionEvents(): {
 } {
   const events: SdkLifecycleEvents["core:decision"][] = [];
   const listener = (e: SdkLifecycleEvents["core:decision"]): void => {
-    events.push(e);
+    if (e.point === CAPTURE_POINT) events.push(e);
   };
   onLifecycleEvent("core:decision", listener);
   return { events, stop: () => offLifecycleEvent("core:decision", listener) };

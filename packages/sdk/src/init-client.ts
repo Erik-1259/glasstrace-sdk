@@ -32,6 +32,7 @@ import {
   getStoredAttrHmacKey,
   _resetActiveConfigForTesting,
 } from "./active-config-store.js";
+import { decisionTrace, decisionTraceEnabled } from "./decision-trace.js";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const CONFIG_FILE = "config";
@@ -630,6 +631,15 @@ function resolveActiveConfig(): CaptureConfig {
   // Tier 1: in-memory (shared across bundle instances)
   const current = getActiveConfigResponse();
   if (current) {
+    // Decision trace (hot path): which fallback tier served this config.
+    // Call-site guarded so nothing is built when OFF; keyed by the closed
+    // tier outcome (three values) so it stays bounded and re-emits once per
+    // tier as init progresses (default → cached → served).
+    if (decisionTraceEnabled()) {
+      decisionTrace("config.tier", "served", {
+        oneShotKey: "config.tier:served",
+      });
+    }
     return current.config;
   }
 
@@ -639,11 +649,21 @@ function resolveActiveConfig(): CaptureConfig {
     const cached = loadCachedConfig();
     if (cached) {
       setActiveConfig(cached);
+      if (decisionTraceEnabled()) {
+        decisionTrace("config.tier", "cached", {
+          oneShotKey: "config.tier:cached",
+        });
+      }
       return cached.config;
     }
   }
 
   // Tier 3: defaults
+  if (decisionTraceEnabled()) {
+    decisionTrace("config.tier", "default", {
+      oneShotKey: "config.tier:default",
+    });
+  }
   return { ...DEFAULT_CAPTURE_CONFIG };
 }
 

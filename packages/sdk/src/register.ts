@@ -127,7 +127,22 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     }
 
     // Production check
-    if (isProductionDisabled(config)) {
+    const productionDisabled = isProductionDisabled(config);
+    // Decision trace: how the production gate resolved — disabled in prod,
+    // force-enabled past it, or a normal non-prod run. Keyed by the closed
+    // outcome (three values). Guarded so nothing is built when OFF. The
+    // decision-trace flag was set just above, so the threaded gate governs.
+    if (decisionTraceEnabled()) {
+      const outcome = productionDisabled
+        ? "production_disabled"
+        : config.forceEnable
+          ? "forced"
+          : "normal";
+      decisionTrace("env.forceEnable", outcome, {
+        oneShotKey: `env.forceEnable:${outcome}`,
+      });
+    }
+    if (productionDisabled) {
       setCoreState(CoreState.PRODUCTION_DISABLED);
       console.warn(
         "[glasstrace] Disabled in production. Set GLASSTRACE_FORCE_ENABLE=true to override.",
@@ -284,7 +299,17 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // Background work: anonymous key resolution, discovery endpoint, init
     if (anonymous) {
       // Register discovery endpoint IMMEDIATELY with async key resolution
-      if (isDiscoveryEnabled(config)) {
+      const discoveryEnabled = isDiscoveryEnabled(config);
+      // Decision trace: whether the browser-extension discovery endpoint is
+      // registered for this environment. Keyed by the closed outcome (two
+      // values). Guarded so nothing is built when OFF.
+      if (decisionTraceEnabled()) {
+        const outcome = discoveryEnabled ? "enabled" : "disabled";
+        decisionTrace("feature.discovery", outcome, {
+          oneShotKey: `feature.discovery:${outcome}`,
+        });
+      }
+      if (discoveryEnabled) {
         let resolvedAnonKey: AnonApiKey | null = null;
         const anonKeyPromise = getOrCreateAnonKey();
 
@@ -541,7 +566,19 @@ export function getDiscoveryHandler(): ((request: Request) => Promise<Response |
  */
 function maybeInstallConsoleCapture(): void {
   if (consoleCaptureInstalled) return;
-  if (getActiveConfig().consoleErrors) {
+  const consoleErrorsEnabled = getActiveConfig().consoleErrors === true;
+  // Decision trace: whether console-error capture is installed for this
+  // account. Emitted at the config gate (after the already-installed early
+  // return, so it reflects a real install decision, not a repeat call).
+  // Keyed by the closed outcome (two values). Guarded so nothing is built
+  // when OFF.
+  if (decisionTraceEnabled()) {
+    const outcome = consoleErrorsEnabled ? "enabled" : "disabled";
+    decisionTrace("feature.consoleErrors", outcome, {
+      oneShotKey: `feature.consoleErrors:${outcome}`,
+    });
+  }
+  if (consoleErrorsEnabled) {
     consoleCaptureInstalled = true;
     void installConsoleCapture();
   }

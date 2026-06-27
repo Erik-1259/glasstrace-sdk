@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEndMarkerLine, parseStartMarkerLine } from "./inject.js";
+import { decisionTrace, decisionTraceEnabled } from "../decision-trace.js";
 
 /**
  * Stale-managed-section warning.
@@ -335,7 +336,17 @@ export function maybeWarnStaleAgentInstructions(
       return;
     }
 
-    if (isOptedOut()) return;
+    if (isOptedOut()) {
+      // Decision trace: the stale-instruction upgrade notice was suppressed by
+      // the opt-out env var. Keyed by the closed outcome (`suppressed` /
+      // `shown`). Guarded so nothing is built when OFF.
+      if (decisionTraceEnabled()) {
+        decisionTrace("env.upgradeNoticeSuppressed", "suppressed", {
+          oneShotKey: "env.upgradeNoticeSuppressed:suppressed",
+        });
+      }
+      return;
+    }
     if (isQuietCiContext()) return;
 
     // Misbuilt SDK guard: an unparseable running version means we
@@ -368,6 +379,14 @@ export function maybeWarnStaleAgentInstructions(
       `(silence with GLASSTRACE_DISABLE_UPGRADE_NOTICE=1).\n`;
 
     warningEmitted = true;
+
+    // Decision trace: a stale managed section was found and the upgrade notice
+    // is being shown.
+    if (decisionTraceEnabled()) {
+      decisionTrace("env.upgradeNoticeSuppressed", "shown", {
+        oneShotKey: "env.upgradeNoticeSuppressed:shown",
+      });
+    }
 
     if (options.stderrWrite !== undefined) {
       options.stderrWrite(message);
