@@ -721,6 +721,44 @@ describe("generateInfoSection", () => {
           expect(info).toMatch(/compare the relevant traces in sequence/);
         });
 
+        // DISC-1955: a sparse candidate (compact summaries absent) is not
+        // absence of evidence; the compact CATEGORY projections are the
+        // budget/top-rank-gated ones, distinct from per-candidate
+        // sideEffectEvidence (which carries a status + notAbsenceProof).
+        it("teaches that a candidate with absent compact summaries is still evidence", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          // Assert the FULL closed set of four compact category projections,
+          // so dropping/renaming any one is caught (the sentence's value is
+          // naming the exact set the server emits).
+          expect(info).toContain("`performanceQuerySummary`");
+          expect(info).toContain("`dataShapeSummary`");
+          expect(info).toContain("`raceConcurrencySummary`");
+          expect(info).toContain("`contextBranchSummary`");
+          expect(info).toMatch(/absence is normal, not absence of evidence/);
+          // sideEffectEvidence status is per-candidate (not the gated projection set).
+          expect(info).toMatch(/`missing` \/ `withheld` \/ `unsupported`/);
+          expect(info).toContain("`notAbsenceProof`");
+          // Anchor the operative remediation clause so dropping it fails loudly.
+          expect(info).toContain("pull the trace with");
+          expect(info).toContain("before concluding nothing happened");
+        });
+
+        it("teaches retry-by-procedure (the `{ procedure }` param form) and route-vs-URL comparison for a sparse search", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          // The param-object form (not just naming the `procedure` filter).
+          expect(info).toMatch(/find_trace_candidates\(\{ procedure:/);
+          expect(info).toMatch(/preferred over a vague route fragment/);
+          expect(info).toMatch(/compare the candidate's `route` pattern against the URL/);
+        });
+
         // Guard: the public, user-installed body must never leak the
         // validation-candidate specifics that motivated this guidance.
         it("does not leak candidate-specific terms into the installed body", () => {
