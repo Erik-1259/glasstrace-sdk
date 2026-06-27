@@ -140,7 +140,11 @@ first call for each symptom class. It then teaches the agent how to
 first-class runtime facts, reading boolean (`*Holds`) and categorical
 trace fields directly, continuing from the trace summary when a
 follow-up tool comes back thin, and narrowing to the smallest source
-path the trace identifies before broad exploration.
+path the trace identifies before broad exploration. It also tells the
+agent not to read a sparse candidate (one whose compact summaries are
+absent) as absence of evidence, and to broaden or retry a sparse search
+by procedure (`find_trace_candidates({ procedure: "<name>" })`) — comparing the
+matched route against the URL searched before concluding a path never ran.
 
 ### Migration from legacy filenames
 
