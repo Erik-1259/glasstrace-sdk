@@ -22,7 +22,7 @@
  *
  * Type-inference is exercised at compile time only.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -32,7 +32,12 @@ import {
   type Sampler,
   type SamplingResult,
 } from "@opentelemetry/sdk-trace-base";
-import { trace, SpanStatusCode, SpanKind } from "@opentelemetry/api";
+import {
+  trace,
+  SpanStatusCode,
+  SpanKind,
+  type AttributeValue,
+} from "@opentelemetry/api";
 import {
   tracedRequestMiddleware,
   _resetForTesting,
@@ -356,6 +361,140 @@ describe("tracedRequestMiddleware — validation", () => {
     expect(() =>
       tracedRequestMiddleware({ name: "" }, async () => undefined),
     ).toThrow(TypeError);
+  });
+});
+
+describe("tracedRequestMiddleware — attribute snapshot, path clamp, name validation hardening", () => {
+  it.each(["   ", "\t", "\n"])(
+    "rejects a whitespace-only name (%j)",
+    (name) => {
+      expect(() =>
+        tracedRequestMiddleware({ name }, async () => undefined),
+      ).toThrow(TypeError);
+    },
+  );
+
+  it("snapshots options.name at construction — post-construction name mutation is not observed", async () => {
+    const options = { name: "original-name" };
+    const wrapped = tracedRequestMiddleware(options, async () => ({
+      status: 200,
+    }));
+    options.name = "mutated-name";
+    await wrapped(makeNextRequest({ pathname: "/x" }));
+    const span = getSpan(exporter.getFinishedSpans(), "original-name");
+    expect(span.name).toBe("original-name");
+  });
+
+  it("snapshots options.attributes at construction — post-construction mutation is not observed", async () => {
+    const attributes: Record<string, AttributeValue> = {
+      "auth.required": true,
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "auth", attributes },
+      async () => ({ status: 200 }),
+    );
+    // Mutate the caller's object AFTER the wrapper is constructed.
+    attributes["auth.required"] = false;
+    attributes["added.after"] = "later";
+
+    await wrapped(makeNextRequest({ pathname: "/x" }));
+    const span = getSpan(exporter.getFinishedSpans(), "auth");
+    expect(span.attributes["auth.required"]).toBe(true);
+    expect(span.attributes["added.after"]).toBeUndefined();
+  });
+
+  it("wrapper-owned causal path attribute takes precedence over a caller-supplied value", async () => {
+    const wrapped = tracedRequestMiddleware(
+      {
+        name: "auth",
+        attributes: { [ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST]: "/caller-bogus" },
+      },
+      async () => ({ status: 200 }),
+    );
+    await wrapped(makeNextRequest({ pathname: "/real" }));
+    const span = getSpan(exporter.getFinishedSpans(), "auth");
+    expect(span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST]).toBe("/real");
+  });
+
+  it("strips a caller-supplied wrapper-owned causal attribute when no path is extractable", async () => {
+    const wrapped = tracedRequestMiddleware(
+      {
+        name: "auth",
+        attributes: { [ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST]: "/caller-spoof" },
+      },
+      async () => ({ status: 200 }),
+    );
+    // No nextUrl/url → extractRequestPath returns undefined → the wrapper sets
+    // nothing, and the caller's spoofed value must NOT survive (the wrapper
+    // owns this attribute and prefers omission over guessed evidence).
+    await wrapped(makeNextRequest({}));
+    const span = getSpan(exporter.getFinishedSpans(), "auth");
+    expect(span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST]).toBeUndefined();
+  });
+
+  it("leaves a path at the 2048-char boundary unclamped", async () => {
+    const path = "/" + "a".repeat(2047); // length exactly 2048
+    const wrapped = tracedRequestMiddleware(
+      { name: "auth" },
+      async () => ({ status: 200 }),
+    );
+    await wrapped(makeNextRequest({ pathname: path }));
+    const span = getSpan(exporter.getFinishedSpans(), "auth");
+    const val = span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST] as string;
+    expect(val).toBe(path);
+    expect(val.length).toBe(2048);
+  });
+
+  it("clamps a path longer than 2048 chars to length 2048 with an ellipsis marker", async () => {
+    const path = "/" + "a".repeat(5000); // far over the cap
+    const wrapped = tracedRequestMiddleware(
+      { name: "auth" },
+      async () => ({ status: 200 }),
+    );
+    await wrapped(makeNextRequest({ pathname: path }));
+    const span = getSpan(exporter.getFinishedSpans(), "auth");
+    const val = span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST] as string;
+    expect(val.length).toBe(2048);
+    expect(val.endsWith("…")).toBe(true);
+    expect(val.startsWith("/aaa")).toBe(true);
+  });
+
+  it("never emits a lone surrogate when clamping a path with a multi-byte char at the cut boundary", async () => {
+    // Place an emoji (a surrogate pair) so its high half lands at the cut
+    // index, exercising the surrogate-aware back-off in clampPathAttribute.
+    const path = "/" + "a".repeat(2045) + "😀" + "b".repeat(100);
+    const wrapped = tracedRequestMiddleware(
+      { name: "auth" },
+      async () => ({ status: 200 }),
+    );
+    await wrapped(makeNextRequest({ pathname: path }));
+    const span = getSpan(exporter.getFinishedSpans(), "auth");
+    const val = span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST] as string;
+    expect(val.length).toBeLessThanOrEqual(2048);
+    expect(val.endsWith("…")).toBe(true);
+    // No orphaned high surrogate (would be invalid UTF-8 on the OTLP wire).
+    expect(val.isWellFormed()).toBe(true);
+  });
+
+  it("runs the handler directly when tracer.startActiveSpan throws (coverage)", async () => {
+    const throwing = {
+      startActiveSpan: () => {
+        throw new Error("provider boom");
+      },
+    } as unknown as ReturnType<typeof trace.getTracer>;
+    const spy = vi.spyOn(trace, "getTracer").mockReturnValue(throwing);
+    try {
+      let ran = false;
+      const wrapped = tracedRequestMiddleware({ name: "auth" }, async () => {
+        ran = true;
+        return { status: 200 };
+      });
+      const res = await wrapped(makeNextRequest({ pathname: "/x" }));
+      expect(ran).toBe(true);
+      expect(res).toEqual({ status: 200 });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

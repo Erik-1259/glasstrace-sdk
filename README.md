@@ -294,12 +294,13 @@ OpenTelemetry API and emits the originating path as a span attribute
 works in both Node and Edge runtimes.
 
 > **Privacy note.** The path emitted to
-> `glasstrace.causal.middleware_for_request` is the raw URL pathname.
-> Pathnames in real applications can carry user-controlled data (user
-> IDs, email addresses, document slugs, opaque keys). The SDK does
-> NOT redact or sanitize the pathname — that is the caller's
-> responsibility per general HTTP best practice ("do not put secrets
-> in URLs"). If your application places sensitive identifiers in path
+> `glasstrace.causal.middleware_for_request` is the raw URL pathname
+> (clamped to 2048 characters with a trailing ellipsis for unusually
+> long URLs). Pathnames in real applications can carry user-controlled
+> data (user IDs, email addresses, document slugs, opaque keys). Apart
+> from that length clamp, the SDK does NOT redact or sanitize the
+> pathname — that is the caller's responsibility per general HTTP best
+> practice ("do not put secrets in URLs"). If your application places sensitive identifiers in path
 > positions, either rewrite to header/body parameters before the SDK
 > sees them, or accept that the path will appear in trace evidence
 > the same way it appears in your own server logs.

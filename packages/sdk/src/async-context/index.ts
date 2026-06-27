@@ -119,9 +119,9 @@ export function _resetForTesting(): void {
  */
 export interface WithAsyncCausalityOptions {
   /**
-   * Span name for the async work. Required, non-empty string. Used as
-   * the OTel span name and appears in trace timelines. Names should
-   * be stable across runs (e.g., "send-confirmation-email",
+   * Span name for the async work. Required, non-empty, non-whitespace
+   * string. Used as the OTel span name and appears in trace timelines.
+   * Names should be stable across runs (e.g., "send-confirmation-email",
    * "enqueue-webhook-dispatch"); avoid embedding payload data in the
    * name.
    */
@@ -132,6 +132,12 @@ export interface WithAsyncCausalityOptions {
    * The SDK does not redact, sanitize, or scan values here — callers
    * MUST avoid placing tokens, credentials, or other sensitive data
    * in `attributes`.
+   *
+   * This object is snapshotted (shallow) at wrapper-construction time;
+   * adding, removing, or reassigning a top-level key afterward has no
+   * effect on the emitted span (in-place mutation of an array-valued
+   * attribute is not isolated). The wrapper owns the `glasstrace.causal.*`
+   * attributes — do not set those keys here.
    */
   attributes?: Record<string, AttributeValue>;
 }
@@ -140,6 +146,14 @@ export interface WithAsyncCausalityOptions {
  * Capture the active OTel `SpanContext` at call time, bind it to a
  * callback, and return a continuation that will emit a
  * causally-linked span when invoked.
+ *
+ * **Causality model:** the callback runs under a NEW root span that is
+ * *linked* to (not a child of) the captured request span. "Captured the
+ * request context" does NOT mean the async work nests under the request
+ * trace — `after()` / queue dispatchers run outside the request's OTel
+ * context, so the async work is its own trace, joined to the request only
+ * by an OTel `Link` + the `glasstrace.causal.post_response_async`
+ * attribute.
  *
  * The returned continuation:
  *
@@ -214,13 +228,28 @@ export function withAsyncCausality<T>(
   options: WithAsyncCausalityOptions,
   fn: () => Promise<T> | T,
 ): () => Promise<T> {
-  if (typeof options.name !== "string" || options.name.length === 0) {
+  if (typeof options.name !== "string" || options.name.trim().length === 0) {
     throw new TypeError(
-      "withAsyncCausality: options.name must be a non-empty string",
+      "withAsyncCausality: options.name must be a non-empty, non-whitespace string",
     );
   }
   if (typeof fn !== "function") {
     throw new TypeError("withAsyncCausality: fn must be a function");
+  }
+
+  // Snapshot the span name and caller attributes at construction time so a
+  // post-construction mutation of the passed options object is not observed
+  // when the continuation later runs. The attributes snapshot is shallow:
+  // top-level key changes are isolated; in-place array mutation is not.
+  const spanName = options.name;
+  const attributesSnapshot =
+    options.attributes !== undefined ? { ...options.attributes } : undefined;
+  // The wrapper owns the causal attributes. Drop any caller-supplied values so
+  // they cannot spoof or survive when no originating context was captured.
+  if (attributesSnapshot) {
+    delete attributesSnapshot[ATTR.CAUSAL_POST_RESPONSE_ASYNC];
+    delete attributesSnapshot[ATTR.CAUSAL_AFFECTS_HTTP_STATUS];
+    delete attributesSnapshot[ATTR.CAUSAL_AFFECTS_HTTP_DURATION];
   }
 
   // Capture-time: snapshot the active SpanContext, if any. The
@@ -259,7 +288,7 @@ export function withAsyncCausality<T>(
     // continuation — fall back to running fn() directly.
     let span: ReturnType<typeof tracer.startSpan>;
     try {
-      span = tracer.startSpan(options.name, {
+      span = tracer.startSpan(spanName, {
         root: true,
         links:
           capturedContext !== undefined
@@ -289,8 +318,8 @@ export function withAsyncCausality<T>(
     }
 
     try {
-      if (options.attributes) {
-        span.setAttributes(options.attributes);
+      if (attributesSnapshot) {
+        span.setAttributes(attributesSnapshot);
       }
       if (capturedContext !== undefined) {
         span.setAttribute(
