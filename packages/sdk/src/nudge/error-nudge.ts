@@ -64,12 +64,14 @@ export function maybeShowMcpNudge(errorSummary: string): void {
   const config = resolveConfig();
   if (isProductionDisabled(config)) {
     // Decision trace: the MCP nudge was suppressed by the production gate.
-    // Keyed by the closed outcome (`suppressed` / `shown`) with a
-    // code-literal reason. Guarded so nothing is built when OFF.
+    // Keyed by the closed outcome (`suppressed` / `shown`) AND the code-literal
+    // reason, so the two suppression branches each keep their own one-shot slot
+    // (folding the reason in avoids the production/marker key collision).
+    // Guarded so nothing is built when OFF.
     if (decisionTraceEnabled()) {
       decisionTrace("env.nudgeSuppressed", "suppressed", {
         reason: "production",
-        oneShotKey: "env.nudgeSuppressed:suppressed",
+        oneShotKey: "env.nudgeSuppressed:suppressed:production",
       });
     }
     hasFired = true;
@@ -82,7 +84,7 @@ export function maybeShowMcpNudge(errorSummary: string): void {
     if (decisionTraceEnabled()) {
       decisionTrace("env.nudgeSuppressed", "suppressed", {
         reason: "marker_present",
-        oneShotKey: "env.nudgeSuppressed:suppressed",
+        oneShotKey: "env.nudgeSuppressed:suppressed:marker_present",
       });
     }
     hasFired = true;

@@ -36,6 +36,7 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import {
+  decisionTrace,
   setDecisionTraceFlag,
   _resetDecisionTraceForTesting,
   type DecisionPoint,
@@ -226,14 +227,14 @@ describe("decision-trace wiring — Prisma identifier-capture points", () => {
     expect(collected.identifier).toEqual(["unhashed"]);
   });
 
-  it("ON: strict fidelity on a mixed model emits idModel=suppressed_strict (no token)", async () => {
-    _setCurrentConfig(configWith()); // strict (captureFidelity unset)
+  it("ON: non-full fidelity on a mixed model emits idModel=suppressed (no token)", async () => {
+    _setCurrentConfig(configWith()); // captureFidelity unset (non-full)
     setDecisionTraceFlag(true);
 
     const idModel = await eventsForPoint("capture.fidelity.idModel", async () => {
       await run({
-        // A mixed model reaches projectIdentifier even under strict (the eager
-        // column warrants the owned span); the id intent then bails strict.
+        // A mixed model reaches projectIdentifier even under non-full fidelity
+        // (the eager column warrants the owned span); the id intent then bails.
         allow: [
           { model: "Poll", column: "owner", as: "id" },
           { model: "Poll", column: "muted", as: "flag" },
@@ -242,7 +243,23 @@ describe("decision-trace wiring — Prisma identifier-capture points", () => {
         row: { owner: "u-1", muted: true },
       });
     });
-    expect(idModel.map((e) => e.outcome)).toEqual(["suppressed_strict"]);
+    expect(idModel.map((e) => e.outcome)).toEqual(["suppressed"]);
+  });
+
+  it("ON: full fidelity + provisioned key + non-hashable id emits hmacKey=provisioned, identifier=unhashed", async () => {
+    // The key IS provisioned, but the id value is non-hashable (an object), so
+    // the hmacKey facet reports the key state alone (`provisioned`) and the
+    // value facet carries the non-hashable case (`unhashed`).
+    setFull(HMAC_KEY);
+    setDecisionTraceFlag(true);
+    const collected = await collectFacets({
+      allow: [{ model: "Poll", column: "owner", as: "id" }],
+      model: "Poll",
+      row: { owner: { nested: "not-a-scalar" } },
+    });
+    expect(collected.idModel).toEqual(["full"]);
+    expect(collected.hmacKey).toEqual(["provisioned"]);
+    expect(collected.identifier).toEqual(["unhashed"]);
   });
 
   it("OFF: no identifier-capture decision events are emitted", async () => {
@@ -289,15 +306,24 @@ describe("decision-trace wiring — Prisma identifier-capture points", () => {
 // ---------------------------------------------------------------------------
 
 describe("decision-trace wiring — config.tier", () => {
-  beforeEach(() => {
+  // A fresh temp cwd per test so the on-disk `.glasstrace/config` cache is
+  // controlled: present for the `cached` case, absent for `served`/`default`.
+  const originalCwd = process.cwd();
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "glasstrace-config-tier-"));
+    process.chdir(tempDir);
     _resetDecisionTraceForTesting();
     _resetConfigForTesting();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     _resetDecisionTraceForTesting();
     _resetConfigForTesting();
+    process.chdir(originalCwd);
+    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("ON: an in-memory config resolves to config.tier=served", async () => {
@@ -307,6 +333,31 @@ describe("decision-trace wiring — config.tier", () => {
       getActiveConfig();
     });
     expect(events.map((e) => e.outcome)).toEqual(["served"]);
+  });
+
+  it("ON: a disk-cached config (no in-memory) resolves to config.tier=cached", async () => {
+    // Write a valid cache file in the temp cwd; with no in-memory config the
+    // resolver falls through tier 1 to tier 2 (the file cache).
+    await mkdir(join(tempDir, ".glasstrace"), { recursive: true });
+    await writeFile(
+      join(tempDir, ".glasstrace", "config"),
+      JSON.stringify({ response: configWith(), cachedAt: Date.now() }),
+    );
+    setDecisionTraceFlag(true);
+    const events = await eventsForPoint("config.tier", () => {
+      getActiveConfig();
+    });
+    expect(events.map((e) => e.outcome)).toEqual(["cached"]);
+  });
+
+  it("ON: no in-memory and no cache file resolves to config.tier=default", async () => {
+    // Fresh temp cwd with no `.glasstrace/config` and no in-memory config →
+    // tier 3 defaults.
+    setDecisionTraceFlag(true);
+    const events = await eventsForPoint("config.tier", () => {
+      getActiveConfig();
+    });
+    expect(events.map((e) => e.outcome)).toEqual(["default"]);
   });
 
   it("OFF: getActiveConfig emits no config.tier event", async () => {
@@ -416,6 +467,27 @@ describe("decision-trace wiring — sideEffect.fieldRejected", () => {
     });
     const outcomes = events.map((e) => e.outcome).sort();
     expect(outcomes).toEqual(["raw_payload", "unsupported_key"]);
+  });
+
+  it("ON: reusing one span past its operation budget emits both the field reason and value_too_long", async () => {
+    setDecisionTraceFlag(true);
+    // Reuse a single owned span. The first 5 calls each reach the fields loop
+    // and reject the unsupported key (`unsupported_key`); from the 6th call on,
+    // the per-span operation budget is exhausted, so `attachOperation` returns
+    // over_budget and the call rejects with `value_too_long`. Both distinct
+    // reason-keys must emit (one line each).
+    const owned = tracer.startSpan("db.Poll.findUnique");
+    const events = await eventsForPoint("sideEffect.fieldRejected", () => {
+      for (let i = 0; i < 8; i++) {
+        recordSideEffect(
+          { kind: "email", operation: "email.send", fields: { bad: "x" } as never },
+          { span: owned },
+        );
+      }
+    });
+    owned.end();
+    const outcomes = events.map((e) => e.outcome).sort();
+    expect(outcomes).toEqual(["unsupported_key", "value_too_long"]);
   });
 
   it("OFF: a rejected field emits no decision event but still records the omission", async () => {
@@ -536,7 +608,7 @@ describe("decision-trace wiring — env.upgradeNoticeSuppressed", () => {
     );
   }
 
-  it("ON: the opt-out env var suppresses the notice → suppressed", async () => {
+  it("ON: the opt-out env var suppresses the notice → suppressed (reason opted_out)", async () => {
     process.env.GLASSTRACE_DISABLE_UPGRADE_NOTICE = "1";
     setDecisionTraceFlag(true);
     const events = await eventsForPoint(
@@ -550,6 +622,44 @@ describe("decision-trace wiring — env.upgradeNoticeSuppressed", () => {
       },
     );
     expect(events.map((e) => e.outcome)).toEqual(["suppressed"]);
+    expect(events.map((e) => e.reason)).toEqual(["opted_out"]);
+  });
+
+  it("ON: a quiet CI context suppresses the notice → suppressed (reason quiet_ci)", async () => {
+    // The vitest worker runs with a non-TTY stderr, so CI=true is sufficient to
+    // make isQuietCiContext() resolve true. Skip if the runner attaches a TTY
+    // (the heuristic intentionally does not suppress for an interactive run).
+    if (process.stderr.isTTY === true) return;
+    process.env.CI = "true";
+    setDecisionTraceFlag(true);
+    const events = await eventsForPoint(
+      "env.upgradeNoticeSuppressed",
+      () => {
+        maybeWarnStaleAgentInstructions({
+          projectRoot: testDir,
+          sdkVersion: "1.4.0",
+          stderrWrite: () => {},
+        });
+      },
+    );
+    expect(events.map((e) => e.outcome)).toEqual(["suppressed"]);
+    expect(events.map((e) => e.reason)).toEqual(["quiet_ci"]);
+  });
+
+  it("ON: an unparseable running version suppresses the notice → suppressed (reason unparseable_version)", async () => {
+    setDecisionTraceFlag(true);
+    const events = await eventsForPoint(
+      "env.upgradeNoticeSuppressed",
+      () => {
+        maybeWarnStaleAgentInstructions({
+          projectRoot: testDir,
+          sdkVersion: "not-a-semver",
+          stderrWrite: () => {},
+        });
+      },
+    );
+    expect(events.map((e) => e.outcome)).toEqual(["suppressed"]);
+    expect(events.map((e) => e.reason)).toEqual(["unparseable_version"]);
   });
 
   it("ON: a stale managed section shows the notice → shown", async () => {
@@ -648,9 +758,9 @@ describe("decision-trace wiring — bounded one-shot keys", () => {
     }
 
     // A different point, never touched by the flood, still emits its first
-    // line afterward. Drive the Prisma strict-mixed-model gate, which emits
-    // `capture.fidelity.idModel=suppressed_strict`.
-    _setCurrentConfig(configWith()); // strict
+    // line afterward. Drive the Prisma non-full mixed-model gate, which emits
+    // `capture.fidelity.idModel=suppressed`.
+    _setCurrentConfig(configWith()); // captureFidelity unset (non-full)
     const requestSpan = tracer.startSpan("request");
     await otelApi.context.with(
       otelApi.trace.setSpan(otelApi.context.active(), requestSpan),
@@ -676,6 +786,44 @@ describe("decision-trace wiring — bounded one-shot keys", () => {
     // The 5000 identical rejections collapsed to one decision line.
     expect(fieldRejected).toEqual(["unsupported_key"]);
     // The untouched point still emitted — its dedup slot was available.
-    expect(idModel).toEqual(["suppressed_strict"]);
+    expect(idModel).toEqual(["suppressed"]);
+  });
+
+  it("emits one first line for every instrumented point — all fit well under the 100-key cap", async () => {
+    setDecisionTraceFlag(true);
+    // The full instrumented-point inventory. One representative first emission
+    // per point (each with a distinct one-shot key) must land — 13 points is
+    // far below the 100-key dedup cap, so no point crowds out another.
+    const ALL_POINTS: DecisionPoint[] = [
+      "capture.sideEffectEvidence",
+      "capture.fidelity.identifier",
+      "capture.fidelity.idModel",
+      "capture.fidelity.hmacKey",
+      "config.tier",
+      "sideEffect.fieldRejected",
+      "feature.consoleErrors",
+      "feature.errorResponseBodies",
+      "feature.discovery",
+      "otel.path",
+      "env.forceEnable",
+      "env.nudgeSuppressed",
+      "env.upgradeNoticeSuppressed",
+    ];
+
+    const seenPoints: string[] = [];
+    const listener = (e: SdkLifecycleEvents["core:decision"]): void => {
+      seenPoints.push(e.point);
+    };
+    onLifecycleEvent("core:decision", listener);
+    for (const point of ALL_POINTS) {
+      decisionTrace(point, "probe", { oneShotKey: `${point}:probe` });
+    }
+    offLifecycleEvent("core:decision", listener);
+
+    // Every point's first line landed exactly once — none was suppressed by the
+    // bounded cap.
+    expect(seenPoints).toEqual(ALL_POINTS);
+    expect(new Set(seenPoints).size).toBe(ALL_POINTS.length);
+    expect(seenPoints.length).toBeLessThan(100);
   });
 });

@@ -27,6 +27,11 @@ produces nothing. The following decision points are added behind the existing
   MCP-connection nudge and the stale-instruction upgrade notice were shown or
   suppressed.
 
+Most points respond to both the programmatic option and the env var.
+`env.upgradeNoticeSuppressed` is an early-bootstrap point that decides before the
+SDK threads the resolved decision-trace flag, so it is observable only via the
+`GLASSTRACE_DECISION_TRACE` environment variable.
+
 The change is strictly additive and behavior-neutral: every site is guarded so no
 detail object is built while the toggle is off, no branch outcome ever changes, and
 each point's outcome and one-shot dedup key come from a small closed, code-literal

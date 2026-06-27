@@ -202,33 +202,28 @@ describe("decision-trace wiring — registration points", () => {
     expect(events.map((e) => e.outcome)).toEqual(["disabled"]);
   });
 
-  it("ON: consoleErrors enabled in config emits feature.consoleErrors=enabled", async () => {
+  it("ON: consoleErrors enabled in config emits exactly one feature.consoleErrors=enabled", async () => {
     process.env.NODE_ENV = "development";
     _setTransportForTesting(transportWith({ consoleErrors: true }) as never);
     const events = await eventsForPoint("feature.consoleErrors", async () => {
       registerGlasstrace({ apiKey: TEST_DEV_API_KEY, decisionTrace: true });
       await settle();
     });
-    // The authoritative outcome (after init applies the server config) is
-    // `enabled`. An earlier `disabled` line may precede it when the pre-init
-    // tier resolves with console capture off; the install decision converges on
-    // `enabled` and never emits another outcome after.
-    expect(events.map((e) => e.outcome)).toContain("enabled");
-    // Every emitted outcome is from the closed two-value set.
-    for (const e of events) {
-      expect(["enabled", "disabled"]).toContain(e.outcome);
-    }
+    // Only the authoritative post-init pass emits; the pre-init call (which
+    // reads the cached/absent config) no longer produces a transient `disabled`
+    // line, so exactly one `enabled` line lands.
+    expect(events.map((e) => e.outcome)).toEqual(["enabled"]);
   });
 
-  it("ON: consoleErrors off emits feature.consoleErrors=disabled", async () => {
+  it("ON: consoleErrors off emits exactly one feature.consoleErrors=disabled", async () => {
     process.env.NODE_ENV = "development";
     _setTransportForTesting(transportWith({ consoleErrors: false }) as never);
     const events = await eventsForPoint("feature.consoleErrors", async () => {
       registerGlasstrace({ apiKey: TEST_DEV_API_KEY, decisionTrace: true });
       await settle();
     });
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    expect(events.every((e) => e.outcome === "disabled")).toBe(true);
+    // Only the authoritative post-init pass emits (no transient pre-init line).
+    expect(events.map((e) => e.outcome)).toEqual(["disabled"]);
   });
 
   it("OFF: a normal dev run emits none of the registration points", async () => {

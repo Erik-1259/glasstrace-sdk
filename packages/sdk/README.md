@@ -1047,6 +1047,13 @@ the console line for external tooling. The instrumented decision points are:
   one-time MCP-connection nudge and the stale-instruction upgrade notice
   were shown or suppressed.
 
+Most points are governed by the programmatic `decisionTrace` / `verbose`
+option as well as the env var. `env.upgradeNoticeSuppressed` is the
+exception: it is an early-bootstrap point that decides before the SDK
+threads the resolved decision-trace flag, so it is observable only via the
+`GLASSTRACE_DECISION_TRACE` environment variable (the programmatic option is
+not yet in effect when it runs).
+
 Like the console line, the event fires only while decision tracing is
 enabled — never when the toggle is off.
 

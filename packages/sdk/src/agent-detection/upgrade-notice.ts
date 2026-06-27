@@ -339,20 +339,45 @@ export function maybeWarnStaleAgentInstructions(
     if (isOptedOut()) {
       // Decision trace: the stale-instruction upgrade notice was suppressed by
       // the opt-out env var. Keyed by the closed outcome (`suppressed` /
-      // `shown`). Guarded so nothing is built when OFF.
+      // `shown`) AND the code-literal reason so each suppression branch keeps
+      // its own one-shot slot. Guarded so nothing is built when OFF. (This is
+      // an early-bootstrap point — it runs before the programmatic decision
+      // flag is threaded, so it is reachable via the GLASSTRACE_DECISION_TRACE
+      // env var.)
       if (decisionTraceEnabled()) {
         decisionTrace("env.upgradeNoticeSuppressed", "suppressed", {
-          oneShotKey: "env.upgradeNoticeSuppressed:suppressed",
+          reason: "opted_out",
+          oneShotKey: "env.upgradeNoticeSuppressed:suppressed:opted_out",
         });
       }
       return;
     }
-    if (isQuietCiContext()) return;
+    if (isQuietCiContext()) {
+      // Decision trace: suppressed in a non-interactive CI context.
+      if (decisionTraceEnabled()) {
+        decisionTrace("env.upgradeNoticeSuppressed", "suppressed", {
+          reason: "quiet_ci",
+          oneShotKey: "env.upgradeNoticeSuppressed:suppressed:quiet_ci",
+        });
+      }
+      return;
+    }
 
     // Misbuilt SDK guard: an unparseable running version means we
     // cannot meaningfully decide staleness. Stay silent rather than
     // emit a confusing warning.
-    if (parseSemver(options.sdkVersion) === null) return;
+    if (parseSemver(options.sdkVersion) === null) {
+      // Decision trace: suppressed because the running SDK version is not
+      // parseable as semver, so staleness cannot be decided.
+      if (decisionTraceEnabled()) {
+        decisionTrace("env.upgradeNoticeSuppressed", "suppressed", {
+          reason: "unparseable_version",
+          oneShotKey:
+            "env.upgradeNoticeSuppressed:suppressed:unparseable_version",
+        });
+      }
+      return;
+    }
 
     const staleFiles: string[] = [];
     for (const fileName of AGENT_INSTRUCTION_FILES) {

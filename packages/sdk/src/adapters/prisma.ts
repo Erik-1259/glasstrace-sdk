@@ -242,13 +242,14 @@ async function projectIdentifier(
 ): Promise<void> {
   // Decision trace: the model-level fidelity gate. Identifier capture is an
   // operator escalation that runs only under `full`; under any other posture
-  // it is silently suppressed. Keyed by the closed outcome (two values) so it
-  // stays bounded. Call-site guarded so no detail is built when OFF.
+  // (the guard is `!== "full"`, not strictly "strict") it is silently
+  // suppressed. Keyed by the closed outcome (two values) so it stays bounded.
+  // Call-site guarded so no detail is built when OFF.
   if (getActiveConfig().captureFidelity !== "full") {
     if (decisionTraceEnabled()) {
-      decisionTrace("capture.fidelity.idModel", "suppressed_strict", {
+      decisionTrace("capture.fidelity.idModel", "suppressed", {
         inputs: { surface: "prismaAdapter" },
-        oneShotKey: "capture.fidelity.idModel:suppressed_strict",
+        oneShotKey: "capture.fidelity.idModel:suppressed",
       });
     }
     return;
@@ -260,20 +261,24 @@ async function projectIdentifier(
     });
   }
   const hmacKey = getAttrHmacKey();
+  // Decision trace: the per-account hashing-key state ALONE — provisioned vs
+  // genuinely absent. A distinct facet from the value-result below: a
+  // non-hashable id under a provisioned key still reports `provisioned` here
+  // (and `unhashed` on the identifier facet), so this point answers "did the
+  // backend serve a key?" without conflating it with the id's shape.
+  const keyProvisioned = typeof hmacKey === "string" && hmacKey.length > 0;
+  if (decisionTraceEnabled()) {
+    const keyState = keyProvisioned ? "provisioned" : "absent";
+    decisionTrace("capture.fidelity.hmacKey", keyState, {
+      inputs: { surface: "prismaAdapter" },
+      oneShotKey: `capture.fidelity.hmacKey:${keyState}`,
+    });
+  }
   const raw =
     typeof rawValue === "string" || typeof rawValue === "number"
       ? String(rawValue)
       : "";
-  if (raw.length > 0 && typeof hmacKey === "string" && hmacKey.length > 0) {
-    // Decision trace: the per-account hashing key is provisioned, so the
-    // hashing branch is reachable. (The key state that drives the
-    // value-result below — a distinct facet from the model-level gate.)
-    if (decisionTraceEnabled()) {
-      decisionTrace("capture.fidelity.hmacKey", "provisioned", {
-        inputs: { surface: "prismaAdapter" },
-        oneShotKey: "capture.fidelity.hmacKey:provisioned",
-      });
-    }
+  if (raw.length > 0 && keyProvisioned) {
     const token = await hashIdWeb(raw, hmacKey);
     if (token !== null) {
       // Decision trace: the value outcome — the raw id hashed to a token,
@@ -287,17 +292,11 @@ async function projectIdentifier(
       capture(key, token, { span });
       return;
     }
-  } else if (decisionTraceEnabled()) {
-    // Decision trace: the key state is absent (a `full` account the backend
-    // served with no key, or no hashable id) — drives the `unhashed` value
-    // outcome below.
-    decisionTrace("capture.fidelity.hmacKey", "absent", {
-      inputs: { surface: "prismaAdapter" },
-      oneShotKey: "capture.fidelity.hmacKey:absent",
-    });
   }
   // Decision trace: the value outcome — the column fell through to a
   // count-only omission (no token emitted), so the identifier stays unhashed.
+  // This covers a genuinely absent key, a non-hashable id (under a provisioned
+  // key), and a Web Crypto failure.
   if (decisionTraceEnabled()) {
     decisionTrace("capture.fidelity.identifier", "unhashed", {
       inputs: { surface: "prismaAdapter" },

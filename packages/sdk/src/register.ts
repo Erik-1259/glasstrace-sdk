@@ -128,10 +128,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     // Production check
     const productionDisabled = isProductionDisabled(config);
-    // Decision trace: how the production gate resolved — disabled in prod,
-    // force-enabled past it, or a normal non-prod run. Keyed by the closed
-    // outcome (three values). Guarded so nothing is built when OFF. The
-    // decision-trace flag was set just above, so the threaded gate governs.
+    // Decision trace: how the production gate resolved — `production_disabled`
+    // when a production env disables the SDK, `forced` when force-enable is set
+    // (which overrides the gate in production but is a no-op in a non-prod run),
+    // or `normal` otherwise. Keyed by the closed outcome (three values).
+    // Guarded so nothing is built when OFF. The decision-trace flag was set
+    // just above, so the threaded gate governs.
     if (decisionTraceEnabled()) {
       const outcome = productionDisabled
         ? "production_disabled"
@@ -533,8 +535,9 @@ async function backgroundInit(
     emitLifecycleEvent("auth:claim_completed", { newKey: maskKey(newApiKey), accountId });
   }
 
-  // Re-check consoleErrors with the authoritative init response config
-  maybeInstallConsoleCapture();
+  // Re-check consoleErrors with the authoritative init response config. This
+  // is the post-init pass, so it emits the `feature.consoleErrors` decision.
+  maybeInstallConsoleCapture(true);
 
   // Start the periodic health heartbeat if init succeeded.
   // The heartbeat re-calls performInit every 5 minutes to report health
@@ -563,16 +566,22 @@ export function getDiscoveryHandler(): ((request: Request) => Promise<Response |
  * Idempotent — safe to call multiple times (after OTel config, after init).
  * This ensures console capture is installed whenever authoritative config
  * becomes available, whether from the file cache or the init response.
+ *
+ * `emitDecision` gates the `feature.consoleErrors` decision trace. The
+ * pre-init call (right after OTel configures) reads the cached/absent config,
+ * which would emit a transient — and possibly wrong — `disabled` line before
+ * the backend config lands; only the post-init call passes `true` so the
+ * decision reports the authoritative install posture exactly once.
  */
-function maybeInstallConsoleCapture(): void {
+function maybeInstallConsoleCapture(emitDecision = false): void {
   if (consoleCaptureInstalled) return;
   const consoleErrorsEnabled = getActiveConfig().consoleErrors === true;
   // Decision trace: whether console-error capture is installed for this
-  // account. Emitted at the config gate (after the already-installed early
-  // return, so it reflects a real install decision, not a repeat call).
-  // Keyed by the closed outcome (two values). Guarded so nothing is built
-  // when OFF.
-  if (decisionTraceEnabled()) {
+  // account. Emitted only on the authoritative post-init pass (so a transient
+  // pre-init `disabled` is never reported), and after the already-installed
+  // early return so it reflects a real install decision. Keyed by the closed
+  // outcome (two values). Guarded so nothing is built when OFF.
+  if (emitDecision && decisionTraceEnabled()) {
     const outcome = consoleErrorsEnabled ? "enabled" : "disabled";
     decisionTrace("feature.consoleErrors", outcome, {
       oneShotKey: `feature.consoleErrors:${outcome}`,
