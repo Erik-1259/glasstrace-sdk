@@ -21,8 +21,9 @@ produces nothing. The following decision points are added behind the existing
   — whether each optional capture feature is enabled.
 - `otel.path` — the OpenTelemetry provider path the SDK took (bare registration,
   the `@vercel/otel` path, or a coexistence outcome).
-- `env.forceEnable` — how the production gate resolved (`normal`, `forced`, or
-  `production_disabled`).
+- `env.forceEnable` — how the production gate resolved: `production_disabled`,
+  `forced` (force-enable actually overrode a detected production env), or
+  `normal` (not a production env, so force-enable was a no-op).
 - `env.nudgeSuppressed` and `env.upgradeNoticeSuppressed` — whether the one-time
   MCP-connection nudge and the stale-instruction upgrade notice were shown or
   suppressed.

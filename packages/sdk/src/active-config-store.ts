@@ -50,9 +50,12 @@ import type { SdkInitResponse } from "@glasstrace/protocol";
  *
  * Bumped to `2` when the record shape changed: the per-account key moved onto
  * the record (behind a closure accessor), replacing the prior module-local-key
- * plus `keyToken`/`keyProvisioned` pairing design.
+ * plus `keyToken`/`keyProvisioned` pairing design. Bumped to `3` when the
+ * `origin` field was added so a reader can tell a server-served config from a
+ * promoted disk-cache one (the two are otherwise indistinguishable once the
+ * cache is promoted into the in-memory record).
  */
-const GLASSTRACE_BRAND = 2 as const;
+const GLASSTRACE_BRAND = 3 as const;
 
 /**
  * Process-wide (per-isolate) symbol under which the active-config record is
@@ -84,6 +87,15 @@ function createAttrHmacKeyHolder(): AttrHmacKeyHolder {
 }
 
 /**
+ * Provenance of the currently-applied {@link ActiveConfigRecord.config}:
+ * `"server"` for a config returned by a live init/heartbeat call, `"cache"`
+ * for one promoted from the on-disk cache, or `null` when none is applied.
+ * Read by the decision-trace `config.tier` gate so a promoted disk cache keeps
+ * reporting `cached` rather than masquerading as `served` on later reads.
+ */
+export type ActiveConfigOrigin = "server" | "cache";
+
+/**
  * Mutable record stored under `globalThis[STORE]`.
  *
  * - `config` — the latest successfully-resolved init response, or `null` when
@@ -104,6 +116,12 @@ function createAttrHmacKeyHolder(): AttrHmacKeyHolder {
 interface ActiveConfigRecord {
   readonly glasstraceActiveConfigBrand: typeof GLASSTRACE_BRAND;
   config: SdkInitResponse | null;
+  /**
+   * Provenance of `config` — `"server"`, `"cache"`, or `null` when `config`
+   * is `null`. Set by {@link setActiveConfig} so a reader can distinguish a
+   * live-served config from a promoted disk cache.
+   */
+  origin: ActiveConfigOrigin | null;
   cacheChecked: boolean;
   attrHmacKeyHolder: AttrHmacKeyHolder;
 }
@@ -121,6 +139,13 @@ function isActiveConfigRecord(value: unknown): value is ActiveConfigRecord {
   const candidate = value as Partial<ActiveConfigRecord>;
   if (candidate.glasstraceActiveConfigBrand !== GLASSTRACE_BRAND) return false;
   if (typeof candidate.cacheChecked !== "boolean") return false;
+  if (
+    candidate.origin !== null &&
+    candidate.origin !== "server" &&
+    candidate.origin !== "cache"
+  ) {
+    return false;
+  }
   if (
     typeof candidate.attrHmacKeyHolder?.read !== "function" ||
     typeof candidate.attrHmacKeyHolder?.set !== "function"
@@ -148,6 +173,7 @@ function getStore(): ActiveConfigRecord {
   const fresh: ActiveConfigRecord = {
     glasstraceActiveConfigBrand: GLASSTRACE_BRAND,
     config: null,
+    origin: null,
     cacheChecked: false,
     attrHmacKeyHolder: createAttrHmacKeyHolder(),
   };
@@ -172,14 +198,24 @@ export function getActiveConfigResponse(): SdkInitResponse | null {
  * key rotation, a different tenant, or a key-less downgrade / disk-cache
  * promotion — overwrites or clears the key, so no copy hashes with a stale key.
  * Passing `null` clears both.
+ *
+ * `origin` records where the config came from — `"server"` (a live init /
+ * heartbeat response, the default) or `"cache"` (a promotion from the on-disk
+ * cache). It is read by the decision-trace `config.tier` gate so a promoted
+ * disk cache keeps reporting `cached` rather than `served` on later reads.
  */
-export function setActiveConfig(config: SdkInitResponse | null): void {
+export function setActiveConfig(
+  config: SdkInitResponse | null,
+  origin: ActiveConfigOrigin = "server",
+): void {
   const store = getStore();
   if (config === null) {
     store.config = null;
+    store.origin = null;
     store.attrHmacKeyHolder.set(undefined);
     return;
   }
+  store.origin = origin;
   const innerKey = config.config.attrHmacKey;
   if (innerKey === undefined) {
     // No key in this config — including the key-less disk-cache promotion path
@@ -197,6 +233,16 @@ export function setActiveConfig(config: SdkInitResponse | null): void {
   void _omit;
   store.config = { ...config, config: redactedInner };
   store.attrHmacKeyHolder.set(innerKey);
+}
+
+/**
+ * Provenance of the currently-applied config, or `null` when none is applied.
+ * Read fresh on every call (last-writer-wins). Used by the decision-trace
+ * `config.tier` gate to distinguish a server-served config from a promoted
+ * disk cache. Internal — not exported from the package barrel.
+ */
+export function getActiveConfigOrigin(): ActiveConfigOrigin | null {
+  return getStore().origin;
 }
 
 /**

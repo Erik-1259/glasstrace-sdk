@@ -128,16 +128,25 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     // Production check
     const productionDisabled = isProductionDisabled(config);
-    // Decision trace: how the production gate resolved — `production_disabled`
-    // when a production env disables the SDK, `forced` when force-enable is set
-    // (which overrides the gate in production but is a no-op in a non-prod run),
-    // or `normal` otherwise. Keyed by the closed outcome (three values).
-    // Guarded so nothing is built when OFF. The decision-trace flag was set
-    // just above, so the threaded gate governs.
+    // Decision trace: how the production gate resolved, keyed on whether
+    // force-enable actually changed the outcome:
+    //   - `forced` — a production env was detected AND force-enable overrode the
+    //     block (the gate would have disabled the SDK without it);
+    //   - `production_disabled` — a production env disabled the SDK, not
+    //     overridden;
+    //   - `normal` — not a production env, so force-enable was irrelevant / a
+    //     no-op.
+    // Keyed by the closed outcome (three values). Guarded so nothing is built
+    // when OFF. The decision-trace flag was set just above, so the threaded
+    // gate governs.
     if (decisionTraceEnabled()) {
+      // Whether a production env was detected, independent of force-enable —
+      // i.e. whether the gate WOULD have blocked without the override.
+      const productionEnvDetected =
+        config.nodeEnv === "production" || config.vercelEnv === "production";
       const outcome = productionDisabled
         ? "production_disabled"
-        : config.forceEnable
+        : productionEnvDetected && config.forceEnable
           ? "forced"
           : "normal";
       decisionTrace("env.forceEnable", outcome, {
@@ -234,10 +243,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       );
     }
 
-    // Load cached config and apply to in-memory store
+    // Load cached config and apply to in-memory store. Tag it with the `cache`
+    // origin so the decision-trace `config.tier` gate reports `cached` (not
+    // `served`) until a live init response replaces it.
     const cachedInitResponse = loadCachedConfig();
     if (cachedInitResponse) {
-      _setCurrentConfig(cachedInitResponse);
+      _setCurrentConfig(cachedInitResponse, "cache");
     }
     if (config.verbose) {
       console.info(
@@ -568,25 +579,27 @@ export function getDiscoveryHandler(): ((request: Request) => Promise<Response |
  * becomes available, whether from the file cache or the init response.
  *
  * `emitDecision` gates the `feature.consoleErrors` decision trace. The
- * pre-init call (right after OTel configures) reads the cached/absent config,
- * which would emit a transient — and possibly wrong — `disabled` line before
- * the backend config lands; only the post-init call passes `true` so the
- * decision reports the authoritative install posture exactly once.
+ * pre-init call (right after OTel configures) reads the cached/absent config
+ * and passes `false`, so it never emits a transient — possibly wrong —
+ * `disabled` line before the backend config lands. Only the post-init call
+ * passes `true`, and it reports the authoritative install posture from the
+ * resolved config exactly once. The decision is emitted BEFORE the
+ * already-installed early return so it always lands on the authoritative pass,
+ * even when the pre-init call already installed capture (the install state must
+ * not swallow the authoritative decision line).
  */
 function maybeInstallConsoleCapture(emitDecision = false): void {
-  if (consoleCaptureInstalled) return;
+  // Read the authoritative config and emit the decision first, independent of
+  // the install state. A pre-init call may already have installed capture, but
+  // the post-init pass must still report the authoritative posture exactly once.
   const consoleErrorsEnabled = getActiveConfig().consoleErrors === true;
-  // Decision trace: whether console-error capture is installed for this
-  // account. Emitted only on the authoritative post-init pass (so a transient
-  // pre-init `disabled` is never reported), and after the already-installed
-  // early return so it reflects a real install decision. Keyed by the closed
-  // outcome (two values). Guarded so nothing is built when OFF.
   if (emitDecision && decisionTraceEnabled()) {
     const outcome = consoleErrorsEnabled ? "enabled" : "disabled";
     decisionTrace("feature.consoleErrors", outcome, {
       oneShotKey: `feature.consoleErrors:${outcome}`,
     });
   }
+  if (consoleCaptureInstalled) return;
   if (consoleErrorsEnabled) {
     consoleCaptureInstalled = true;
     void installConsoleCapture();

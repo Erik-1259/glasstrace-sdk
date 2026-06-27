@@ -1041,8 +1041,10 @@ the console line for external tooling. The instrumented decision points are:
   `feature.discovery` — whether each optional capture feature is enabled.
 - `otel.path` — the OpenTelemetry provider path the SDK took (bare
   registration, the `@vercel/otel` path, or a coexistence outcome).
-- `env.forceEnable` — how the production gate resolved (`normal`, `forced`,
-  or `production_disabled`).
+- `env.forceEnable` — how the production gate resolved: `production_disabled`
+  (a production env disabled the SDK), `forced` (force-enable actually
+  overrode a detected production env), or `normal` (not a production env, so
+  force-enable was a no-op).
 - `env.nudgeSuppressed` / `env.upgradeNoticeSuppressed` — whether the
   one-time MCP-connection nudge and the stale-instruction upgrade notice
   were shown or suppressed.

@@ -180,6 +180,22 @@ describe("decision-trace wiring — registration points", () => {
     expect(events.map((e) => e.outcome)).toEqual(["production_disabled"]);
   });
 
+  it("ON: force-enable in a non-prod env is a no-op → env.forceEnable=normal", async () => {
+    // force-enable is set but no production env is detected, so it changed
+    // nothing — the outcome must be `normal`, not `forced`.
+    process.env.NODE_ENV = "development";
+    _setTransportForTesting(transportWith() as never);
+    const events = await eventsForPoint("env.forceEnable", async () => {
+      registerGlasstrace({
+        apiKey: TEST_DEV_API_KEY,
+        forceEnable: true,
+        decisionTrace: true,
+      });
+      await settle();
+    });
+    expect(events.map((e) => e.outcome)).toEqual(["normal"]);
+  });
+
   it("ON: anonymous dev run emits feature.discovery=enabled", async () => {
     process.env.NODE_ENV = "development";
     _setTransportForTesting(transportWith() as never);
