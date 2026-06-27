@@ -1,4 +1,5 @@
 import { resolveConfig, isProductionDisabled } from "../env-detection.js";
+import { decisionTrace, decisionTraceEnabled } from "../decision-trace.js";
 
 /**
  * Module-level flag ensuring the MCP-connection nudge fires at most once
@@ -62,17 +63,40 @@ export function maybeShowMcpNudge(errorSummary: string): void {
   // so subsequent calls fast-exit via hasFired without re-running I/O.
   const config = resolveConfig();
   if (isProductionDisabled(config)) {
+    // Decision trace: the MCP nudge was suppressed by the production gate.
+    // Keyed by the closed outcome (`suppressed` / `shown`) AND the code-literal
+    // reason, so the two suppression branches each keep their own one-shot slot
+    // (folding the reason in avoids the production/marker key collision).
+    // Guarded so nothing is built when OFF.
+    if (decisionTraceEnabled()) {
+      decisionTrace("env.nudgeSuppressed", "suppressed", {
+        reason: "production",
+        oneShotKey: "env.nudgeSuppressed:suppressed:production",
+      });
+    }
     hasFired = true;
     return;
   }
 
   // Check for MCP connection marker file.
   if (markerFileExists()) {
+    // Decision trace: suppressed because the MCP connection marker is present.
+    if (decisionTraceEnabled()) {
+      decisionTrace("env.nudgeSuppressed", "suppressed", {
+        reason: "marker_present",
+        oneShotKey: "env.nudgeSuppressed:suppressed:marker_present",
+      });
+    }
     hasFired = true;
     return;
   }
 
   // Fire the nudge exactly once
+  if (decisionTraceEnabled()) {
+    decisionTrace("env.nudgeSuppressed", "shown", {
+      oneShotKey: "env.nudgeSuppressed:shown",
+    });
+  }
   hasFired = true;
 
   const safe = sanitize(errorSummary);

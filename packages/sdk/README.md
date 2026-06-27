@@ -1010,7 +1010,10 @@ Each instrumented decision logs one greppable line:
 
 ```
 [glasstrace] decision: capture.sideEffectEvidence=enabled (config_applied; surface=configApply,captureFidelity=full)
-[glasstrace] decision: capture.sideEffectEvidence=disabled (surface=recordSideEffect)
+[glasstrace] decision: config.tier=served
+[glasstrace] decision: otel.path=bare
+[glasstrace] decision: feature.consoleErrors=disabled
+[glasstrace] decision: sideEffect.fieldRejected=unsupported_key
 ```
 
 ```bash
@@ -1022,11 +1025,39 @@ traces. Internally, each instrumented decision is also emitted on the
 SDK's in-process lifecycle bus as a `core:decision` event carrying
 `{ point, outcome, reason?, inputs? }`, which the SDK's own integration
 tests assert on; this bus is not part of the public API surface, so prefer
-the console line for external tooling. This release instruments the
-`capture.sideEffectEvidence` gate (the `recordSideEffect` capture-disabled
-branch and the config-apply outcome at init); further decision points will
-be added in subsequent releases. Like the console line, the event fires
-only while decision tracing is enabled — never when the toggle is off.
+the console line for external tooling. The instrumented decision points are:
+
+- `capture.sideEffectEvidence` — the capture master switch, reported both at
+  the config-apply step during init and at the `recordSideEffect` call gate.
+- `capture.fidelity.idModel` / `capture.fidelity.identifier` /
+  `capture.fidelity.hmacKey` — the identifier-capture path in the Prisma
+  adapter: whether the account is on full fidelity, whether the value was
+  hashed, and whether the per-account hashing key is provisioned.
+- `config.tier` — which fallback tier served the active capture config
+  (`served`, `cached`, or `default`).
+- `sideEffect.fieldRejected` — a side-effect field or scalar was dropped,
+  keyed by the closed omission reason only (never the field key or value).
+- `feature.consoleErrors` / `feature.errorResponseBodies` /
+  `feature.discovery` — whether each optional capture feature is enabled.
+- `otel.path` — the OpenTelemetry provider path the SDK took (bare
+  registration, the `@vercel/otel` path, or a coexistence outcome).
+- `env.forceEnable` — how the production gate resolved: `production_disabled`
+  (a production env disabled the SDK), `forced` (force-enable actually
+  overrode a detected production env), or `normal` (not a production env, so
+  force-enable was a no-op).
+- `env.nudgeSuppressed` / `env.upgradeNoticeSuppressed` — whether the
+  one-time MCP-connection nudge and the stale-instruction upgrade notice
+  were shown or suppressed.
+
+Most points are governed by the programmatic `decisionTrace` / `verbose`
+option as well as the env var. `env.upgradeNoticeSuppressed` is the
+exception: it is an early-bootstrap point that decides before the SDK
+threads the resolved decision-trace flag, so it is observable only via the
+`GLASSTRACE_DECISION_TRACE` environment variable (the programmatic option is
+not yet in effect when it runs).
+
+Like the console line, the event fires only while decision tracing is
+enabled — never when the toggle is off.
 
 Decision tracing is **observational and behavior-neutral**: capture
 behavior is byte-for-byte identical whether it is on or off, the emitter

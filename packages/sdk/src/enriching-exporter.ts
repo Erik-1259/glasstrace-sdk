@@ -26,6 +26,7 @@ import {
   pushDegradationSource,
   clearDegradationSource,
 } from "./lifecycle.js";
+import { decisionTrace, decisionTraceEnabled } from "./decision-trace.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -798,7 +799,19 @@ export class GlasstraceExporter implements SpanExporter {
       // marker appended when truncation fires. Sanitization runs before
       // truncation so secrets straddling the boundary are still removed
       // from the visible portion.
-      if (this.getConfig().errorResponseBodies) {
+      const errorResponseBodiesEnabled =
+        this.getConfig().errorResponseBodies === true;
+      // Decision trace (hot path): whether error-response-body capture is
+      // enabled for this account. Read the config once and reuse it for the
+      // gate below. Keyed by the closed outcome (two values) so it stays
+      // bounded. Call-site guarded so no detail is built when OFF.
+      if (decisionTraceEnabled()) {
+        const outcome = errorResponseBodiesEnabled ? "enabled" : "disabled";
+        decisionTrace("feature.errorResponseBodies", outcome, {
+          oneShotKey: `feature.errorResponseBodies:${outcome}`,
+        });
+      }
+      if (errorResponseBodiesEnabled) {
         const responseBody = attrs["glasstrace.internal.response_body"];
         if (typeof responseBody === "string") {
           // Prefer the enriched status from the inference block above

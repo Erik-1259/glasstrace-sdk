@@ -26,12 +26,15 @@ import {
 import { atomicWriteFile } from "./atomic-write.js";
 import {
   getActiveConfigResponse,
+  getActiveConfigOrigin,
   setActiveConfig,
   isConfigCacheChecked,
   markConfigCacheChecked,
   getStoredAttrHmacKey,
   _resetActiveConfigForTesting,
+  type ActiveConfigOrigin,
 } from "./active-config-store.js";
+import { decisionTrace, decisionTraceEnabled } from "./decision-trace.js";
 
 const GLASSTRACE_DIR = ".glasstrace";
 const CONFIG_FILE = "config";
@@ -630,6 +633,20 @@ function resolveActiveConfig(): CaptureConfig {
   // Tier 1: in-memory (shared across bundle instances)
   const current = getActiveConfigResponse();
   if (current) {
+    // Decision trace (hot path): which fallback tier produced this config.
+    // The in-memory store holds BOTH a live server response and a promoted
+    // disk cache (the cache is promoted into the store on first read), so the
+    // true tier comes from the record's origin — not its mere presence — to
+    // keep a promoted cache reporting `cached` rather than `served`. Call-site
+    // guarded so nothing is built when OFF; keyed by the closed tier outcome
+    // (three values) so it stays bounded and re-emits once per tier as init
+    // progresses (default → cached → served).
+    if (decisionTraceEnabled()) {
+      const tier = getActiveConfigOrigin() === "cache" ? "cached" : "served";
+      decisionTrace("config.tier", tier, {
+        oneShotKey: `config.tier:${tier}`,
+      });
+    }
     return current.config;
   }
 
@@ -638,12 +655,26 @@ function resolveActiveConfig(): CaptureConfig {
     markConfigCacheChecked();
     const cached = loadCachedConfig();
     if (cached) {
-      setActiveConfig(cached);
+      // Promote the disk cache into the shared store tagged with its `cache`
+      // origin, so a subsequent read takes the tier-1 branch but still reports
+      // `cached` (not `served`) — the promotion must not masquerade as a live
+      // server config.
+      setActiveConfig(cached, "cache");
+      if (decisionTraceEnabled()) {
+        decisionTrace("config.tier", "cached", {
+          oneShotKey: "config.tier:cached",
+        });
+      }
       return cached.config;
     }
   }
 
   // Tier 3: defaults
+  if (decisionTraceEnabled()) {
+    decisionTrace("config.tier", "default", {
+      oneShotKey: "config.tier:default",
+    });
+  }
   return { ...DEFAULT_CAPTURE_CONFIG };
 }
 
@@ -749,9 +780,16 @@ export function _setTransportForTesting(fn: HttpsPostJsonFn | null): void {
 /**
  * Sets the in-memory config directly. Used by performInit and the orchestrator.
  * Writes through the shared store so every bundle instance sees the value.
+ *
+ * `origin` records the config's provenance for the decision-trace
+ * `config.tier` gate; it defaults to `"server"` (a live response) and should
+ * be passed as `"cache"` when applying a config loaded from the on-disk cache.
  */
-export function _setCurrentConfig(config: SdkInitResponse): void {
-  setActiveConfig(config);
+export function _setCurrentConfig(
+  config: SdkInitResponse,
+  origin: ActiveConfigOrigin = "server",
+): void {
+  setActiveConfig(config, origin);
 }
 
 /**

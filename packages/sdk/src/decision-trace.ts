@@ -120,12 +120,14 @@ export function setDecisionTraceFlag(enabled: boolean): void {
  *
  *   - **After `setDecisionTraceFlag` has run** (the common case), the
  *     resolved, folded flag governs — `decisionTrace || verbose`.
- *   - **Before it runs** (decisions decided during env/config resolution
- *     itself, such as `env.forceEnable`), the resolved flag does not yet
- *     exist, so the gate reads the raw env var directly. This is correct
- *     by necessity: `verbose` comes from resolved config that does not
- *     exist that early, so the env var is the only available pre-config
- *     signal.
+ *   - **Before it runs** (decisions decided during early bootstrap, before
+ *     `setDecisionTraceFlag` is threaded, such as
+ *     `env.upgradeNoticeSuppressed`), the resolved flag does not yet exist,
+ *     so the gate reads the raw env var directly. This is correct by
+ *     necessity: `verbose` comes from resolved config that does not exist
+ *     that early, so the env var (`GLASSTRACE_DECISION_TRACE`) is the only
+ *     available pre-config signal — such a point is reachable only via the
+ *     env var, not the programmatic `decisionTrace` / `verbose` option.
  *
  * @internal
  */

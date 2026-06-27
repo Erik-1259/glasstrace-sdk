@@ -20,6 +20,23 @@ import {
 } from "./coexistence.js";
 import { setCoexistenceState, _resetCoexistenceStateForTesting } from "./signal-handler.js";
 import { isProxyTracerProvider, isProxyTracer } from "./proxy-detection.js";
+import { decisionTrace, decisionTraceEnabled } from "./decision-trace.js";
+
+/**
+ * Emit the terminal OTel-configuration decision for the chosen provider
+ * scenario. Called from each `setOtelState` terminal site so an operator can
+ * see which coexistence / registration path the SDK took. The outcome is a
+ * closed, code-literal scenario name (five values), keyed one-shot by that
+ * outcome so it stays bounded; `configureOtel` runs once per process, so this
+ * is effectively one line per boot. Call-site guarded so nothing is built
+ * when the toggle is OFF.
+ */
+function traceOtelPath(outcome: string): void {
+  if (!decisionTraceEnabled()) return;
+  decisionTrace("otel.path", outcome, {
+    oneShotKey: `otel.path:${outcome}`,
+  });
+}
 
 /** Module-level resolved API key, updated when the anon key resolves. */
 let resolvedApiKey: string = API_KEY_PENDING;
@@ -281,6 +298,7 @@ async function runCoexistencePath(
       sdkLog("info", "[glasstrace] Existing provider detected — Glasstrace processor already present.");
     }
     setOtelState(OtelState.PROCESSOR_PRESENT);
+    traceOtelPath("coexist_present");
     emitLifecycleEvent("otel:configured", { state: OtelState.PROCESSOR_PRESENT, scenario: "B-clean" });
     return;
   }
@@ -318,6 +336,7 @@ async function runCoexistencePath(
 
     const scenario = result.method === "v1_public" ? "D1" : "B-auto";
     setOtelState(OtelState.AUTO_ATTACHED);
+    traceOtelPath("coexist_attached");
     emitLifecycleEvent("otel:configured", { state: OtelState.AUTO_ATTACHED, scenario });
     emitLifecycleEvent("otel:injection_succeeded", { method: result.method });
     emitNudgeMessage();
@@ -330,6 +349,7 @@ async function runCoexistencePath(
   }
   emitGuidanceMessage();
   setOtelState(OtelState.COEXISTENCE_FAILED);
+  traceOtelPath("coexist_failed");
   emitLifecycleEvent("otel:configured", { state: OtelState.COEXISTENCE_FAILED, scenario: "C/F" });
   emitLifecycleEvent("otel:injection_failed", { reason: "provider internals inaccessible" });
   // DISC-1556 Option C: emit a structured fail-loud diagnostic that the
@@ -492,6 +512,7 @@ async function runRegistrationPath(
     registerBeforeExitTrigger();
 
     setOtelState(OtelState.OWNS_PROVIDER);
+    traceOtelPath("vercel");
     emitLifecycleEvent("otel:configured", { state: OtelState.OWNS_PROVIDER, scenario: "E" });
     return;
   }
@@ -577,5 +598,6 @@ async function runRegistrationPath(
   }
 
   setOtelState(OtelState.OWNS_PROVIDER);
+  traceOtelPath("bare");
   emitLifecycleEvent("otel:configured", { state: OtelState.OWNS_PROVIDER, scenario: "A" });
 }

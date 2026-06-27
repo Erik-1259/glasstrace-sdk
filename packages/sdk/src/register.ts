@@ -127,7 +127,33 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     }
 
     // Production check
-    if (isProductionDisabled(config)) {
+    const productionDisabled = isProductionDisabled(config);
+    // Decision trace: how the production gate resolved, keyed on whether
+    // force-enable actually changed the outcome:
+    //   - `forced` — a production env was detected AND force-enable overrode the
+    //     block (the gate would have disabled the SDK without it);
+    //   - `production_disabled` — a production env disabled the SDK, not
+    //     overridden;
+    //   - `normal` — not a production env, so force-enable was irrelevant / a
+    //     no-op.
+    // Keyed by the closed outcome (three values). Guarded so nothing is built
+    // when OFF. The decision-trace flag was set just above, so the threaded
+    // gate governs.
+    if (decisionTraceEnabled()) {
+      // Whether a production env was detected, independent of force-enable —
+      // i.e. whether the gate WOULD have blocked without the override.
+      const productionEnvDetected =
+        config.nodeEnv === "production" || config.vercelEnv === "production";
+      const outcome = productionDisabled
+        ? "production_disabled"
+        : productionEnvDetected && config.forceEnable
+          ? "forced"
+          : "normal";
+      decisionTrace("env.forceEnable", outcome, {
+        oneShotKey: `env.forceEnable:${outcome}`,
+      });
+    }
+    if (productionDisabled) {
       setCoreState(CoreState.PRODUCTION_DISABLED);
       console.warn(
         "[glasstrace] Disabled in production. Set GLASSTRACE_FORCE_ENABLE=true to override.",
@@ -217,10 +243,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       );
     }
 
-    // Load cached config and apply to in-memory store
+    // Load cached config and apply to in-memory store. Tag it with the `cache`
+    // origin so the decision-trace `config.tier` gate reports `cached` (not
+    // `served`) until a live init response replaces it.
     const cachedInitResponse = loadCachedConfig();
     if (cachedInitResponse) {
-      _setCurrentConfig(cachedInitResponse);
+      _setCurrentConfig(cachedInitResponse, "cache");
     }
     if (config.verbose) {
       console.info(
@@ -284,7 +312,17 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // Background work: anonymous key resolution, discovery endpoint, init
     if (anonymous) {
       // Register discovery endpoint IMMEDIATELY with async key resolution
-      if (isDiscoveryEnabled(config)) {
+      const discoveryEnabled = isDiscoveryEnabled(config);
+      // Decision trace: whether the browser-extension discovery endpoint is
+      // registered for this environment. Keyed by the closed outcome (two
+      // values). Guarded so nothing is built when OFF.
+      if (decisionTraceEnabled()) {
+        const outcome = discoveryEnabled ? "enabled" : "disabled";
+        decisionTrace("feature.discovery", outcome, {
+          oneShotKey: `feature.discovery:${outcome}`,
+        });
+      }
+      if (discoveryEnabled) {
         let resolvedAnonKey: AnonApiKey | null = null;
         const anonKeyPromise = getOrCreateAnonKey();
 
@@ -508,8 +546,9 @@ async function backgroundInit(
     emitLifecycleEvent("auth:claim_completed", { newKey: maskKey(newApiKey), accountId });
   }
 
-  // Re-check consoleErrors with the authoritative init response config
-  maybeInstallConsoleCapture();
+  // Re-check consoleErrors with the authoritative init response config. This
+  // is the post-init pass, so it emits the `feature.consoleErrors` decision.
+  maybeInstallConsoleCapture(true);
 
   // Start the periodic health heartbeat if init succeeded.
   // The heartbeat re-calls performInit every 5 minutes to report health
@@ -538,10 +577,30 @@ export function getDiscoveryHandler(): ((request: Request) => Promise<Response |
  * Idempotent — safe to call multiple times (after OTel config, after init).
  * This ensures console capture is installed whenever authoritative config
  * becomes available, whether from the file cache or the init response.
+ *
+ * `emitDecision` gates the `feature.consoleErrors` decision trace. The
+ * pre-init call (right after OTel configures) reads the cached/absent config
+ * and passes `false`, so it never emits a transient — possibly wrong —
+ * `disabled` line before the backend config lands. Only the post-init call
+ * passes `true`, and it reports the authoritative install posture from the
+ * resolved config exactly once. The decision is emitted BEFORE the
+ * already-installed early return so it always lands on the authoritative pass,
+ * even when the pre-init call already installed capture (the install state must
+ * not swallow the authoritative decision line).
  */
-function maybeInstallConsoleCapture(): void {
+function maybeInstallConsoleCapture(emitDecision = false): void {
+  // Read the authoritative config and emit the decision first, independent of
+  // the install state. A pre-init call may already have installed capture, but
+  // the post-init pass must still report the authoritative posture exactly once.
+  const consoleErrorsEnabled = getActiveConfig().consoleErrors === true;
+  if (emitDecision && decisionTraceEnabled()) {
+    const outcome = consoleErrorsEnabled ? "enabled" : "disabled";
+    decisionTrace("feature.consoleErrors", outcome, {
+      oneShotKey: `feature.consoleErrors:${outcome}`,
+    });
+  }
   if (consoleCaptureInstalled) return;
-  if (getActiveConfig().consoleErrors) {
+  if (consoleErrorsEnabled) {
     consoleCaptureInstalled = true;
     void installConsoleCapture();
   }
