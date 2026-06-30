@@ -57,6 +57,7 @@ const ALLOWLISTED_WIRE_KEYS: ReadonlyArray<string> = [
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD,
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNSUPPORTED_KEY,
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG,
+  GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED,
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NOT_EMITTED,
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_CAPTURE_DISABLED,
   GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_TIMESTAMP,
@@ -95,6 +96,22 @@ beforeEach(() => {
   } as SdkInitResponse;
   _setCurrentConfig(response);
 });
+
+function expectOnlySideEffectWireKeys(
+  attrs: Record<string, unknown>,
+  options: { allowScalarKeys?: boolean } = {},
+): void {
+  for (const key of Object.keys(attrs)) {
+    if (!key.startsWith("glasstrace.side_effect.")) continue;
+    const scalarKeyAllowed =
+      options.allowScalarKeys === true &&
+      key.startsWith(SIDE_EFFECT_SCALAR_PREFIX);
+    const ok =
+      ALLOWLISTED_WIRE_KEYS.includes(key) ||
+      scalarKeyAllowed;
+    expect(ok, `unexpected side-effect attribute: ${key}`).toBe(true);
+  }
+}
 
 afterEach(async () => {
   _resetConfigForTesting();
@@ -177,11 +194,7 @@ describe("recordSideEffect — round trip", () => {
 
     // Every glasstrace.side_effect.* attribute key on the span is in
     // the allowlisted wire-string set.
-    for (const key of Object.keys(attrs)) {
-      if (key.startsWith("glasstrace.side_effect.")) {
-        expect(ALLOWLISTED_WIRE_KEYS).toContain(key);
-      }
-    }
+    expectOnlySideEffectWireKeys(attrs);
 
     // Rejected values appear nowhere on the serialized span data.
     // Extract a JSON-safe shape so we can string-search the entire
@@ -294,13 +307,7 @@ describe("recordSideEffect — scalar channel round trip", () => {
     // Closed-world invariant: every `glasstrace.side_effect.*` attribute
     // is either an allowlisted wire key or a `scalar.*` key — no stray
     // attribute leaks from the scalar path.
-    for (const k of Object.keys(attrs)) {
-      if (!k.startsWith("glasstrace.side_effect.")) continue;
-      const ok =
-        ALLOWLISTED_WIRE_KEYS.includes(k) ||
-        k.startsWith(SIDE_EFFECT_SCALAR_PREFIX);
-      expect(ok, `unexpected side-effect attribute: ${k}`).toBe(true);
-    }
+    expectOnlySideEffectWireKeys(attrs, { allowScalarKeys: true });
 
     // The raw rejected id never appears anywhere on the span's
     // attribute set (where a leaked value would surface).
@@ -327,8 +334,12 @@ describe("recordSideEffect — scalar channel round trip", () => {
     );
     expect(scalarKeys).toHaveLength(MAX_SIDE_EFFECT_SCALARS_PER_OPERATION);
     expect(
-      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG],
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED],
     ).toBe(1);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG],
+    ).toBeUndefined();
+    expectOnlySideEffectWireKeys(attrs, { allowScalarKeys: true });
   });
 
   it("counts rejected scalars against the per-operation budget", () => {
@@ -358,8 +369,12 @@ describe("recordSideEffect — scalar channel round trip", () => {
       attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
     ).toBe(MAX_SIDE_EFFECT_SCALARS_PER_OPERATION);
     expect(
-      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG],
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED],
     ).toBe(1);
+    expect(
+      attrs[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG],
+    ).toBeUndefined();
+    expectOnlySideEffectWireKeys(attrs);
   });
 });
 

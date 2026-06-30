@@ -250,7 +250,7 @@ describe("capture — fail-closed and caller-misuse guards", () => {
 });
 
 describe("capture — per-span scalar budget", () => {
-  it("attaches up to the 16-scalar budget then omits the overflow as value_too_long", () => {
+  it("attaches up to the 16-scalar budget then omits the overflow as scalar_cap_exceeded", () => {
     const span = tracer.startSpan("db.Test.findUnique");
     // 20 distinct, valid boolean *Flag scalars on one owned span.
     for (let i = 0; i < 20; i++) {
@@ -268,6 +268,7 @@ describe("capture — per-span scalar budget", () => {
     ).length;
 
     expect(scalarCount).toBe(16); // capped at the per-operation budget
-    expect(attrs[NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG]).toBe(4); // 20 - 16
+    expect(attrs[NAMES.SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED]).toBe(4); // 20 - 16
+    expect(attrs[NAMES.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG]).toBeUndefined();
   });
 });

@@ -35,6 +35,7 @@ import { MAX_SIDE_EFFECT_OPERATIONS_PER_SPAN } from "../../../../packages/sdk/sr
 import type { SdkInitResponse } from "../../../../packages/protocol/src/wire.js";
 import {
   GLASSTRACE_ATTRIBUTE_NAMES,
+  MAX_SIDE_EFFECT_SCALARS_PER_OPERATION,
   SIDE_EFFECT_SCALAR_PREFIX,
 } from "../../../../packages/protocol/src/index.js";
 
@@ -155,6 +156,28 @@ describe("recordSideEffect — owned-span variant", () => {
     const a = attrsOf("owned");
     // 5 attached; the 6th over-budgeted and recorded one value_too_long.
     expect(a[ATTR.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG]).toBe(1);
+  });
+
+  it("honors the per-operation scalar budget on the owned span (over-budget ⇒ scalar_cap_exceeded)", () => {
+    const owned = tracer.startSpan("owned");
+    const scalars: Record<string, boolean> = {};
+    for (let i = 0; i < MAX_SIDE_EFFECT_SCALARS_PER_OPERATION + 4; i++) {
+      scalars[`feature${i}Flag`] = i % 2 === 0;
+    }
+
+    recordSideEffect(
+      { kind: "email", operation: "email.send", scalars },
+      { span: owned },
+    );
+    owned.end();
+
+    const a = attrsOf("owned");
+    const scalarCount = Object.keys(a).filter((key) =>
+      key.startsWith(SIDE_EFFECT_SCALAR_PREFIX),
+    ).length;
+    expect(scalarCount).toBe(MAX_SIDE_EFFECT_SCALARS_PER_OPERATION);
+    expect(a[ATTR.SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED]).toBe(1);
+    expect(a[ATTR.SIDE_EFFECT_OMITTED_VALUE_TOO_LONG]).toBeUndefined();
   });
 
   it("does NOT fall back to the ambient span when the supplied span is non-recording", () => {
