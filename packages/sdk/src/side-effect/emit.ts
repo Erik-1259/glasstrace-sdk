@@ -134,12 +134,8 @@ const OMISSION_ATTRIBUTE_BY_REASON: Readonly<
   unhashed_id: GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID,
   non_finite: GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_NON_FINITE,
   // Attribute names for the two drop-class reasons that split
-  // `unsupported_key`. The SDK does not yet emit either reason — these
-  // entries keep this exhaustive lookup in sync with the protocol
-  // tuple so the map resolves correctly once a call site begins
-  // recording them. (The scalar-budget overflow sites still record
-  // `value_too_long` for now; that relabel is gated on the backend
-  // accepting the new reason first.)
+  // `unsupported_key`. Scalar-budget overflow is emitted by the SDK;
+  // allowlist denials are enforced by ingestion.
   scalar_cap_exceeded:
     GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_SCALAR_CAP_EXCEEDED,
   allowlist_denied:

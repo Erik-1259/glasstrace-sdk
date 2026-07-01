@@ -132,7 +132,7 @@ function runCapture(
   // the budget, deterministically omit rather than over-emit for downstream
   // truncation — mirroring `recordSideEffect`'s budget handling.
   if (!reserveScalarSlot(span)) {
-    recordOmission(span, "value_too_long");
+    recordOmission(span, "scalar_cap_exceeded");
     return;
   }
 

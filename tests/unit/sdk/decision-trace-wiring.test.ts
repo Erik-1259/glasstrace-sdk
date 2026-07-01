@@ -67,6 +67,7 @@ import {
   _resetUpgradeNoticeForTesting,
 } from "../../../packages/sdk/src/agent-detection/upgrade-notice.js";
 import type { SdkInitResponse } from "../../../packages/protocol/src/wire.js";
+import { MAX_SIDE_EFFECT_SCALARS_PER_OPERATION } from "../../../packages/protocol/src/index.js";
 
 installContextManager();
 
@@ -493,6 +494,28 @@ describe("decision-trace wiring — sideEffect.fieldRejected", () => {
     owned.end();
     const outcomes = events.map((e) => e.outcome).sort();
     expect(outcomes).toEqual(["unsupported_key", "value_too_long"]);
+  });
+
+  it("ON: scalar budget overflow emits scalar_cap_exceeded without scalar details", async () => {
+    setDecisionTraceFlag(true);
+    const scalars: Record<string, boolean> = {};
+    for (let i = 0; i < MAX_SIDE_EFFECT_SCALARS_PER_OPERATION + 1; i++) {
+      scalars[`feature${i}Flag`] = i % 2 === 0;
+    }
+
+    const owned = tracer.startSpan("db.Poll.findUnique");
+    const events = await eventsForPoint("sideEffect.fieldRejected", () => {
+      recordSideEffect(
+        { kind: "email", operation: "email.send", scalars },
+        { span: owned },
+      );
+    });
+    owned.end();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].outcome).toBe("scalar_cap_exceeded");
+    expect(events[0]).not.toHaveProperty("inputs");
+    expect(JSON.stringify(events[0])).not.toContain("feature16Flag");
   });
 
   it("OFF: a rejected field emits no decision event but still records the omission", async () => {

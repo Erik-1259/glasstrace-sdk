@@ -831,7 +831,7 @@ integer omission count:
 | `NaN` / `±Infinity` | `non_finite` |
 | A value whose type doesn't match its key suffix (e.g. a string or boolean on `*Ms`) | `raw_payload` |
 | A key not matching the scalar pattern | `unsupported_key` |
-| More than 16 scalars in one call (the excess are dropped) | `value_too_long` |
+| More than 16 scalars in one call (the excess are dropped) | `scalar_cap_exceeded` |
 
 Send **bounded deltas as numbers** (e.g. `latencyMs: 142`), not absolute
 timestamps. Note that raw-epoch screening applies only to `*Ms` keys (the

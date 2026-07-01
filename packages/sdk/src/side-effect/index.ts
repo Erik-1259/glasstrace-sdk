@@ -652,7 +652,7 @@ function runRecordSideEffect(
         // Per-operation scalar budget exhausted. Record a single
         // count (mirroring the operation over-budget path) and stop;
         // no rejected value is echoed.
-        recordRejection(targetSpan, "value_too_long");
+        recordRejection(targetSpan, "scalar_cap_exceeded");
         break;
       }
       scalarCount += 1;
