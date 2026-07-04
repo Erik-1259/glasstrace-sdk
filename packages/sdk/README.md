@@ -139,12 +139,19 @@ first call for each symptom class. It then teaches the agent how to
 **use** what the tools return — treating side-effect evidence as
 first-class runtime facts, reading boolean (`*Holds`) and categorical
 trace fields directly, continuing from the trace summary when a
-follow-up tool comes back thin, and narrowing to the smallest source
-path the trace identifies before broad exploration. It also tells the
-agent not to read a sparse candidate (one whose compact summaries are
-absent) as absence of evidence, and to broaden or retry a sparse search
-by procedure (`find_trace_candidates({ procedure: "<name>" })`) — comparing the
-matched route against the URL searched before concluding a path never ran.
+follow-up tool comes back thin, and pausing before edits to connect the
+runtime fact to the source decision point and intended edit boundary.
+It tells the agent to prefer the smallest source path that owns the
+runtime decision instead of rewriting routing, batching, request
+transport, middleware, or sibling propagation unless the trace
+implicates that layer. For stale-state bugs, it points the agent at the
+durable state source and the decision function that consumed stale state,
+and treats categorical side-effect fields as branch/location evidence
+rather than patch instructions. It also tells the agent not to read a sparse
+candidate (one whose compact summaries are absent) as absence of evidence,
+and to broaden or retry a sparse search by procedure
+(`find_trace_candidates({ procedure: "<name>" })`) — comparing the matched
+route against the URL searched before concluding a path never ran.
 
 ### Migration from legacy filenames
 

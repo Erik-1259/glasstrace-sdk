@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   generateMcpConfig,
   generateInfoSection,
+  generateInfoSectionForCursorMdc,
+  generateInfoSectionForCursorrulesLegacy,
 } from "../../../../packages/sdk/src/agent-detection/configs.js";
 import type { DetectedAgent } from "../../../../packages/sdk/src/agent-detection/detect.js";
 
@@ -709,14 +711,42 @@ describe("generateInfoSection", () => {
           expect(followups).not.toContain("recommendedNextStep");
         });
 
-        it("routes named-operation evidence into the smallest source path, and compares multiple traces for stateful bugs", () => {
+        it("requires a trace-evidence checkpoint before editing and bounds the source layer", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
             ENDPOINT,
             SDK_VERSION,
           );
+          expect(info).toContain("After a relevant trace is found");
+          expect(info).toContain("pause before editing");
+          expect(info).toContain("the runtime fact");
+          expect(info).toContain("the route/procedure/operation that produced it");
+          expect(info).toContain("the likely source decision point");
+          expect(info).toContain("the intended edit boundary");
           expect(info).toMatch(/smallest source path/);
-          expect(info).toMatch(/framework \/ auth \/ UI exploration/);
+          expect(info).toContain("owns the runtime decision");
+          expect(info).toContain("Do not rewrite routing, batching, request transport, middleware, or sibling propagation");
+          expect(info).toContain("unless the trace explicitly implicates that layer");
+        });
+
+        it("guides stale-state and categorical side-effect evidence without turning categories into patches", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toContain("For stale state");
+          expect(info).toContain("durable authoritative state source");
+          expect(info).toContain("decision function that consumed stale state");
+          expect(info).toContain("Treat categorical side-effect fields as branch/location evidence, not patch instructions");
+        });
+
+        it("compares multiple traces for stateful bugs", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
           expect(info).toMatch(/[Ss]tateful bugs/);
           expect(info).toMatch(/compare the relevant traces in sequence/);
         });
@@ -747,6 +777,18 @@ describe("generateInfoSection", () => {
           expect(info).toContain("before concluding nothing happened");
         });
 
+        it("retries or broadens when a plausible candidate lacks semantic evidence", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toContain("If a plausible candidate lacks semantic evidence");
+          expect(info).toContain("pull the trace if possible");
+          expect(info).toContain("retry or broaden the query");
+          expect(info).toContain("before concluding MCP has no useful evidence");
+        });
+
         it("teaches retry-by-procedure (the `{ procedure }` param form) and route-vs-URL comparison for a sparse search", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
@@ -773,6 +815,10 @@ describe("generateInfoSection", () => {
             "revalidateTag",
             "cache invalidation",
             "MFG-RLY",
+            "validation harness",
+            "benchmark",
+            "Codex",
+            "Claude",
           ]) {
             expect(info).not.toContain(term);
           }
@@ -860,6 +906,25 @@ describe("generateInfoSection", () => {
       expect(() =>
         generateInfoSection(makeAgent("claude"), ENDPOINT, "1.4.0[31m"),
       ).toThrow(/sdkVersion must match/);
+    });
+  });
+
+  describe("Cursor direct render helpers", () => {
+    it("renders the trace-evidence edit-boundary guidance into Cursor .mdc output", () => {
+      const info = generateInfoSectionForCursorMdc(ENDPOINT, SDK_VERSION);
+      expect(info).toContain("alwaysApply: true");
+      expect(info).toContain(`<!-- glasstrace:mcp:start v=${SDK_VERSION} -->`);
+      expect(info).toContain("pause before editing");
+      expect(info).toContain("the intended edit boundary");
+      expect(info).toContain("Do not rewrite routing, batching, request transport, middleware, or sibling propagation");
+    });
+
+    it("renders the trace-evidence edit-boundary guidance into legacy .cursorrules output", () => {
+      const info = generateInfoSectionForCursorrulesLegacy(ENDPOINT, SDK_VERSION);
+      expect(info).toContain(`# glasstrace:mcp:start v=${SDK_VERSION}`);
+      expect(info).toContain("pause before editing");
+      expect(info).toContain("the intended edit boundary");
+      expect(info).toContain("Do not rewrite routing, batching, request transport, middleware, or sibling propagation");
     });
   });
 });
