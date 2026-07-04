@@ -679,10 +679,12 @@ npx glasstrace upgrade-instructions
 ```
 
 Refreshes the managed Glasstrace MCP section in every detected agent
-instruction file (CLAUDE.md / codex.md / .cursorrules) so existing
-projects pick up updated decision-paragraph text and tool descriptions
-on SDK upgrade. Idempotent and safe to re-run; only files that already
-contain a Glasstrace marker pair are touched.
+instruction file (AGENTS.md, CLAUDE.md, GEMINI.md,
+.cursor/rules/glasstrace.mdc, .windsurf/rules/glasstrace.md, and the
+legacy .cursorrules fallback) so existing projects pick up updated
+runtime-evidence guidance on SDK upgrade. Idempotent and safe to
+re-run; only files that already contain a Glasstrace marker pair are
+touched.
 
 The managed section's start marker carries an SDK version stamp
 (e.g. `<!-- glasstrace:mcp:start v=1.5.0 -->`). When the running SDK

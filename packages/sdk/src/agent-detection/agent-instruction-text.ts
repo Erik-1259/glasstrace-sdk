@@ -63,7 +63,10 @@
  * empty `get_span_attributes`, an `unavailable` `get_root_cause`) as
  * still-usable rather than a dead end, and narrows to the smallest
  * source path the evidence names — while cross-checking every trace
- * fact against source.
+ * fact against source. It also requires a pre-edit checkpoint after a
+ * relevant trace is found so the agent writes down the runtime fact,
+ * the route/procedure/operation that produced it, the likely source
+ * decision point, and the intended edit boundary before changing code.
  */
 
 /**
@@ -119,7 +122,13 @@ export function buildAgentInstructionBody(): string {
     "5. Follow-up tools refine evidence; they do not invalidate it:",
     "   - `get_span_attributes` is a scalar drill-down for span attributes. An empty result (no scalars returned) only means there was no scalar drill-down for that trace — it does NOT invalidate side-effect evidence already present in a candidate or trace summary.",
     "   - If `get_root_cause` returns `status: \"unavailable\"`, the trace is still usable: continue from the candidate summaries and the trace detail it still ships — `summary` and `spans` (always), plus `sideEffectSummary` when the trace captured side-effect evidence — rather than retrying the same call or discarding the trace.",
-    "6. Once trace evidence names a route, procedure, or operation, open the smallest source path tied to that operation first. Widen to broad framework / auth / UI exploration only if that path does not explain the evidence.",
+    "6. After a relevant trace is found, pause before editing:",
+    "   - Write down the runtime fact, the route/procedure/operation that produced it, the likely source decision point, and the intended edit boundary.",
+    "   - Prefer the smallest source path that owns the runtime decision.",
+    "   - Do not rewrite routing, batching, request transport, middleware, or sibling propagation unless the trace explicitly implicates that layer.",
+    "   - For stale state, prefer the durable authoritative state source and the decision function that consumed stale state.",
+    "   - Treat categorical side-effect fields as branch/location evidence, not patch instructions.",
+    "   - If a plausible candidate lacks semantic evidence, pull the trace if possible, then retry or broaden the query before concluding MCP has no useful evidence.",
     "7. Stateful bugs often span more than one request — for example a write or update request followed by a later read, render, or action request. When a single trace looks correct in isolation, compare the relevant traces in sequence before concluding.",
     "8. If a route-based search is sparse, ambiguous, or returns only a weak candidate, do not conclude the code path never ran — broaden or retry by procedure/operation: `find_trace_candidates({ procedure: \"<name>\" })` (e.g. `{ procedure: \"billing.subscribe\" }` or `{ procedure: \"settings.update\" }`). The `procedure` filter is preferred over a vague route fragment, and is especially useful for runtime-state bugs. Before concluding a path did not run, compare the candidate's `route` pattern against the URL you actually searched — a mismatch usually means you filtered on the wrong name, not that the path is absent.",
     "",
