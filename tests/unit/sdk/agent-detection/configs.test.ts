@@ -659,6 +659,20 @@ describe("generateInfoSection", () => {
           expect(info).toMatch(/signal to pull the trace/);
         });
 
+        it("requires drill-down from `find_trace_candidates` before deciding because candidate rows can be semantically thin", () => {
+          const info = generateInfoSection(
+            makeAgent(target.name),
+            ENDPOINT,
+            SDK_VERSION,
+          );
+          expect(info).toContain("After `find_trace_candidates`");
+          expect(info).toContain("inspect the highest-confidence candidate");
+          expect(info).toContain("with `get_trace` or `get_root_cause` before deciding");
+          expect(info).toContain("Candidate rows can locate the right trace without including every decisive semantic field");
+          expect(info).toContain("`suggestedFollowups`");
+          expect(info).toContain("drill-down tool");
+        });
+
         it("teaches that categorical fields identify the operation and its state", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
@@ -676,6 +690,8 @@ describe("generateInfoSection", () => {
           );
           expect(info).toMatch(/[Cc]ross-check/);
           expect(info).toContain("direct verification");
+          expect(info).toContain("runtime evidence for the failing path");
+          expect(info).toContain("not a patch recipe");
         });
 
         it("explains that an empty `get_span_attributes` result does not invalidate side-effect evidence", () => {
@@ -735,7 +751,8 @@ describe("generateInfoSection", () => {
             ENDPOINT,
             SDK_VERSION,
           );
-          expect(info).toContain("For stale state");
+          expect(info).toContain("For stale, cross-request, or cross-batch state");
+          expect(info).toContain("do not simply forward the observed request or batch value");
           expect(info).toContain("durable authoritative state source");
           expect(info).toContain("decision function that consumed stale state");
           expect(info).toContain("Treat categorical side-effect fields as branch/location evidence, not patch instructions");
@@ -815,6 +832,9 @@ describe("generateInfoSection", () => {
             "revalidateTag",
             "cache invalidation",
             "MFG-RLY",
+            "same-batch",
+            "pending-value",
+            "author-profile",
             "validation harness",
             "benchmark",
             "Codex",
@@ -914,16 +934,24 @@ describe("generateInfoSection", () => {
       const info = generateInfoSectionForCursorMdc(ENDPOINT, SDK_VERSION);
       expect(info).toContain("alwaysApply: true");
       expect(info).toContain(`<!-- glasstrace:mcp:start v=${SDK_VERSION} -->`);
+      expect(info).toContain("After `find_trace_candidates`");
+      expect(info).toContain("Candidate rows can locate the right trace without including every decisive semantic field");
       expect(info).toContain("pause before editing");
       expect(info).toContain("the intended edit boundary");
+      expect(info).toContain("not a patch recipe");
+      expect(info).toContain("do not simply forward the observed request or batch value");
       expect(info).toContain("Do not rewrite routing, batching, request transport, middleware, or sibling propagation");
     });
 
     it("renders the trace-evidence edit-boundary guidance into legacy .cursorrules output", () => {
       const info = generateInfoSectionForCursorrulesLegacy(ENDPOINT, SDK_VERSION);
       expect(info).toContain(`# glasstrace:mcp:start v=${SDK_VERSION}`);
+      expect(info).toContain("After `find_trace_candidates`");
+      expect(info).toContain("Candidate rows can locate the right trace without including every decisive semantic field");
       expect(info).toContain("pause before editing");
       expect(info).toContain("the intended edit boundary");
+      expect(info).toContain("not a patch recipe");
+      expect(info).toContain("do not simply forward the observed request or batch value");
       expect(info).toContain("Do not rewrite routing, batching, request transport, middleware, or sibling propagation");
     });
   });
