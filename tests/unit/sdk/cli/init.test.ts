@@ -135,6 +135,10 @@ describe("runInit — blocking anon key verification (DISC-493 Issue 3 / DISC-49
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.errors[0]).toContain("server rejected");
     expect(result.errors[0]).toContain("HTTP 401");
+    expect(result.errors[0]).toContain("npm exec -- glasstrace status");
+    expect(result.errors[0]).toContain("pnpm exec glasstrace status");
+    expect(result.errors[0]).not.toContain("npx glasstrace");
+    expect(result.errors[0]).not.toContain("doctor");
   });
 
   it("distinguishes transport failures with 'fetch failed'", async () => {

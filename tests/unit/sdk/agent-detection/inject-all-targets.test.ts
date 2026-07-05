@@ -26,7 +26,8 @@ function makeAgent(
         mcpConfigPath: join(testDir, ".mcp.json"),
         infoFilePath: join(testDir, "CLAUDE.md"),
         cliAvailable: false,
-        registrationCommand: "npx glasstrace mcp add --agent claude",
+        registrationCommand:
+          "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent claude",
       };
     case "codex":
       return {
@@ -34,7 +35,8 @@ function makeAgent(
         mcpConfigPath: join(testDir, ".codex", "config.toml"),
         infoFilePath: join(testDir, "AGENTS.md"),
         cliAvailable: false,
-        registrationCommand: "npx glasstrace mcp add --agent codex",
+        registrationCommand:
+          "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent codex",
       };
     case "gemini":
       return {
@@ -42,7 +44,8 @@ function makeAgent(
         mcpConfigPath: join(testDir, ".gemini", "settings.json"),
         infoFilePath: join(testDir, "GEMINI.md"),
         cliAvailable: false,
-        registrationCommand: "npx glasstrace mcp add --agent gemini",
+        registrationCommand:
+          "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent gemini",
       };
     case "cursor":
       return {
@@ -50,7 +53,8 @@ function makeAgent(
         mcpConfigPath: join(testDir, ".cursor", "mcp.json"),
         infoFilePath: join(testDir, ".cursor", "rules", "glasstrace.mdc"),
         cliAvailable: false,
-        registrationCommand: "npx glasstrace mcp add --agent cursor",
+        registrationCommand:
+          "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent cursor",
       };
     case "windsurf":
       return {
@@ -58,7 +62,8 @@ function makeAgent(
         mcpConfigPath: "/dev/null/windsurf-config",
         infoFilePath: join(testDir, ".windsurf", "rules", "glasstrace.md"),
         cliAvailable: false,
-        registrationCommand: "npx glasstrace mcp add --agent windsurf",
+        registrationCommand:
+          "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent windsurf",
       };
     case "generic":
       return {
@@ -397,7 +402,8 @@ describe("injectAllTargets — Wave 18 multi-target dispatcher (DISC-1782)", () 
         mcpConfigPath: join(gitRoot, ".mcp.json"),
         infoFilePath: join(gitRoot, "CLAUDE.md"),
         cliAvailable: false,
-        registrationCommand: "npx glasstrace mcp add --agent claude",
+        registrationCommand:
+          "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent claude",
       };
 
       // projectRoot is `packages/api/`, but the agent's foundDir is

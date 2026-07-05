@@ -119,6 +119,12 @@ describe("runValidate", () => {
     expect(result.issues.map((i) => i.code)).toContain(
       "sdk-import-without-glasstrace-dir",
     );
+    const issue = result.issues.find(
+      (i) => i.code === "sdk-import-without-glasstrace-dir",
+    );
+    expect(issue?.fix).toContain("npm exec -- glasstrace uninit");
+    expect(issue?.fix).toContain("pnpm exec glasstrace uninit");
+    expect(issue?.fix).not.toContain("npx glasstrace");
   });
 
   it("reports mcp-marker-without-configs when marker exists but no MCP configs", async () => {
@@ -180,6 +186,19 @@ describe("runValidate", () => {
     for (const issue of result.issues) {
       expect(issue.fix.length).toBeGreaterThan(0);
     }
+  });
+
+  it("fix suggestions use app-local package-manager commands, not unscoped npx", async () => {
+    const projectRoot = createTmpProject();
+    fs.mkdirSync(path.join(projectRoot, ".glasstrace"));
+    const result = await runValidate({ projectRoot });
+    const issue = result.issues.find(
+      (i) => i.code === "glasstrace-dir-without-register-import",
+    );
+
+    expect(issue?.fix).toContain("npm exec -- glasstrace init");
+    expect(issue?.fix).toContain("pnpm exec glasstrace init");
+    expect(issue?.fix).not.toContain("npx glasstrace");
   });
 
   // Issue class 5: marker records a credential whose identity does not
@@ -254,11 +273,13 @@ describe("runValidate", () => {
     const codes = result.issues.map((i) => i.code);
     expect(codes).toContain("mcp-helper-stale-credential");
 
-    // Suggested fix mentions `mcp add --force`.
+    // Suggested fix uses app-local package-manager commands.
     const issue = result.issues.find(
       (i) => i.code === "mcp-helper-stale-credential",
     );
-    expect(issue?.fix).toMatch(/mcp add --force/);
+    expect(issue?.fix).toContain("npm exec -- glasstrace mcp add --force");
+    expect(issue?.fix).toContain("pnpm exec glasstrace mcp add --force");
+    expect(issue?.fix).not.toContain("npx glasstrace");
   });
 
   it("does not flag mcp-helper-stale-credential when marker is absent", async () => {

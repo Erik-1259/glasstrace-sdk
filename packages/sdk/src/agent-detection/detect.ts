@@ -38,7 +38,8 @@ const AGENT_RULES: AgentRule[] = [
     mcpConfigPath: (dir) => join(dir, ".mcp.json"),
     infoFilePath: (dir) => join(dir, "CLAUDE.md"),
     cliBinary: "claude",
-    registrationCommand: "npx glasstrace mcp add --agent claude",
+    registrationCommand:
+      "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent claude",
   },
   {
     name: "codex",
@@ -58,7 +59,8 @@ const AGENT_RULES: AgentRule[] = [
     mcpConfigPath: (dir) => join(dir, ".codex", "config.toml"),
     infoFilePath: (dir) => join(dir, "AGENTS.md"),
     cliBinary: "codex",
-    registrationCommand: "npx glasstrace mcp add --agent codex",
+    registrationCommand:
+      "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent codex",
   },
   {
     name: "gemini",
@@ -66,7 +68,8 @@ const AGENT_RULES: AgentRule[] = [
     mcpConfigPath: (dir) => join(dir, ".gemini", "settings.json"),
     infoFilePath: (dir) => join(dir, "GEMINI.md"),
     cliBinary: "gemini",
-    registrationCommand: "npx glasstrace mcp add --agent gemini",
+    registrationCommand:
+      "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent gemini",
   },
   {
     name: "cursor",
@@ -78,7 +81,8 @@ const AGENT_RULES: AgentRule[] = [
     mcpConfigPath: (dir) => join(dir, ".cursor", "mcp.json"),
     infoFilePath: (dir) => join(dir, ".cursor", "rules", "glasstrace.mdc"),
     cliBinary: null,
-    registrationCommand: "npx glasstrace mcp add --agent cursor",
+    registrationCommand:
+      "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent cursor",
   },
   {
     name: "windsurf",
@@ -99,7 +103,8 @@ const AGENT_RULES: AgentRule[] = [
       join(homedir(), ".codeium", "windsurf", "mcp_config.json"),
     infoFilePath: (dir) => join(dir, ".windsurf", "rules", "glasstrace.md"),
     cliBinary: null,
-    registrationCommand: "npx glasstrace mcp add --agent windsurf",
+    registrationCommand:
+      "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent windsurf",
   },
 ];
 

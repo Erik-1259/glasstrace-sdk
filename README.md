@@ -482,14 +482,34 @@ registerGlasstrace();
 
 ## CLI
 
+For first-time setup or a one-off run from any directory, ask npm to
+install the scoped SDK package and run its `glasstrace` bin explicitly:
+
 ```bash
-npx glasstrace init
+npx --yes --package @glasstrace/sdk glasstrace init
 ```
 
-Scaffolds instrumentation files for your project and auto-configures
-MCP for any detected AI coding agents (Claude Code, Cursor, Codex,
-Gemini, Windsurf). Agent detection scans for marker files and writes
-native MCP configuration so agents can query traces immediately.
+After `@glasstrace/sdk` is installed in the app package, prefer the
+app-local CLI so refresh commands use the same SDK version your app
+loads at runtime:
+
+```bash
+npm exec -- glasstrace <command>
+pnpm exec glasstrace <command>
+pnpm --filter <app-package> exec glasstrace <command>
+```
+
+Run the app-local commands from the app package. In a pnpm monorepo,
+the `--filter` form is the root-level equivalent. Avoid treating
+plain `npx glasstrace ...` as a one-off install command: npm resolves
+that as the unscoped `glasstrace` package name, not necessarily the
+`glasstrace` executable published by `@glasstrace/sdk`.
+
+The init command scaffolds instrumentation files for your project and
+auto-configures MCP for any detected AI coding agents (Claude Code,
+Cursor, Codex, Gemini, Windsurf). Agent detection scans for marker
+files and writes native MCP configuration so agents can query traces
+immediately.
 
 **Instrumentation file precedence:** init targets the first matching
 location in this order:
@@ -600,7 +620,11 @@ verification automatically.
 ### Validating Install State
 
 ```bash
-npx glasstrace init --validate
+npm exec -- glasstrace init --validate
+# pnpm app workspace:
+pnpm exec glasstrace init --validate
+# pnpm monorepo root:
+pnpm --filter <app-package> exec glasstrace init --validate
 ```
 
 Checks that the Glasstrace installation artifacts are in a consistent
@@ -620,7 +644,11 @@ Each finding includes a suggested fix command.
 ### Removing Glasstrace
 
 ```bash
-npx glasstrace uninit
+npm exec -- glasstrace uninit
+# pnpm app workspace:
+pnpm exec glasstrace uninit
+# pnpm monorepo root:
+pnpm --filter <app-package> exec glasstrace uninit
 ```
 
 Reverses every step of `glasstrace init`: unwraps `withGlasstraceConfig`
@@ -646,27 +674,35 @@ Flags:
 ### Uninstalling the package
 
 When you run `npm uninstall @glasstrace/sdk`, a `preuninstall` script
-prints a warning reminding you to run `npx @glasstrace/sdk uninit`
-first. Package-manager lifecycle scripts are unreliable across
-environments (pnpm, yarn, and CI containers), so the warning is
-informational only; Glasstrace does not attempt automatic cleanup
-during `npm uninstall`. For a clean removal:
+prints a warning reminding you to run the scoped cleanup fallback
+`npx @glasstrace/sdk uninit` first. Package-manager lifecycle scripts
+are unreliable across environments (pnpm, yarn, and CI containers), so
+the warning is informational only; Glasstrace does not attempt
+automatic cleanup during `npm uninstall`. If the package is still
+installed in the app, prefer the app-local command for a clean removal:
 
 ```bash
-npx glasstrace uninit
+npm exec -- glasstrace uninit
 npm uninstall @glasstrace/sdk
 ```
+
+For pnpm, run `pnpm exec glasstrace uninit` from the app workspace or
+`pnpm --filter <app-package> exec glasstrace uninit` from the
+monorepo root before removing the package.
 
 ### MCP Registration
 
 ```bash
-npx glasstrace mcp add
+npm exec -- glasstrace mcp add
 ```
 
 Explicitly registers the Glasstrace MCP server with detected AI coding
 agents. While `glasstrace init` writes file-based MCP configs, this
 command also attempts native CLI registration for agents that support
-it. Re-run after key rotation or to add newly installed agents.
+it. Re-run after key rotation or to add newly installed agents. For
+pnpm, run `pnpm exec glasstrace mcp add` from the app workspace or
+`pnpm --filter <app-package> exec glasstrace mcp add` from the
+monorepo root.
 
 Flags:
 - `--dry-run` -- Preview what would be configured without making changes
@@ -675,7 +711,7 @@ Flags:
 ### Refreshing agent instruction guidance
 
 ```bash
-npx glasstrace upgrade-instructions
+npm exec -- glasstrace upgrade-instructions
 ```
 
 Refreshes the managed Glasstrace MCP section in every detected agent
@@ -685,6 +721,18 @@ legacy .cursorrules fallback) so existing projects pick up updated
 runtime-evidence guidance on SDK upgrade. Idempotent and safe to
 re-run; only files that already contain a Glasstrace marker pair are
 touched.
+
+For pnpm, run `pnpm exec glasstrace upgrade-instructions` from the
+app workspace or `pnpm --filter <app-package> exec glasstrace
+upgrade-instructions` from the monorepo root. For a one-off latest
+published SDK refresh from outside an installed app package, use
+`npx --yes --package @glasstrace/sdk glasstrace upgrade-instructions`;
+pin the package version in automation when the refresh must match a
+specific SDK version:
+
+```bash
+npx --yes --package @glasstrace/sdk@<version> glasstrace upgrade-instructions
+```
 
 The managed section's start marker carries an SDK version stamp
 (e.g. `<!-- glasstrace:mcp:start v=1.5.0 -->`). When the running SDK
@@ -717,10 +765,11 @@ The SDK also refreshes managed MCP config files (e.g.
 ingestion is now writing traces with. The refresh applies only when
 the file is byte-equivalent to the SDK-shaped output for the
 project's anon key — manually edited MCP configs are preserved
-untouched. Re-run `npx glasstrace mcp add` after a claim to refresh
-agent-specific configs that were set up via the CLI; the command
-detects credential drift via the `.glasstrace/mcp-connected` marker
-and re-registers automatically.
+untouched. Re-run app-local `glasstrace mcp add` after a claim
+(for example, `npm exec -- glasstrace mcp add` or `pnpm exec
+glasstrace mcp add`) to refresh agent-specific configs that were set
+up via the CLI; the command detects credential drift via the
+`.glasstrace/mcp-connected` marker and re-registers automatically.
 
 ## Production Export Resilience
 
@@ -765,8 +814,9 @@ Operational visibility:
   `"client_error"`, `"rate_limit"`, `"server_error"`, or
   `"network"`). The record is cleared automatically when the breaker
   recovers.
-- `npx glasstrace status` surfaces both fields without requiring a
-  live process connection.
+- App-local `glasstrace status` surfaces both fields without requiring a
+  live process connection (for example, `npm exec -- glasstrace status`
+  or `pnpm exec glasstrace status` from the app package).
 
 Internally the breaker emits three structured lifecycle events
 (`otel:circuit_opened`, `otel:circuit_half_open`,

@@ -54,7 +54,8 @@ describe("maybeShowMcpNudge", () => {
     const output = stderrSpy.mock.calls[0]![0] as string;
     expect(output).toContain("[glasstrace] Error captured:");
     expect(output).toContain("TypeError: Cannot read properties of undefined");
-    expect(output).toContain("npx glasstrace mcp add");
+    expect(output).toContain("npm exec -- glasstrace mcp add");
+    expect(output).toContain("pnpm exec glasstrace mcp add");
   });
 
   it("does NOT fire on second call (one-per-process)", async () => {
@@ -147,7 +148,7 @@ describe("maybeShowMcpNudge", () => {
     expect(output).toBe(
       `[glasstrace] Error captured: Test error message\n` +
         `  Debug with AI: ask your agent "What's the latest Glasstrace error?"\n` +
-        `  Not connected? Run: npx glasstrace mcp add\n`,
+        `  Not connected? From the app package: npm exec -- glasstrace mcp add (pnpm: pnpm exec glasstrace mcp add)\n`,
     );
   });
 

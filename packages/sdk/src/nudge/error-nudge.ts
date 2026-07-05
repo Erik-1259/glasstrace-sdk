@@ -103,7 +103,7 @@ export function maybeShowMcpNudge(errorSummary: string): void {
   process.stderr.write(
     `[glasstrace] Error captured: ${safe}\n` +
       `  Debug with AI: ask your agent "What's the latest Glasstrace error?"\n` +
-      `  Not connected? Run: npx glasstrace mcp add\n`,
+      `  Not connected? From the app package: npm exec -- glasstrace mcp add (pnpm: pnpm exec glasstrace mcp add)\n`,
   );
 }
 

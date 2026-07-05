@@ -57,7 +57,7 @@ export interface ClaimState {
  * Called from {@link registerGlasstrace} when the SDK runs in anonymous +
  * development mode. The supported discovery contract is the static file
  * served at `/.well-known/glasstrace.json` (written by
- * `npx glasstrace init` under the framework's static root — `public/`
+ * `glasstrace init` under the framework's static root — `public/`
  * for Next.js and most frameworks, `static/` for SvelteKit). The runtime
  * handler here is internal compatibility for older consumer integrations
  * during local development and is not part of the supported discovery

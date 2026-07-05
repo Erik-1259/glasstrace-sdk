@@ -69,7 +69,7 @@ describe("detectAgents", () => {
       expect(claude).toBeDefined();
       expect(claude!.mcpConfigPath).toBe(join(testDir, ".mcp.json"));
       expect(claude!.registrationCommand).toBe(
-        "npx glasstrace mcp add --agent claude",
+        "npx --yes --package @glasstrace/sdk glasstrace mcp add --agent claude",
       );
     });
 
