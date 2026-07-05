@@ -674,11 +674,12 @@ Flags:
 ### Uninstalling the package
 
 When you run `npm uninstall @glasstrace/sdk`, a `preuninstall` script
-prints a warning reminding you to run the SDK's uninit command first.
-Package-manager lifecycle scripts are unreliable across
-environments (pnpm, yarn, and CI containers), so the warning is
-informational only; Glasstrace does not attempt automatic cleanup
-during `npm uninstall`. For a clean removal:
+prints a warning reminding you to run the scoped cleanup fallback
+`npx @glasstrace/sdk uninit` first. Package-manager lifecycle scripts
+are unreliable across environments (pnpm, yarn, and CI containers), so
+the warning is informational only; Glasstrace does not attempt
+automatic cleanup during `npm uninstall`. If the package is still
+installed in the app, prefer the app-local command for a clean removal:
 
 ```bash
 npm exec -- glasstrace uninit
