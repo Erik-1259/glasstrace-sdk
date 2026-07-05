@@ -141,7 +141,7 @@ first-class runtime facts, reading boolean (`*Holds`) and categorical
 trace fields directly, drilling into the highest-confidence
 `find_trace_candidates` result with `get_trace` or `get_root_cause`
 before deciding because candidate rows can locate the right trace
-without every decisive semantic field, continuing from the trace
+without including every decisive semantic field, continuing from the trace
 summary when a follow-up tool comes back thin, and pausing before edits
 to connect the runtime fact to the source decision point and intended
 edit boundary.
