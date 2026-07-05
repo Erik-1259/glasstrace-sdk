@@ -1,5 +1,15 @@
 # @glasstrace/sdk
 
+## 1.28.1
+
+### Patch Changes
+
+- fa55844: Update public CLI guidance and runtime hints to distinguish app-local
+  `glasstrace` execution from one-off registry execution. README examples now
+  prefer `npm exec -- glasstrace ...` or pnpm workspace-scoped commands after the
+  SDK is installed, and use `npx --yes --package @glasstrace/sdk glasstrace ...`
+  for first-time or one-off runs.
+
 ## 1.28.0
 
 ### Minor Changes
