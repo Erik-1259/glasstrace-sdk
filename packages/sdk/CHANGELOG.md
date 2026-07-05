@@ -1,5 +1,14 @@
 # @glasstrace/sdk
 
+## 1.28.0
+
+### Minor Changes
+
+- 4481a65: Reinforce the SDK-installed agent guidance so agents drill into
+  `find_trace_candidates` results before deciding and, for stale, cross-request,
+  or cross-batch state, target the durable decision boundary instead of
+  forwarding observed request or batch values.
+
 ## 1.27.0
 
 ### Minor Changes
