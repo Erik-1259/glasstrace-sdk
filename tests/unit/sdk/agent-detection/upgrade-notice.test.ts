@@ -108,7 +108,12 @@ describe("maybeWarnStaleAgentInstructions", () => {
 
     expect(stderr.chunks).toHaveLength(1);
     expect(stderr.chunks[0]).toContain("CLAUDE.md");
-    expect(stderr.chunks[0]).toContain("npx glasstrace upgrade-instructions");
+    expect(stderr.chunks[0]).toContain(
+      "npm exec -- glasstrace upgrade-instructions",
+    );
+    expect(stderr.chunks[0]).toContain(
+      "pnpm exec glasstrace upgrade-instructions",
+    );
     expect(stderr.chunks[0]).toContain("GLASSTRACE_DISABLE_UPGRADE_NOTICE");
     // Single newline at the end — single stderr line.
     expect(stderr.chunks[0].endsWith("\n")).toBe(true);

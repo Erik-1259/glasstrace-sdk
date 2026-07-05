@@ -21,9 +21,27 @@ and manual integration via `createGlasstraceSpanProcessor()`.
 
 ## Initialize
 
+For first-time setup or a one-off run from any directory:
+
 ```bash
-npx glasstrace init
+npx --yes --package @glasstrace/sdk glasstrace init
 ```
+
+After `@glasstrace/sdk` is installed in the app package, prefer the
+app-local CLI so refresh commands use the same SDK version your app
+loads at runtime:
+
+```bash
+npm exec -- glasstrace <command>
+pnpm exec glasstrace <command>
+pnpm --filter <app-package> exec glasstrace <command>
+```
+
+Run the app-local commands from the app package. In a pnpm monorepo,
+the `--filter` form is the root-level equivalent. Avoid treating
+plain `npx glasstrace ...` as a one-off install command: npm resolves
+that as the unscoped `glasstrace` package name, not necessarily the
+`glasstrace` executable published by `@glasstrace/sdk`.
 
 The `init` command scaffolds the files Glasstrace needs and merges into
 your existing setup rather than overwriting.
@@ -71,7 +89,11 @@ root file, then re-run init.
 ## Init & Verification
 
 ```bash
-npx glasstrace init
+npm exec -- glasstrace init
+# pnpm app workspace:
+pnpm exec glasstrace init
+# pnpm monorepo root:
+pnpm --filter <app-package> exec glasstrace init
 ```
 
 `glasstrace init` scaffolds instrumentation, configures MCP, and
@@ -169,11 +191,29 @@ to as primary:
 - `codex.md` (Codex now reads `AGENTS.md` by default)
 - `.windsurfrules` (Windsurf moved to `.windsurf/rules/*.md`)
 
-Run `npx glasstrace upgrade-instructions` to migrate: the managed
-section is created at the new canonical destination(s). The legacy
-files are left untouched (their managed sections become stale but
-your free-text content is preserved); copy any custom prose from the
-legacy file to `AGENTS.md` to keep your agent's visibility into it.
+Run app-local `glasstrace upgrade-instructions` to migrate. For npm:
+
+```bash
+npm exec -- glasstrace upgrade-instructions
+```
+
+For pnpm, run `pnpm exec glasstrace upgrade-instructions` from the app
+workspace or `pnpm --filter <app-package> exec glasstrace
+upgrade-instructions` from the monorepo root. For a one-off latest
+published SDK refresh from outside an installed app package, use
+`npx --yes --package @glasstrace/sdk glasstrace upgrade-instructions`;
+pin the package version in automation when the refresh must match a
+specific SDK version:
+
+```bash
+npx --yes --package @glasstrace/sdk@<version> glasstrace upgrade-instructions
+```
+
+The managed section is created at the new canonical destination(s).
+The legacy files are left untouched (their managed sections become
+stale but your free-text content is preserved); copy any custom prose
+from the legacy file to `AGENTS.md` to keep your agent's visibility
+into it.
 
 If you need to roll back to a pre-v1.11 SDK, pin to `~1.10.0` in
 `package.json`; the older SDK does not recognize `AGENTS.md` /
@@ -185,7 +225,7 @@ The managed section's start marker carries an SDK version stamp, e.g.
 `@glasstrace/sdk`, run:
 
 ```bash
-npx glasstrace upgrade-instructions
+npm exec -- glasstrace upgrade-instructions
 ```
 
 The command refreshes every detected agent instruction file in one
@@ -193,9 +233,13 @@ run. Files outside the markers are untouched; files without a
 Glasstrace managed section are left alone. The command is idempotent
 — re-running produces byte-for-byte identical output.
 
-`npx glasstrace mcp add` performs the same managed-section refresh
-when run with `--force` (or against a project whose marker file has
-shifted credentials), so either command is a valid upgrade path.
+App-local `glasstrace mcp add` performs the same managed-section
+refresh when run with `--force` (or against a project whose marker
+file has shifted credentials), so either command is a valid upgrade
+path. Use `npm exec -- glasstrace mcp add --force` from an npm app
+package, `pnpm exec glasstrace mcp add --force` from a pnpm app
+workspace, or `pnpm --filter <app-package> exec glasstrace mcp add
+--force` from a pnpm monorepo root.
 
 ### Stale-section warning at SDK init
 
@@ -339,8 +383,8 @@ The SDK signals this case in three ways:
 
 3. **CLI bridge.** `.glasstrace/runtime-state.json` carries a
    structured `lastError` record that downstream tooling (custom
-   dashboards, CI assertions, the `npx @glasstrace/sdk status`
-   command in future releases) can surface verbatim:
+   dashboards, CI assertions, or app-local `glasstrace status`)
+   can surface verbatim:
 
    ```json
    {

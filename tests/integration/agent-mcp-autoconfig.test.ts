@@ -489,7 +489,8 @@ describe("Agent MCP auto-configuration integration tests", () => {
       const firstOutput = stderrSpy.mock.calls[0]![0] as string;
       expect(firstOutput).toContain("[glasstrace] Error captured:");
       expect(firstOutput).toContain("GET /api/test -> 500");
-      expect(firstOutput).toContain("npx glasstrace mcp add");
+      expect(firstOutput).toContain("npm exec -- glasstrace mcp add");
+      expect(firstOutput).toContain("pnpm exec glasstrace mcp add");
 
       // Reset spy to track second call
       stderrSpy.mockClear();

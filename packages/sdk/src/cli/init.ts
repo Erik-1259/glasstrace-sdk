@@ -1182,7 +1182,8 @@ export async function verifyAnonKeyRegistration(
     return { outcome: "verified" };
   }
 
-  const hint = "Run 'npx glasstrace status' or 'npx glasstrace doctor' to diagnose.";
+  const hint =
+    "From the app package, run 'npm exec -- glasstrace status' (pnpm: 'pnpm exec glasstrace status') to diagnose.";
   switch (result.reason) {
     case "transport":
       // `result.detail` is the raw cause with any leading `fetch failed: `
@@ -1510,7 +1511,7 @@ if (isDirectExecution) {
         ) {
           process.stderr.write(
             "\nNo agent instruction files detected with a Glasstrace managed section. " +
-              "Run `npx glasstrace init` or `npx glasstrace mcp add` to install one.\n",
+              "From the app package, run `npm exec -- glasstrace init` or `npm exec -- glasstrace mcp add` (pnpm: `pnpm exec glasstrace init` or `pnpm exec glasstrace mcp add`) to install one.\n",
           );
         }
         process.exit(result.exitCode);

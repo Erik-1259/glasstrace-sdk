@@ -134,7 +134,7 @@ export async function runValidate(options: ValidateOptions): Promise<ValidateRes
         code: "glasstrace-dir-without-register-import",
         message:
           ".glasstrace/ exists but instrumentation.ts is missing the registerGlasstrace import.",
-        fix: "Run `npx glasstrace init` to re-scaffold instrumentation.ts, or remove .glasstrace/ if the SDK is no longer in use.",
+        fix: "From the app package, run `npm exec -- glasstrace init` (pnpm: `pnpm exec glasstrace init`) to re-scaffold instrumentation.ts, or remove .glasstrace/ if the SDK is no longer in use.",
       });
     }
   }
@@ -146,7 +146,7 @@ export async function runValidate(options: ValidateOptions): Promise<ValidateRes
         code: "sdk-import-without-glasstrace-dir",
         message:
           "instrumentation.ts imports from @glasstrace/sdk but .glasstrace/ is missing.",
-        fix: "Run `npx glasstrace init` to recreate .glasstrace/, or `npx glasstrace uninit` to fully remove the SDK.",
+        fix: "From the app package, run `npm exec -- glasstrace init` (pnpm: `pnpm exec glasstrace init`) to recreate .glasstrace/, or `npm exec -- glasstrace uninit` (pnpm: `pnpm exec glasstrace uninit`) to fully remove the SDK.",
       });
     }
   }
@@ -157,7 +157,7 @@ export async function runValidate(options: ValidateOptions): Promise<ValidateRes
       code: "mcp-marker-without-configs",
       message:
         ".glasstrace/mcp-connected marker is present but no MCP config files were found.",
-      fix: "Run `npx glasstrace mcp add --force` to regenerate MCP configs, or delete .glasstrace/mcp-connected.",
+      fix: "From the app package, run `npm exec -- glasstrace mcp add --force` (pnpm: `pnpm exec glasstrace mcp add --force`) to regenerate MCP configs, or delete .glasstrace/mcp-connected.",
     });
   }
 
@@ -166,7 +166,7 @@ export async function runValidate(options: ValidateOptions): Promise<ValidateRes
     issues.push({
       code: "mcp-configs-without-marker",
       message: `MCP config files exist (${mcpConfigsPresent.join(", ")}) but .glasstrace/mcp-connected marker is missing.`,
-      fix: "Run `npx glasstrace init` to re-register the marker, or `npx glasstrace uninit` to fully remove MCP configuration.",
+      fix: "From the app package, run `npm exec -- glasstrace init` (pnpm: `pnpm exec glasstrace init`) to re-register the marker, or `npm exec -- glasstrace uninit` (pnpm: `pnpm exec glasstrace uninit`) to fully remove MCP configuration.",
     });
   }
 
@@ -191,7 +191,7 @@ export async function runValidate(options: ValidateOptions): Promise<ValidateRes
           code: "mcp-helper-stale-credential",
           message:
             "Managed MCP configs were last refreshed with a different credential than the project is now using. MCP queries may return no traces while the dashboard sees them.",
-          fix: "Run `npx glasstrace mcp add --force` to refresh managed MCP configs with the current credential.",
+          fix: "From the app package, run `npm exec -- glasstrace mcp add --force` (pnpm: `pnpm exec glasstrace mcp add --force`) to refresh managed MCP configs with the current credential.",
         });
       }
     } catch {

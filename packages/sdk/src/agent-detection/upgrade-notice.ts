@@ -31,8 +31,8 @@ import { decisionTrace, decisionTraceEnabled } from "../decision-trace.js";
  *
  * Only version-stamped sections participate. Legacy unstamped
  * sections trigger no warning by spec — those users
- * receive the upgraded text on their next `npx glasstrace mcp add`
- * or `npx glasstrace upgrade-instructions` run.
+ * receive the upgraded text on their next app-local `glasstrace mcp add`
+ * or `glasstrace upgrade-instructions` run.
  */
 
 /**
@@ -400,7 +400,8 @@ export function maybeWarnStaleAgentInstructions(
     const fileList = staleFiles.join(", ");
     const message =
       `[glasstrace] Glasstrace managed MCP section in ${fileList} was rendered by an older ` +
-      `@glasstrace/sdk; run \`npx glasstrace upgrade-instructions\` to refresh ` +
+      `@glasstrace/sdk; from the app package run \`npm exec -- glasstrace upgrade-instructions\` ` +
+      `(pnpm: \`pnpm exec glasstrace upgrade-instructions\`) to refresh ` +
       `(silence with GLASSTRACE_DISABLE_UPGRADE_NOTICE=1).\n`;
 
     warningEmitted = true;

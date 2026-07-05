@@ -2,7 +2,7 @@
  * Runtime State Bridge
  *
  * Writes the SDK's lifecycle state to `.glasstrace/runtime-state.json`
- * so that CLI commands (npx @glasstrace/sdk status) can report runtime
+ * so that CLI commands (`glasstrace status`) can report runtime
  * state without a live process connection.
  *
  * Design: sdk-lifecycle.md Section 14 (Runtime State File)
@@ -155,7 +155,7 @@ let _started = false;
  * `__require` shim cannot resolve `require("node:fs")` from an ESM scope
  * — registration is skipped silently. The runtime-state file
  * is a best-effort CLI bridge; trace capture continues unaffected. A
- * later `npx @glasstrace/sdk status` call falls back to its existing
+ * later `glasstrace status` call falls back to its existing
  * "no runtime state available" path, matching the behavior on a project
  * that has not yet run the SDK. The skip is intentional and not surfaced
  * even under `verbose` because "synchronous node:fs is unreachable here"
