@@ -94,9 +94,9 @@
   "devDependencies": {
     "@glasstrace/protocol": "*",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/core": "^2.7.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
-    "@opentelemetry/sdk-trace-base": "^2.6.1",
+    "@opentelemetry/core": "^2.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/sdk-trace-base": "^2.9.0",
     "@trpc/server": "^11.17.0",
     "@vercel/blob": "^2.5.0",
     "@vercel/otel": "^2.1.2",
