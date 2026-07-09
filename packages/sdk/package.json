@@ -43,6 +43,14 @@
       "require": "./dist/async-context/index.cjs",
       "default": "./dist/async-context/index.js"
     },
+    "./diagnostics": {
+      "types": "./dist/diagnostics/index.d.ts",
+      "node": {
+        "import": "./dist/diagnostics/index.js",
+        "require": "./dist/diagnostics/index.cjs"
+      },
+      "default": null
+    },
     "./package.json": "./package.json"
   },
   "bin": {

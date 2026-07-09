@@ -13,19 +13,16 @@
  * an empty artifact (e.g. `module.exports = {}`) is caught in addition
  * to outright resolution failures.
  *
- * Subpaths covered:
- *
- *   - `@glasstrace/sdk/node`  — Node-only build-time helpers (SDK-028).
- *   - `@glasstrace/sdk/trpc`  — tRPC middleware-chain instrumentation
- *                               (SDK-036 / DISC-1217).
+ * Subpaths covered: `@glasstrace/sdk/node`, `@glasstrace/sdk/trpc`,
+ * `@glasstrace/sdk/middleware`, `@glasstrace/sdk/async-context`, and
+ * `@glasstrace/sdk/diagnostics` — every Node-only or plain subpath added
+ * since the gate was introduced.
  *
  * `@glasstrace/sdk/drizzle` is intentionally NOT probed here: the
  * Drizzle adapter shipped before the verify-subpath gate existed, and
  * its consumers exercise it through the full Drizzle Logger interface
  * in `tests/unit/sdk/drizzle-adapter.test.ts`. Adding it to this
- * script would not add coverage; the new tRPC subpath is included
- * because it is the SDK's first new subpath since the gate was
- * introduced.
+ * script would not add coverage.
  *
  * The gate `chdir`s to the SDK package directory before probing. Node's
  * ESM `import()` and `createRequire(import.meta.url)` both resolve bare
@@ -120,6 +117,18 @@ const SUBPATHS = [
       "export `WithAsyncCausalityOptions` erased at runtime — see " +
       "src/async-context/index.ts",
     requiredRuntime: ["withAsyncCausality"],
+  },
+  {
+    specifier: "@glasstrace/sdk/diagnostics",
+    distHint: "dist/diagnostics/index.{js,cjs}",
+    expectedExports:
+      "the runtime exports `createSpanDiagnostics` and " +
+      "`SpanDiagnosticsProcessor` plus type-only exports " +
+      "(SpanDiagnosticsOptions, SpanDiagnosticsProcessorOptions, " +
+      "DiagnosticRecord, StartRecord, EndRecord, UnendedRecord, " +
+      "UnendedSpanFact, RunSummaryRecord, SpanKindName) erased at runtime " +
+      "— see src/diagnostics/index.ts",
+    requiredRuntime: ["createSpanDiagnostics", "SpanDiagnosticsProcessor"],
   },
 ];
 const LOG_PREFIX = "[verify-subpath]";
