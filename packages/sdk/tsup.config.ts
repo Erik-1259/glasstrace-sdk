@@ -17,6 +17,7 @@ export default defineConfig({
     "trpc/index": "src/trpc/index.ts",
     "middleware/index": "src/middleware/index.ts",
     "async-context/index": "src/async-context/index.ts",
+    "diagnostics/index": "src/diagnostics/index.ts",
   },
   format: ["esm", "cjs"],
   tsconfig: "tsconfig.build.json",

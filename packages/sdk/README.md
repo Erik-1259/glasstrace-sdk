@@ -1296,7 +1296,7 @@ without a deprecation cycle. Rely on the static file.
 
 ## Subpath exports
 
-`@glasstrace/sdk` ships six public entries:
+`@glasstrace/sdk` ships seven public entries:
 
 - **`@glasstrace/sdk`** — primary import site. Use from
   `instrumentation.ts` (runtime instrumentation) and `next.config.ts`
@@ -1321,6 +1321,10 @@ without a deprecation cycle. Rely on the static file.
   (`tracedRequestMiddleware`).
 - **`@glasstrace/sdk/async-context`** — async causality propagation
   (`withAsyncCausality`).
+- **`@glasstrace/sdk/diagnostics`** — Node-only, experimental diagnostic
+  surface: a flag-gated span-lifecycle processor that emits per-run JSONL
+  records so span loss is observable on a real app. Off unless
+  `GLASSTRACE_SPAN_DIAGNOSTICS=true`. See "`/diagnostics` surface" below.
 
 The source-map and import-graph helpers previously reachable from the
 `@glasstrace/sdk` root specifier have moved to `@glasstrace/sdk/node`
@@ -1332,6 +1336,104 @@ import { uploadSourceMapsAuto } from "@glasstrace/sdk";
 // After
 import { uploadSourceMapsAuto } from "@glasstrace/sdk/node";
 ```
+
+### `/diagnostics` surface
+
+The `@glasstrace/sdk/diagnostics` subpath ships a flag-gated, Node-only
+span-lifecycle diagnostic. It is **observe-only**: it records when spans
+start and end (and which never end) but never mutates, exports, ends, or
+salvages a span. It exists to make span loss measurable on a real
+application — for example, a route span that goes missing from export
+under a fast Server-Action follow-up.
+
+**Enabling it.** Off by default. Set `GLASSTRACE_SPAN_DIAGNOSTICS=true`
+to turn it on. On the bare (SDK-owned provider) path it auto-attaches at
+registration — no code change, just the environment variable. An
+application that constructs its own OpenTelemetry provider can attach it
+programmatically:
+
+```ts
+import { createSpanDiagnostics } from "@glasstrace/sdk/diagnostics";
+
+const provider = new BasicTracerProvider({
+  spanProcessors: [myExporterProcessor, createSpanDiagnostics()],
+});
+```
+
+Records are written to the file named by
+`GLASSTRACE_SPAN_DIAGNOSTICS_OUT`, or, when that is unset, to stdout with
+a `[span-diag] ` prefix.
+
+**Records.** One JSON object per line. Optional fields (marked `?`) are
+omitted entirely — never `null` — when absent:
+
+- `start`:
+  `{"ev":"start","t":1712664000000,"traceId":"...","spanId":"...","parentSpanId":"0000000000000000","name":"POST /settings","kind":"SERVER","route":"/settings","method":"POST"}`
+- `end`:
+  `{"ev":"end","t":1712664000123,"traceId":"...","spanId":"...","name":"POST /settings","kind":"SERVER","durationMs":123,"route":"/settings","method":"POST"}`
+- `unended` (spans still open at a timeout sweep or at shutdown):
+  `{"ev":"unended","reason":"timeout","t":1712664005000,"count":1,"droppedFromCap":0,"spans":[{"traceId":"...","spanId":"...","name":"POST /settings","kind":"SERVER","route":"/settings","method":"POST","ageMs":5000}]}`
+- `run-summary` (one terminal record at shutdown — the liveness signal):
+  `{"ev":"run-summary","t":1712664005001,"started":42,"ended":41,"unended":1,"droppedFromCap":0,"sweptAtTimeout":true,"ranShutdown":true}`
+
+SERVER and INTERNAL spans are tracked (so a Server Action's INTERNAL
+side-effect child is covered); CLIENT / PRODUCER / CONSUMER are not.
+
+**What it records — and what it does not.** Records carry only
+structural, low-cardinality facts: the span name, the `http.route`
+template, the HTTP method, the span kind, ids, and age. Raw attribute
+values, URLs, headers, query strings, and bodies are never read. Note
+that the span **name** is instrumentation-controlled and may embed a raw
+path (or a dynamic segment) when no route template resolved; prefer
+`route` as the trustworthy key, and treat the output file as potentially
+containing a raw path in `name`. The file is created with default
+permissions — point `GLASSTRACE_SPAN_DIAGNOSTICS_OUT` at a non-sensitive
+location.
+
+**Counters.** `run-summary` counters are independent tallies. A span
+reported at a timeout sweep that later ends increments both `ended`
+(end-record presence is authoritative) and `unended` (a "was slow at
+least once" annotation), so `started = ended + unended` holds only when
+no span both sweeps and ends. `durationMs` is measured on the processor's
+own clock (end minus start), not the span's.
+
+**Sweep timing.** The default leak-timeout and sweep-interval are both
+5000 ms. Under a short run the timeout sweep may not fire
+(`sweptAtTimeout:false`) and only shutdown contributes; pass tuned values
+for a fast run:
+`createSpanDiagnostics({ leakTimeoutMs: 2000, sweepIntervalMs: 500 })`.
+Do not enable both the auto-attach and a programmatic instance against
+one output, or every record is duplicated.
+
+**Classifying span fate.** The records above establish, per run, whether
+a span was **created** and whether it **ended**. Whether it was actually
+**exported from the process** is a separate signal the SDK does not emit
+here; determine it by running the sweep behind an OTLP capture proxy that
+records the raw `/v1/traces` request bodies (which carry every span id,
+with or without an HTTP method). Joining the three gives independent
+witnesses:
+
+- diagnostic JSONL — *created* / *ended* (span-id authoritative);
+- OTLP proxy — *left the process* (span-id, method-agnostic);
+- trace store / query layer — *ingested and queryable*.
+
+Correlate by span id and the run's single known request identity, not by
+span name alone: an aborted request can end a route-named span that never
+ran the action, and an abort before the route is named loses route
+identity. Only spans that reached route naming are cleanly classifiable
+as *exported-then-lost*. A *never-created* verdict is valid only when
+`droppedFromCap` is 0 — otherwise a cap drop can masquerade as
+never-created. Because a route span often starts before its route
+resolves, a `start` record frequently omits `route`/`method`; do not
+treat their presence at start as guaranteed.
+
+For a span that carries an HTTP method, the SDK's verbose logging also
+emits an enrich line at export time; it is name-keyed (no span id),
+appears only when verbose logging is on and the export circuit is closed,
+and is an enrich *attempt*, not a backend acknowledgement — treat it as a
+secondary corroborator, with the OTLP proxy as the authoritative
+export-from-process witness. A method-less INTERNAL span produces no such
+line, so the proxy is the only way to observe its export fate.
 
 ### `/node` surface by symbol
 

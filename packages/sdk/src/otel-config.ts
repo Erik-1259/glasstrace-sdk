@@ -21,6 +21,8 @@ import {
 import { setCoexistenceState, _resetCoexistenceStateForTesting } from "./signal-handler.js";
 import { isProxyTracerProvider, isProxyTracer } from "./proxy-detection.js";
 import { decisionTrace, decisionTraceEnabled } from "./decision-trace.js";
+import { spanDiagnosticsEnabled } from "./span-diagnostics-flag.js";
+import { createSpanDiagnostics } from "./diagnostics/index.js";
 
 /**
  * Emit the terminal OTel-configuration decision for the chosen provider
@@ -538,8 +540,14 @@ async function runRegistrationPath(
   const processor = new BatchSpanProcessor(glasstraceExporter, {
     scheduledDelayMillis: 1000,
   });
+  // On the bare path the SDK owns the provider, so this is where the flag-gated
+  // span-lifecycle diagnostic auto-attaches (observe-only, alongside the export
+  // processor). Off by default; enabled with GLASSTRACE_SPAN_DIAGNOSTICS=true.
+  // Drained by the `otel-provider-shutdown` hook below via provider.shutdown().
   const provider = new BasicTracerProvider({
-    spanProcessors: [processor],
+    spanProcessors: spanDiagnosticsEnabled()
+      ? [processor, createSpanDiagnostics()]
+      : [processor],
   });
 
   // Context manager is registered synchronously in registerGlasstrace()

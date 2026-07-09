@@ -26,6 +26,10 @@ import {
   setDecisionTraceFlag,
   _resetDecisionTraceForTesting,
 } from "./decision-trace.js";
+import {
+  setSpanDiagnosticsFlag,
+  _resetSpanDiagnosticsFlagForTesting,
+} from "./span-diagnostics-flag.js";
 
 /** Whether console capture has been installed in this registration cycle. */
 let consoleCaptureInstalled = false;
@@ -122,6 +126,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
     // decision lines for free, while a narrow `decisionTrace`/env opt-in
     // shows only the decision lines without the full init firehose.
     setDecisionTraceFlag(config.decisionTrace || config.verbose);
+    // Span diagnostics resolve ONCE here, read directly from the env var.
+    // Deliberately NOT folded with `verbose` (folding would flip diagnostics —
+    // and its file writes — on for every verbose session, breaking the
+    // default-off contract) and NOT threaded through resolveConfig (that would
+    // be an option-schema change in @glasstrace/protocol).
+    setSpanDiagnosticsFlag(process.env.GLASSTRACE_SPAN_DIAGNOSTICS === "true");
     if (config.verbose) {
       console.info("[glasstrace] Config resolved.");
     }
@@ -651,4 +661,5 @@ export function _resetRegistrationForTesting(): void {
   _sessionManager = null;
   resetLifecycleForTesting();
   _resetDecisionTraceForTesting();
+  _resetSpanDiagnosticsFlagForTesting();
 }
