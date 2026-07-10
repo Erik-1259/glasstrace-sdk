@@ -2,7 +2,7 @@ import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
 import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
-import type { CaptureConfig } from "@glasstrace/protocol";
+import type { BoundaryMaskedScope, CaptureConfig } from "@glasstrace/protocol";
 import type { SessionManager } from "./session.js";
 import { classifyFetchTarget } from "./fetch-classifier.js";
 import { recordSpansExported, recordSpansDropped } from "./health-collector.js";
@@ -564,7 +564,8 @@ export class GlasstraceExporter implements SpanExporter {
           // rate. The same-span and descendant-aware scopes share the wire
           // attribute and differ only on `boundary_masked_scope`.
           extra[ATTR.HTTP_BOUNDARY_MASKED] = true;
-          extra[ATTR.HTTP_BOUNDARY_MASKED_SCOPE] = "same_span";
+          extra[ATTR.HTTP_BOUNDARY_MASKED_SCOPE] =
+            "same_span" satisfies BoundaryMaskedScope;
 
           // Emit lifecycle event for subscribers (informational; the
           // heuristic's behavior does NOT depend on subscribers). The
@@ -1145,7 +1146,8 @@ export class GlasstraceExporter implements SpanExporter {
     }
     extra[ATTR.HTTP_STATUS_CODE] = inferredStatus;
     extra[ATTR.HTTP_BOUNDARY_MASKED] = true;
-    extra[ATTR.HTTP_BOUNDARY_MASKED_SCOPE] = "descendant";
+    extra[ATTR.HTTP_BOUNDARY_MASKED_SCOPE] =
+      "descendant" satisfies BoundaryMaskedScope;
 
     emitLifecycleEvent("core:error_boundary_detected", {
       spanId: ctx.spanId,
