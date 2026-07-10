@@ -259,7 +259,8 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
  * tests) but carries no semantic meaning — consume by membership or via
  * {@link BoundaryMaskedScope}, never by positional index.
  *
- * @drift-check ../glasstrace-product/shared/types/wire-mcp.ts BoundaryMaskedScopeSchema — the product-side mirror this set must stay in sync with.
+ * Backend-canonical: the product-side `BoundaryMaskedScopeSchema` wire schema
+ * pins the same value set; the two must stay in sync.
  */
 export const BOUNDARY_MASKED_SCOPE_VALUES = ["same_span", "descendant"] as const;
 

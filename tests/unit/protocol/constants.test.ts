@@ -13,10 +13,16 @@ describe("BOUNDARY_MASKED_SCOPE_VALUES", () => {
     expect([...BOUNDARY_MASKED_SCOPE_VALUES]).toEqual(["same_span", "descendant"]);
   });
 
-  it("derives a literal-type union", () => {
+  it("derives a literal-type union of exactly these members", () => {
     const sameSpan: BoundaryMaskedScope = "same_span";
     const descendant: BoundaryMaskedScope = "descendant";
     expect(BOUNDARY_MASKED_SCOPE_VALUES).toContain(sameSpan);
     expect(BOUNDARY_MASKED_SCOPE_VALUES).toContain(descendant);
+    // A value outside the set is rejected at compile time — if the union ever
+    // widened, this @ts-expect-error would go unused and fail the build,
+    // pinning BoundaryMaskedScope to exactly these two members.
+    // @ts-expect-error "other" is not a BoundaryMaskedScope
+    const outside: BoundaryMaskedScope = "other";
+    expect(BOUNDARY_MASKED_SCOPE_VALUES).not.toContain(outside);
   });
 });
