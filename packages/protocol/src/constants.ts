@@ -258,6 +258,8 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
  * hardcoding the literals independently. The array order is stable (pinned by
  * tests) but carries no semantic meaning — consume by membership or via
  * {@link BoundaryMaskedScope}, never by positional index.
+ *
+ * @drift-check ../glasstrace-product/shared/types/wire-mcp.ts BoundaryMaskedScopeSchema — the product-side mirror this set must stay in sync with.
  */
 export const BOUNDARY_MASKED_SCOPE_VALUES = ["same_span", "descendant"] as const;
 
