@@ -16,6 +16,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import type { BoundaryMaskedScope } from "@glasstrace/protocol";
 import { getCoexistenceState } from "./signal-handler.js";
 import {
   _registerLifecycleEmitForBridge,
@@ -198,7 +199,7 @@ export interface SdkLifecycleEvents {
   "core:error_boundary_detected": {
     spanId: string;
     inferredStatus: number;
-    source: "same_span" | "descendant";
+    source: BoundaryMaskedScope;
     exceptionSpanId?: string;
     exceptionMessage?: string;
   };

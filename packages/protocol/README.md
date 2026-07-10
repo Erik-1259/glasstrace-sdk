@@ -13,9 +13,11 @@ the backend (private) depend on this package.
 - **Branded ID types** -- `DevApiKey`, `AnonApiKey`, `SessionId`, `BuildHash`
 - **Configuration schemas** -- `CaptureConfig`, `GlasstraceOptions`
 - **Wire format schemas** -- `SdkInitResponse`, `DiscoveryResponse`, `SourceMapUploadResponse`
-- **Constants** -- semantic attribute names, default capture config,
-  source map upload limits (`MAX_SOURCE_MAP_FILE_PATH_LENGTH`,
-  `MAX_SOURCE_MAP_FILE_SIZE`, `MAX_SOURCE_MAP_FILE_COUNT`)
+- **Constants** -- semantic attribute names; value enums for side-effect
+  evidence and boundary-masked error scope (e.g. `BOUNDARY_MASKED_SCOPE_VALUES`);
+  default capture config; source map upload limits
+  (`MAX_SOURCE_MAP_FILE_PATH_LENGTH`, `MAX_SOURCE_MAP_FILE_SIZE`,
+  `MAX_SOURCE_MAP_FILE_COUNT`)
 - **Session ID derivation** -- `deriveSessionId()` produces the same 16-char
   hex `SessionId` the SDK uses, so independent clients (SDK, browser
   extension, tooling) agree on a session without coordination.

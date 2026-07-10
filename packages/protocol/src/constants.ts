@@ -242,6 +242,38 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
     "glasstrace.side_effect.omitted.allowlist_denied",
 } as const;
 
+/**
+ * The two values the
+ * {@link GLASSTRACE_ATTRIBUTE_NAMES.HTTP_BOUNDARY_MASKED_SCOPE} discriminator
+ * can take when the SDK's boundary-masked-error heuristic promotes a span:
+ *
+ *   - `'same_span'` — the error signal (ERROR status, an `exception` event, or
+ *     an `exception.*` attribute) is on the HTTP server span itself.
+ *   - `'descendant'` — the error signal is on a transitive child of the HTTP
+ *     server span (the page-route boundary case, where a framework render span
+ *     carries the exception while the request renders an HTTP 200).
+ *
+ * Exported so the SDK exporter that emits the attribute and any backend or
+ * tooling that reads it share one source of truth for the value set instead of
+ * hardcoding the literals independently. The array order is stable (pinned by
+ * tests) but carries no semantic meaning — consume by membership or via
+ * {@link BoundaryMaskedScope}, never by positional index.
+ *
+ * Backend-canonical: the product-side `BoundaryMaskedScopeSchema` wire schema
+ * pins the same value set; the two must stay in sync.
+ */
+export const BOUNDARY_MASKED_SCOPE_VALUES = ["same_span", "descendant"] as const;
+
+/**
+ * One of the {@link BOUNDARY_MASKED_SCOPE_VALUES} scope discriminators that
+ * accompanies a {@link GLASSTRACE_ATTRIBUTE_NAMES.HTTP_BOUNDARY_MASKED}
+ * promotion.
+ *
+ * @see {@link BOUNDARY_MASKED_SCOPE_VALUES}
+ */
+export type BoundaryMaskedScope =
+  (typeof BOUNDARY_MASKED_SCOPE_VALUES)[number];
+
 /** Default SDK capture config (conservative defaults). */
 export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
   requestBodies: false,
