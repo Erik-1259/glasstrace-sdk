@@ -593,9 +593,17 @@ describe("prismaAdapter — id intent (full-fidelity pseudonymized capture)", ()
       query: async () => ({ owner: "u-1", muted: true }),
     });
     const owned = ownedSpanAttrs();
-    // The eager boolean captures; the id intent is silently off under strict.
+    // The eager boolean captures; under strict the id intent is silently off —
+    // neither a token NOR an `unhashed_id` omission is recorded, even though the
+    // owned span exists (a real place an omission could otherwise land). This is
+    // the SDK end of the served-`strict` invariant: when the backend normalizes
+    // a `full`-without-key config to `strict` at the wire, an id column produces
+    // no omission counter, not just no token.
     expect(owned?.[scalarKey("mutedFlag")]).toBe(true);
     expect(owned?.[scalarKey("ownerId")]).toBeUndefined();
+    expect(
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
+    ).toBeUndefined();
   });
 
   it("fail-closed under full with no provisioned key: records unhashed_id, emits no token", async () => {
