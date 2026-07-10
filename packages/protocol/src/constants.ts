@@ -255,8 +255,9 @@ export const GLASSTRACE_ATTRIBUTE_NAMES = {
  *
  * Exported so the SDK exporter that emits the attribute and any backend or
  * tooling that reads it share one source of truth for the value set instead of
- * hardcoding the literals independently. Ordering is not significant — consume
- * by membership or via {@link BoundaryMaskedScope}, not by positional index.
+ * hardcoding the literals independently. The array order is stable (pinned by
+ * tests) but carries no semantic meaning — consume by membership or via
+ * {@link BoundaryMaskedScope}, never by positional index.
  */
 export const BOUNDARY_MASKED_SCOPE_VALUES = ["same_span", "descendant"] as const;
 
