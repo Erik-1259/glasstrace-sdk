@@ -874,6 +874,18 @@ recordSideEffect({
 });
 ```
 
+> **Availability:** emitting a scalar (above) is separate from *retaining* it at
+> ingestion, where a per-account operator allowlist decides which scalars the backend
+> keeps (see [The two-allowlist contract](#the-two-allowlist-contract)). Admission
+> currently requires the scalar to ride a **database-operation** (`db.<Model>.<op>`)
+> span — the kind the `prismaAdapter` captures on, or one you pass via `{ span }`. The
+> `external_api` example above uses the default ambient active span (a request or
+> procedure span), which is neither, so its scalars are not yet admissible and are
+> dropped at ingestion (an `allowlist_denied` omission). For evidence on non-database
+> operations that must survive today, use the boolean `*Holds` relations or the
+> categorical `fields` channel. Capture is gated by the account `sideEffectEvidence`
+> flag.
+
 Scalars are validated at emit time under a **fail-closed `strict`**
 posture. (An account-level `captureFidelity` setting that can relax the
 timestamp/identifier rejections is part of the wire contract but is **not
