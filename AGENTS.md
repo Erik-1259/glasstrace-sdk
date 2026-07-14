@@ -59,6 +59,10 @@ merged change becomes part of the public package history.
 
 - Do not add "Generated with Claude Code" or Co-Authored-By trailers.
 - Use one shell command per tool invocation; do not chain with `&&` or `;`.
+- Never interact with non-Glasstrace-owned repositories, issues, pull
+  requests, discussions, releases, or other repo surfaces without first
+  discussing the exact target and action with the user and receiving explicit
+  permission.
 - Never rebase shared branches; merge `main` into feature branches if
   needed.
 - Never use `git push --force`; use `--force-with-lease` only when truly
