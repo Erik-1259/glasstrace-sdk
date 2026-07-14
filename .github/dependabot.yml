@@ -21,6 +21,16 @@ updates:
       # caused cascading failures (TS6 + Zod4 + Vitest4 in one PR).
       # Major bumps are not grouped — Dependabot creates one PR per
       # major bump by default when excluded from all groups.
+    ignore:
+      # Pin TypeScript to the 6.0.x line. typescript-eslint (the repo's linter)
+      # caps its `typescript` peer at `<6.1.0`, so ANY release >= 6.1.0 — a
+      # 6.1.x minor as well as a 7.x major — fails to resolve and `npm ci` dies
+      # with ERESOLVE, taking the build + lockfile-regeneration jobs down. Safe
+      # 6.0.x patches still flow. Raise this bound (or drop the entry) once
+      # typescript-eslint widens its peer cap, then bump TypeScript as its own
+      # migration.
+      - dependency-name: "typescript"
+        versions: [">=6.1.0"]
 
   - package-ecosystem: github-actions
     directory: /
