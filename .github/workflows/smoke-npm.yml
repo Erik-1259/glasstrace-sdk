@@ -97,7 +97,7 @@ jobs:
       matrix:
         dist_tag: [latest, canary]
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # Pin to avoid Node 22.22.2 which ships with a broken npm
           # (missing promise-retry). See DISC-443.

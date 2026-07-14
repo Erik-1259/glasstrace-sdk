@@ -221,7 +221,7 @@ jobs:
           # the default shallow clone is sufficient.
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # Pin to 22.15 to match release.yml and update-transitive-dep.yml,
           # avoiding Node 22.22.2's broken bundled npm (a known upstream
