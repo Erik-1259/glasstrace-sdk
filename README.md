@@ -185,7 +185,7 @@ const prisma = new PrismaClient().$extends(
 ```
 
 When an eligible operation has a producer-allowlisted non-`id` column
-(or an `id` allowlist under full-fidelity capture), account capture is
+(or an `id` allowlist under full-fidelity capture), value capture is
 enabled, and an active recording span exists, the adapter opens a
 single owned `db.<Model>.<op>` value-capture span and projects each own
 allowlisted result column according to its intent (`muted` →
