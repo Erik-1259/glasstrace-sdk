@@ -1,5 +1,15 @@
 # @glasstrace/sdk
 
+## 1.29.3
+
+### Patch Changes
+
+- 1fb3434: Restrict Prisma value capture to documented single-record operations.
+  Count, aggregate, group, list, bulk, raw, and unknown operations now open no
+  owned value-capture span, preventing count-select results from being
+  misclassified as model fields. Eligible results also ignore inherited
+  allowlisted properties.
+
 ## 1.29.2
 
 ### Patch Changes
