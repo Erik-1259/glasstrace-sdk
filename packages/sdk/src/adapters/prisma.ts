@@ -3,15 +3,18 @@
  *
  * `prismaAdapter({ allow })` returns a Prisma client extension that, for
  * each allowlisted `(model, column)`, projects a result field — a boolean
- * (default) or, with an `as` intent, a finite number — onto a Glasstrace
- * value-fidelity scalar so an agent can read it back from the trace. It is
- * **passive and observational**: it never executes a query
- * itself, never reads or mutates the result, and never changes query
- * behavior or errors.
+ * (default), a finite number under a numeric `as` intent, or a pseudonymized
+ * identifier under the `id` intent — onto a Glasstrace value-fidelity scalar
+ * so an agent can read it back from the trace. The adapter is **passive and
+ * observational**: it invokes Prisma's supplied query callback exactly once
+ * and never issues an additional query, inspects only own allowlisted fields
+ * on eligible single-record results, never mutates query arguments or
+ * results, and never changes query behavior or errors.
  *
  * Apply it like any Prisma extension:
  *
  * ```ts
+ * import { PrismaClient } from "@prisma/client";
  * import { prismaAdapter } from "@glasstrace/sdk";
  *
  * const prisma = new PrismaClient().$extends(
@@ -44,8 +47,11 @@
  *  - **Pure observer.** Capture work can never throw into the host query;
  *    the owned span is always ended; the original query error is re-thrown
  *    verbatim.
- *  - **Bounded.** `findMany` / list operations are disabled (no per-row
- *    capture). The adapter never widens the app's `select`.
+ *  - **Bounded.** Value capture is limited to `findUnique`,
+ *    `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
+ *    `upsert`, and `delete`. `findMany` and every other list, count,
+ *    aggregate, group, bulk, raw, or unknown operation are inert. The adapter
+ *    never widens the app's `select`.
  *
  * This module has **no dependency on `@prisma/client`** — it is typed
  * structurally against Prisma's client-extension shape (mirroring the
@@ -144,6 +150,24 @@ export interface PrismaAdapterOptions {
 }
 
 const TRACER_NAME = "glasstrace-prisma";
+
+/**
+ * Prisma operations whose documented result contract is one model record (or
+ * `null` for a non-throwing read miss). This positive set is intentionally
+ * closed: new or non-record operations remain inert until explicitly
+ * reviewed, rather than becoming eligible because their JavaScript result
+ * happens to resemble a row.
+ */
+const SINGLE_RECORD_RESULT_OPERATIONS: ReadonlySet<string> = new Set([
+  "findUnique",
+  "findUniqueOrThrow",
+  "findFirst",
+  "findFirstOrThrow",
+  "create",
+  "update",
+  "upsert",
+  "delete",
+]);
 
 /**
  * Whether a **recording** request span is active, fail-closed. The adapter
@@ -313,11 +337,13 @@ async function projectIdentifier(
 }
 
 /**
- * Project every allowlisted column present in a single-row result onto the
- * owned span via {@link capture}. Guards non-object results (a `findUnique`
- * miss returns `null`; aggregates return non-objects; lists are arrays).
- * Never throws — {@link capture} swallows its own errors, and the call is
- * additionally fenced so a malformed result can never affect the query.
+ * Project every own allowlisted column present in an eligible single-record
+ * result onto the owned span via {@link capture}. The operation boundary is
+ * enforced by the caller; the non-object and array guards remain as defense
+ * in depth for read misses and unexpected client/runtime shapes. Inherited
+ * properties are ignored. The caller fences all projection work so a
+ * malformed result (including a throwing proxy or accessor) can never affect
+ * the query outcome.
  *
  * Async because the `id` intent hashes its value via the Web Crypto API; the
  * caller ends the owned span only after this resolves.
@@ -332,7 +358,7 @@ async function projectAllowlisted(
   }
   const row = result as Record<string, unknown>;
   for (const [column, intent] of columns) {
-    if (!(column in row)) continue;
+    if (!Object.prototype.hasOwnProperty.call(row, column)) continue;
     const key = deriveScalarKey(column, intent);
     if (intent === "id") {
       await projectIdentifier(span, key, row[column]);
@@ -343,8 +369,10 @@ async function projectAllowlisted(
 }
 
 /**
- * Build a passive Prisma value-capture extension. See the module doc for
- * the full behavior contract.
+ * Build a passive Prisma value-capture extension for `findUnique`,
+ * `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
+ * `upsert`, and `delete` results. Other operations execute normally but open
+ * no owned value-capture span.
  */
 export function prismaAdapter(
   options: PrismaAdapterOptions = {},
@@ -398,9 +426,11 @@ export function prismaAdapter(
           // disabled path adds zero span volume (hot-path) and never emits
           // on an orphan (edge / no request context). All four gates:
           //  - the model has an allow entry (default-deny);
-          //  - the operation is not a multi-row list op (list/`findMany`
-          //    capture is disabled until a per-row cap + selection rule is
-          //    specified);
+          //  - the operation is one of the eight explicit single-record
+          //    result operations. The literal `findMany` exclusion remains a
+          //    visible defense for the established list boundary; all other
+          //    count, aggregate, group, list, bulk, raw, and unknown
+          //    operations fail closed through the positive-set check;
           //  - the capture master switch is on (fail-closed default off);
           //  - a recording request span is active (in-request, same-trace;
           //    edge has no ALS / no active span, and a sampled-out span is
@@ -411,6 +441,7 @@ export function prismaAdapter(
             model === undefined ||
             columns === undefined ||
             operation === "findMany" ||
+            !SINGLE_RECORD_RESULT_OPERATIONS.has(operation) ||
             !isCaptureEnabled() ||
             !hasRecordingActiveSpan()
           ) {

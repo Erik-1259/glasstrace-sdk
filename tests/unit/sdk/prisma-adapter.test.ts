@@ -9,13 +9,11 @@
  *    span as a native scalar; the query result is returned unchanged;
  *  - default-deny: with no allow entry (and the master switch ON) nothing is
  *    captured and NO owned span is opened (gate-before-startSpan);
- *  - `findMany` / edge (no active span) / disabled switch / null result are
- *    all no-ops;
+ *  - only the eight documented single-record-result operations are eligible;
+ *    count, aggregate, group, list, bulk, raw, and unknown operations open no
+ *    owned value-capture span;
  *  - pure-observer: a thrown query propagates verbatim with the owned span
  *    still ended and no leak.
- *
- * End-to-end proof through a real installed Prisma client is TEST-008
- * (validation workspace), not this unit suite.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -93,13 +91,16 @@ afterEach(async () => {
 
 /**
  * Drive one Prisma operation through the adapter under an active request
- * span. Returns the operation result and the finished spans.
+ * span. Returns the operation result and any caught query error; finished
+ * spans remain available through the test exporter.
  */
 async function runOperation(opts: {
   allow: ReadonlyArray<{ model: string; column: string; as?: ScalarIntent }>;
   model: string;
   operation: string;
-  query: () => Promise<unknown>;
+  /** Operation arguments forwarded unchanged to the query callback. */
+  args?: unknown;
+  query: (args: unknown) => Promise<unknown>;
   /** Omit to simulate an edge runtime with no active request span. */
   withRequestSpan?: boolean;
 }): Promise<{ result: unknown; thrown: unknown }> {
@@ -109,7 +110,7 @@ async function runOperation(opts: {
       const result = await ext.query.$allModels.$allOperations({
         model: opts.model,
         operation: opts.operation,
-        args: {},
+        args: opts.args ?? {},
         query: opts.query,
       });
       return { result, thrown: undefined };
@@ -137,6 +138,251 @@ function ownedSpanAttrs(): Record<string, unknown> | undefined {
   return span?.attributes as Record<string, unknown> | undefined;
 }
 
+function expectNoOwnedSpan(): void {
+  expect(
+    exporter.getFinishedSpans().some((span) => span.name.startsWith("db.")),
+  ).toBe(false);
+}
+
+function guardedCountSelectArgs(field: string): {
+  args: Readonly<{ select: object }>;
+  rawSelect: Readonly<Record<string, boolean>>;
+  selectSnapshot: Readonly<Record<string, boolean>>;
+  structuralReadCount: () => number;
+} {
+  const rawSelect = { [field]: true };
+  const selectSnapshot = structuredClone(rawSelect);
+  Object.freeze(rawSelect);
+
+  let structuralReads = 0;
+  const rejectStructuralRead = (): never => {
+    structuralReads += 1;
+    throw new Error("the adapter must not inspect args.select");
+  };
+  const select = new Proxy(rawSelect, {
+    get: rejectStructuralRead,
+    has: rejectStructuralRead,
+    ownKeys: rejectStructuralRead,
+    getOwnPropertyDescriptor: rejectStructuralRead,
+  });
+
+  return {
+    args: Object.freeze({ select }),
+    rawSelect,
+    selectSnapshot,
+    structuralReadCount: () => structuralReads,
+  };
+}
+
+describe("count select result boundary", () => {
+  it.each([
+    { intent: "value", suffix: "Value" },
+    { intent: "amount", suffix: "Amount" },
+    { intent: "ms", suffix: "Ms" },
+    { intent: "bytes", suffix: "Bytes" },
+    { intent: "ratio", suffix: "Ratio" },
+  ] as const)(
+    "keeps count select inert for the $intent numeric intent",
+    async ({ intent, suffix }) => {
+      const {
+        args,
+        rawSelect,
+        selectSnapshot,
+        structuralReadCount,
+      } = guardedCountSelectArgs("metric");
+      const countResult = Object.freeze({ metric: 7 });
+      const resultSnapshot = structuredClone(countResult);
+      const query = vi.fn(async (receivedArgs: unknown) => {
+        expect(receivedArgs).toBe(args);
+        return countResult;
+      });
+
+      const { result, thrown } = await runOperation({
+        allow: [{ model: "Order", column: "metric", as: intent }],
+        model: "Order",
+        operation: "count",
+        args,
+        query,
+      });
+
+      expect(thrown).toBeUndefined();
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(result).toBe(countResult);
+      expect(countResult).toEqual(resultSnapshot);
+      expect(rawSelect).toEqual(selectSnapshot);
+      expect(structuralReadCount()).toBe(0);
+
+      const owned = ownedSpanAttrs();
+      const captured = owned?.[scalarKey(`metric${suffix}`)];
+      expect(captured).not.toBe(7);
+      expect(captured).toBeUndefined();
+      expect(
+        owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD],
+      ).toBeUndefined();
+      expect(
+        exporter.getFinishedSpans().some((span) => span.name.startsWith("db.")),
+      ).toBe(false);
+    },
+  );
+
+  it("keeps count select inert for the default flag intent", async () => {
+    const {
+      args,
+      rawSelect,
+      selectSnapshot,
+      structuralReadCount,
+    } = guardedCountSelectArgs("active");
+    const countResult = Object.freeze({ active: 7 });
+    const resultSnapshot = structuredClone(countResult);
+    const query = vi.fn(async (receivedArgs: unknown) => {
+      expect(receivedArgs).toBe(args);
+      return countResult;
+    });
+
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "active" }],
+      model: "Order",
+      operation: "count",
+      args,
+      query,
+    });
+
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(countResult);
+    expect(countResult).toEqual(resultSnapshot);
+    expect(rawSelect).toEqual(selectSnapshot);
+    expect(structuralReadCount()).toBe(0);
+
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("activeFlag")]).toBeUndefined();
+    const omission =
+      owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_RAW_PAYLOAD];
+    expect(omission).not.toBe(1);
+    expect(omission).toBeUndefined();
+    expect(
+      exporter.getFinishedSpans().some((span) => span.name.startsWith("db.")),
+    ).toBe(false);
+  });
+
+  it("keeps count select inert for the full-fidelity id intent", async () => {
+    const hmacKey = "count-select-test-hmac-secret-do-not-use";
+    const full = configWith(true);
+    full.config.captureFidelity = "full";
+    full.config.attrHmacKey = hmacKey;
+    _setCurrentConfig(full);
+
+    const {
+      args,
+      rawSelect,
+      selectSnapshot,
+      structuralReadCount,
+    } = guardedCountSelectArgs("owner");
+    const countResult = Object.freeze({ owner: 7 });
+    const resultSnapshot = structuredClone(countResult);
+    const query = vi.fn(async (receivedArgs: unknown) => {
+      expect(receivedArgs).toBe(args);
+      return countResult;
+    });
+
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "owner", as: "id" }],
+      model: "Order",
+      operation: "count",
+      args,
+      query,
+    });
+
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(countResult);
+    expect(countResult).toEqual(resultSnapshot);
+    expect(rawSelect).toEqual(selectSnapshot);
+    expect(structuralReadCount()).toBe(0);
+
+    const owned = ownedSpanAttrs();
+    const captured = owned?.[scalarKey("ownerId")];
+    expect(captured).not.toBe(await hashIdWeb("7", hmacKey));
+    expect(captured).toBeUndefined();
+    expect(
+      exporter.getFinishedSpans().some((span) => span.name.startsWith("db.")),
+    ).toBe(false);
+  });
+
+  it("keeps a bare count number inert", async () => {
+    const query = vi.fn(async () => 7);
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "count", as: "value" }],
+      model: "Order",
+      operation: "count",
+      query,
+    });
+
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(7);
+    expectNoOwnedSpan();
+  });
+
+  it("keeps count select _all inert", async () => {
+    const {
+      args,
+      rawSelect,
+      selectSnapshot,
+      structuralReadCount,
+    } = guardedCountSelectArgs("_all");
+    const countResult = Object.freeze({ _all: 7 });
+    const query = vi.fn(async (receivedArgs: unknown) => {
+      expect(receivedArgs).toBe(args);
+      return countResult;
+    });
+
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "_all", as: "value" }],
+      model: "Order",
+      operation: "count",
+      args,
+      query,
+    });
+
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(countResult);
+    expect(rawSelect).toEqual(selectSnapshot);
+    expect(structuralReadCount()).toBe(0);
+    expectNoOwnedSpan();
+  });
+
+  it("propagates a denied count-select error verbatim without inspecting arguments or opening an owned span", async () => {
+    const {
+      args,
+      rawSelect,
+      selectSnapshot,
+      structuralReadCount,
+    } = guardedCountSelectArgs("metric");
+    const sentinel = new Error("count-select sentinel");
+    const query = vi.fn(async (receivedArgs: unknown): Promise<never> => {
+      expect(receivedArgs).toBe(args);
+      throw sentinel;
+    });
+
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "metric", as: "value" }],
+      model: "Order",
+      operation: "count",
+      args,
+      query,
+    });
+
+    expect(result).toBeUndefined();
+    expect(thrown).toBe(sentinel);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(rawSelect).toEqual(selectSnapshot);
+    expect(structuralReadCount()).toBe(0);
+    expectNoOwnedSpan();
+  });
+});
+
 describe("prismaAdapter — green path", () => {
   it("projects an allowlisted boolean onto an owned db.<Model>.<op> span and returns the result unchanged", async () => {
     const row = { muted: false, id: "p1" };
@@ -152,6 +398,66 @@ describe("prismaAdapter — green path", () => {
     const owned = finished.find((s) => s.name === "db.Poll.findUnique");
     expect(owned).toBeDefined();
     expect(owned?.attributes[scalarKey("mutedFlag")]).toBe(false);
+  });
+
+  it.each([
+    "findUnique",
+    "findUniqueOrThrow",
+    "findFirst",
+    "findFirstOrThrow",
+    "create",
+    "update",
+    "upsert",
+    "delete",
+  ])(
+    "captures an own allowlisted field for the eligible %s operation",
+    async (operation) => {
+      const args = Object.freeze({ where: Object.freeze({ id: "p1" }) });
+      const row = Object.freeze({ muted: false, id: "p1" });
+      const query = vi.fn(async (receivedArgs: unknown) => {
+        expect(receivedArgs).toBe(args);
+        return row;
+      });
+
+      const { result, thrown } = await runOperation({
+        allow: [{ model: "Poll", column: "muted" }],
+        model: "Poll",
+        operation,
+        args,
+        query,
+      });
+
+      expect(thrown).toBeUndefined();
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(result).toBe(row);
+      const owned = exporter
+        .getFinishedSpans()
+        .find((span) => span.name === `db.Poll.${operation}`);
+      expect(owned?.attributes[scalarKey("mutedFlag")]).toBe(false);
+    },
+  );
+
+  it("ignores an inherited allowlisted property while capturing a neighboring own property", async () => {
+    const prototype = Object.freeze({ inherited: true });
+    const row = Object.assign(Object.create(prototype) as { own?: boolean }, {
+      own: false,
+    });
+
+    const { result, thrown } = await runOperation({
+      allow: [
+        { model: "Poll", column: "inherited" },
+        { model: "Poll", column: "own" },
+      ],
+      model: "Poll",
+      operation: "findUnique",
+      query: async () => row,
+    });
+
+    expect(thrown).toBeUndefined();
+    expect(result).toBe(row);
+    const owned = ownedSpanAttrs();
+    expect(owned?.[scalarKey("inheritedFlag")]).toBeUndefined();
+    expect(owned?.[scalarKey("ownFlag")]).toBe(false);
   });
 });
 
@@ -203,6 +509,95 @@ describe("prismaAdapter — bounded and edge-safe no-ops", () => {
     expect(exporter.getFinishedSpans().map((s) => s.name)).toEqual(["request"]);
   });
 
+  it.each([
+    {
+      operation: "aggregate",
+      result: Object.freeze({ _sum: Object.freeze({ total: 7 }), _count: 1 }),
+    },
+    {
+      operation: "groupBy",
+      result: Object.freeze([Object.freeze({ status: "open", _count: 7 })]),
+    },
+    {
+      operation: "createManyAndReturn",
+      result: Object.freeze([Object.freeze({ metric: 7 })]),
+    },
+    {
+      operation: "updateManyAndReturn",
+      result: Object.freeze([Object.freeze({ metric: 7 })]),
+    },
+  ])(
+    "keeps the $operation result family inert",
+    async ({ operation, result: operationResult }) => {
+      const query = vi.fn(async () => operationResult);
+      const { result, thrown } = await runOperation({
+        allow: [{ model: "Order", column: "metric", as: "value" }],
+        model: "Order",
+        operation,
+        query,
+      });
+
+      expect(thrown).toBeUndefined();
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(result).toBe(operationResult);
+      expectNoOwnedSpan();
+    },
+  );
+
+  it.each(["createMany", "updateMany", "deleteMany"])(
+    "keeps the %s count map inert even when count is allowlisted",
+    async (operation) => {
+      const countResult = Object.freeze({ count: 7 });
+      const query = vi.fn(async () => countResult);
+      const { result, thrown } = await runOperation({
+        allow: [{ model: "Order", column: "count", as: "value" }],
+        model: "Order",
+        operation,
+        query,
+      });
+
+      expect(thrown).toBeUndefined();
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(result).toBe(countResult);
+      expectNoOwnedSpan();
+    },
+  );
+
+  it.each(["findRaw", "aggregateRaw"])(
+    "keeps the model-scoped %s collision-shaped result inert",
+    async (operation) => {
+      const rawResult = Object.freeze({ metric: 7 });
+      const query = vi.fn(async () => rawResult);
+      const { result, thrown } = await runOperation({
+        allow: [{ model: "Order", column: "metric", as: "value" }],
+        model: "Order",
+        operation,
+        query,
+      });
+
+      expect(thrown).toBeUndefined();
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(result).toBe(rawResult);
+      expectNoOwnedSpan();
+    },
+  );
+
+  it("fails closed for an unknown future operation", async () => {
+    const unknownResult = Object.freeze({ metric: 7 });
+    const query = vi.fn(async () => unknownResult);
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "metric", as: "value" }],
+      model: "Order",
+      operation: "futureOperation",
+      query,
+    });
+
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(unknownResult);
+    expectNoOwnedSpan();
+  });
+
   it("captures nothing on a runtime with no active request span (edge)", async () => {
     const { result } = await runOperation({
       allow: [{ model: "Poll", column: "muted" }],
@@ -229,6 +624,29 @@ describe("prismaAdapter — bounded and edge-safe no-ops", () => {
     const owned = ownedSpanAttrs();
     expect(owned?.[scalarKey("mutedFlag")]).toBeUndefined();
   });
+
+  it.each([
+    { label: "primitive", result: 7 },
+    { label: "array", result: Object.freeze([Object.freeze({ muted: false })]) },
+  ])(
+    "retains the $label result guard for an eligible operation",
+    async ({ result: operationResult }) => {
+      const { result, thrown } = await runOperation({
+        allow: [{ model: "Poll", column: "muted" }],
+        model: "Poll",
+        operation: "findUnique",
+        query: async () => operationResult,
+      });
+
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(operationResult);
+      const owned = exporter
+        .getFinishedSpans()
+        .find((span) => span.name === "db.Poll.findUnique");
+      expect(owned?.ended).toBe(true);
+      expect(owned?.attributes[scalarKey("mutedFlag")]).toBeUndefined();
+    },
+  );
 });
 
 describe("prismaAdapter — pure observer", () => {
@@ -250,6 +668,33 @@ describe("prismaAdapter — pure observer", () => {
       .find((s) => s.name === "db.Poll.findUnique");
     expect(owned).toBeDefined();
     expect(owned?.ended).toBe(true);
+  });
+
+  it("returns an eligible result unchanged when an allowlisted accessor throws during projection", async () => {
+    const row = {};
+    Object.defineProperty(row, "muted", {
+      enumerable: true,
+      get: () => {
+        throw new Error("result accessor exploded");
+      },
+    });
+    const query = vi.fn(async () => row);
+
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findUnique",
+      query,
+    });
+
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(row);
+    const owned = exporter
+      .getFinishedSpans()
+      .find((span) => span.name === "db.Poll.findUnique");
+    expect(owned?.ended).toBe(true);
+    expect(owned?.attributes[scalarKey("mutedFlag")]).toBeUndefined();
   });
 
   it("records a safe omission (not a captured value) for a non-boolean allowlisted column", async () => {
