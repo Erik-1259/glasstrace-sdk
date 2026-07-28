@@ -184,9 +184,21 @@ const prisma = new PrismaClient().$extends(
 );
 ```
 
-For an eligible operation the adapter opens a single `db.<Model>.<op>`
-span and records each allowlisted column on it as a value-fidelity
-scalar (`muted` → `mutedFlag`).
+When an eligible operation has a producer-allowlisted non-`id` column
+(or an `id` allowlist under full-fidelity capture), account capture is
+enabled, and an active recording span exists, the adapter opens a
+single owned `db.<Model>.<op>` value-capture span and projects each own
+allowlisted result column according to its intent (`muted` →
+`mutedFlag`). The eligible operations are `findUnique`,
+`findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
+`upsert`, and `delete`.
+
+Every other operation is value-capture inert. For count, aggregate,
+group, list (including `findMany`), bulk, raw, and unknown operations,
+the adapter opens no owned value-capture span and emits no scalar or
+omission attribute. This boundary affects only `prismaAdapter` value
+capture; automatic Prisma query instrumentation remains independent and
+unchanged.
 
 Capture numeric columns with an `as` intent on the allow entry — the
 scalar key is the column with the intent's suffix appended (not doubled
@@ -227,15 +239,15 @@ correlate the same entity across traces without exposing the raw id.
 
 The adapter is **passive and default-deny**:
 
-- It never executes, mutates, or alters a query — the original result
-  and any error pass through unchanged.
+- It calls the supplied query once, inspects only own allowlisted fields
+  on eligible single-record results, and never mutates query arguments
+  or results. The original result and any error pass through unchanged.
 - Nothing is captured unless a column is explicitly listed in `allow`
   **and** value capture is enabled for your account. With an empty or
   unset `allow`, it captures nothing and adds no spans.
 - Booleans and numbers are captured by their `as` intent; identifiers
   are captured only as pseudonymized `gthid_` tokens under full-fidelity
-  capture, never raw. Categorical columns are not captured, and
-  `findMany` / list queries are not captured.
+  capture, never raw. Categorical columns are not captured.
 - It has no dependency on `@prisma/client` and is safe to import in any
   runtime; on a runtime with no active request span it captures
   nothing.

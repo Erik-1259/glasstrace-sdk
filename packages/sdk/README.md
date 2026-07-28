@@ -959,10 +959,12 @@ result columns onto the same value-fidelity scalar channel as
 `recordSideEffect()`'s `scalars` map (see
 [Value-fidelity scalars](#value-fidelity-scalars)) — so an agent can read a
 query's key columns back from the trace without hand-written
-`recordSideEffect()` calls. It is a **pure observer**: it never runs a query
-itself, never reads or mutates the result, never widens your `select`, and
-never changes query behavior or errors — it reads only the allowlisted columns
-it projects. It adds no `@prisma/client` dependency (it is typed structurally).
+`recordSideEffect()` calls. It is a **pure observer**: it invokes Prisma's
+supplied query callback exactly once and never issues an additional query,
+inspects only own allowlisted fields on eligible single-record results, never
+mutates query arguments or results, never widens your `select`, and never
+changes query behavior or errors. It adds no `@prisma/client` dependency (it
+is typed structurally).
 
 ```ts
 import { PrismaClient } from "@prisma/client";
@@ -984,8 +986,17 @@ and its key suffix (the same suffixes as the manual `scalars` map): `flag`
 (default → `*Flag` boolean), the numeric intents `value` / `amount` / `ms` /
 `bytes` / `ratio` (→ `*Value` / `*Amount` / `*Ms` / `*Bytes` / `*Ratio`), and
 `id` (→ `*Id`, a pseudonymized `gthid_` token). A value whose runtime type does
-not match its intent is dropped, never captured. List operations (`findMany`)
-are not captured (no per-row capture).
+not match its intent is dropped, never captured.
+
+Value capture is limited to the single-record-result operations `findUnique`,
+`findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
+`upsert`, and `delete`. Every other operation is inert: for count, aggregate,
+group, list (including `findMany`), bulk, raw, and unknown operations,
+`prismaAdapter` opens no owned value-capture span and emits no scalar or
+omission attribute. This boundary affects only `prismaAdapter` value capture;
+automatic Prisma query instrumentation described in
+[Database query spans (Prisma)](#database-query-spans-prisma) is independent
+and unchanged.
 
 `as: "id"` is an operator escalation: it emits a `gthid_` token (the raw id
 hashed under a provisioned per-account key — the raw value never reaches the
@@ -1008,10 +1019,10 @@ column to actually be returned:
    configuration. The backend re-enforces an independent per-tenant allowlist
    at ingestion; a value the server allowlist does not list is dropped at
    ingestion even if the SDK emitted it.
-3. **The column must be in the operation's *returned* row.** The adapter only
-   projects columns present in the result, so an operation that does not return
-   the column — a `create` / `update` with a narrowed `select`, or a `select`
-   that omits it — is silently skipped.
+3. **The column must be an own property of the operation's *returned* row.**
+   The adapter ignores inherited properties, so an operation that does not
+   return the column — a `create` / `update` with a narrowed `select`, or a
+   `select` that omits it — is silently skipped.
 
 The two allowlists are keyed on **different** things — conflating them is the
 most common misconfiguration:
