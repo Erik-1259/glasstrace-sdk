@@ -108,6 +108,17 @@ describe("runUpgradeInstructions", () => {
     expect(written).toContain("### Call Glasstrace FIRST when:");
     expect(written).toContain("### SKIP Glasstrace when:");
     expect(written).toContain("### Workflow");
+    expect(written).toContain("omit `timeWindow` on the first search");
+    expect(written).toContain("nonnegative integer epoch milliseconds");
+    expect(written).toContain("a `cursor` belongs to one exact query");
+    expect(written).toContain("not a material window change");
+    expect(written).toContain("`closeMatches[].suggestedCall`");
+    expect(written).toContain("it has full temporal coverage");
+    expect(written).toContain("partial historical coverage");
+    expect(written).toContain("including boundary-only contact");
+    expect(written).toContain("report no coverage of the requested period");
+    expect(written).not.toContain("tight time window");
+    expect(written).not.toContain("open window");
   });
 
   it("refreshes a legacy unstamped managed section in place (DISC-1592 backward-compat)", async () => {

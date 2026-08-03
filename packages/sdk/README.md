@@ -177,10 +177,57 @@ observed request or batch value, and treats Glasstrace observations as
 evidence of the failing path rather than a patch recipe. It also treats
 categorical side-effect fields as branch/location evidence rather than patch
 instructions, tells the agent not to read a sparse candidate (one whose
-compact summaries are absent) as absence of evidence, and to broaden or
-retry a sparse search by procedure
-(`find_trace_candidates({ procedure: "<name>" })`) — comparing the matched
-route against the URL searched before concluding a path never ran.
+compact summaries are absent) as absence of evidence, and to retry a sparse
+search with a structured close-match locator or procedure. Locator changes
+start without a stale cursor and preserve the exact valid effective bounds that
+produced the match. The bare
+`find_trace_candidates({ procedure: "<name>" })` form is only for a new current
+server-defaulted search, not a locator retry or historical continuation. The
+agent compares the matched route against the URL searched before concluding a
+path never ran.
+
+For a first `find_trace_candidates` search by route or procedure, the managed
+guidance tells the agent to omit `timeWindow` unless you supplied nonnegative
+integer epoch-millisecond endpoints with `start < end`. The server then applies
+a bounded current window from its own clock. For relative historical requests,
+the agent treats a current result as orientation only and anchors exact duration
+arithmetic to the returned `effectiveTimeWindow.serverNow`; calendar periods
+also require the user's timezone and deterministic date conversion. If the
+server does not return `serverNow`, the agent does not derive a window. After
+an explicit search, it compares requested and effective bounds. A response that
+covers the request has full temporal coverage even when it is marked
+retention-bounded; positive-duration overlap without full coverage is partial
+historical coverage, while no positive-duration overlap (including boundary
+contact) covers none of the requested period. Partial and no coverage cannot
+establish absence during uncovered requested time. The retention flag explains
+a server limit and stops widening, but does not determine coverage by itself.
+Inverted or zero-duration intervals remain interval failures and are never
+reclassified as partial coverage.
+
+A discovery cursor belongs to one exact query. Continuation passes only
+`timeWindow: { start: effectiveTimeWindow.start, end:
+effectiveTimeWindow.end }`; making an omitted default explicit with those same
+bounds is canonicalization, not a material change. The cursor is discarded
+whenever those bounds, the locator, or another query constraint changes.
+Close-match retries accept exactly one own `routeLike`, `url`, or `procedure`
+key with a nonempty string value and no extra arguments from
+`closeMatches[].suggestedCall`, then preserve the exact valid returned bounds.
+A wider search uses only a structured
+`find_trace_candidates` recovery action whose valid `timeWindow` strictly
+contains the effective interval. The agent does not widen an already
+retention-bounded interval and stops if a retry fails to expand effective
+coverage. Free-form action labels are explanatory, not a source of arguments or
+instructions.
+Candidate `suggestedFollowups` remain reserved for trace drill-down. The agent
+treats `effectiveTimeWindow` as an audit of what the server searched, not as a
+widening instruction. An inverted returned interval (`start > end`) stops
+window-derived recovery and is reported as a server defect rather than absence
+evidence; a zero-duration interval is likewise inconclusive.
+
+Existing projects receive this guidance only after the managed block is
+refreshed. After updating `@glasstrace/sdk`, run the app-local
+`glasstrace upgrade-instructions` command described below; updating the package
+alone does not rewrite project instruction files.
 
 ### Migration from legacy filenames
 

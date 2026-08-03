@@ -28,6 +28,77 @@ function makeAgent(
   };
 }
 
+function expectSafeDiscoveryWindowGuidance(info: string): void {
+  expect(info).toContain("omit `timeWindow` on the first search");
+  expect(info).toContain("bounded current window from its own clock");
+  expect(info).toContain("Do not invent epoch milliseconds");
+  expect(info).toContain("A current-window candidate does not satisfy");
+  expect(info).toContain("integer arithmetic from the returned `serverNow`");
+  expect(info).toContain("user's timezone and deterministic date tooling");
+  expect(info).toContain("If the response does not include it, do not calculate");
+  expect(info).toContain("derived from `serverNow`");
+  expect(info).toContain("nonnegative integer epoch milliseconds");
+  expect(info).toContain("When `find_trace_candidates` returns");
+  expect(info).toContain("`diagnostic.recoveryActions[]`");
+  expect(info).toContain("whose `tool` is `find_trace_candidates`");
+  expect(info).toContain("a `cursor` belongs to one exact query");
+  expect(info).toContain(
+    "`timeWindow: { start: effectiveTimeWindow.start, end: effectiveTimeWindow.end }`",
+  );
+  expect(info).toContain("not a material window change");
+  expect(info).toContain("If that valid window is absent, do not continue by cursor");
+  expect(info).toContain("starts a fresh search without `cursor`");
+  expect(info).toContain(
+    "prefer `closeMatches[].suggestedCall` over a recovery-action label",
+  );
+  expect(info).toContain("Accept it only when `tool` is `find_trace_candidates`");
+  expect(info).toContain("exactly one own key from");
+  expect(info).toContain("whose value is a nonempty string");
+  expect(info).toContain("and no other keys");
+  expect(info).toContain("Clear all three prior locator fields");
+  expect(info).toContain("whether the original window was explicit or server-defaulted");
+  expect(info).toContain("whose `suggestedParams` contains only");
+  expect(info).toContain("strictly contains the returned effective interval");
+  expect(info).toContain("at least one bound strict");
+  expect(info).toContain("replace only `timeWindow`");
+  expect(info).toContain("do not widen an interval already marked");
+  expect(info).toContain("require the new valid effective interval");
+  expect(info).toContain("stop widening and report the retention limit");
+  expect(info).toContain("Treat `label` as explanatory text only");
+  expect(info).toContain("stop rather than guess");
+  expect(info).toContain(
+    "`suggestedFollowups` are drill-down arguments, not search-widening instructions",
+  );
+  expect(info).toContain(
+    "server-authoritative searched bounds and `serverNow`",
+  );
+  expect(info).toContain("it is not itself a widening instruction");
+  expect(info).toContain("If `start > end`");
+  expect(info).toContain("stop window-derived `recoveryActions`");
+  expect(info).toContain("one separate current-scope search without `timeWindow`");
+  expect(info).toContain("not a retry of the invalid interval");
+  expect(info).toContain("if `start === end`, it searched zero duration");
+  expect(info).toContain("do not classify the result as absence or partial coverage");
+  expect(info).toContain("Only when effective `start < end`");
+  expect(info).toContain("`retentionBounded: true`");
+  expect(info).toContain("it has full temporal coverage");
+  expect(info).toContain("overlap for positive duration");
+  expect(info).toContain("partial historical coverage");
+  expect(info).toContain("including boundary-only contact");
+  expect(info).toContain("report no coverage of the requested period");
+  expect(info).toContain("cannot establish absence during uncovered requested time");
+  expect(info).toContain("does not by itself determine coverage");
+  expect(info).not.toContain(
+    "`retentionBounded: true` or effective bounds that do not cover an explicit request mean partial historical coverage",
+  );
+  expect(info).toContain("not a locator retry or historical continuation");
+  expect(info).not.toContain("copy its `suggestedParams`");
+  expect(info).not.toContain("Read its label");
+  expect(info).not.toContain("rough time window");
+  expect(info).not.toContain("tight time window");
+  expect(info).not.toContain("open window");
+}
+
 describe("generateMcpConfig", () => {
   describe("input validation", () => {
     it("throws when endpoint is empty", () => {
@@ -519,15 +590,22 @@ describe("generateInfoSection", () => {
             workflowIdx,
           );
           expect(stepOneIdx).toBeGreaterThan(-1);
-          // All three first-call branches present and named.
-          const stepOneSlice = info.slice(stepOneIdx, stepOneIdx + 1500);
+          const stepTwoIdx = info.indexOf(
+            "2. After `find_trace_candidates`",
+            stepOneIdx,
+          );
+          expect(stepTwoIdx).toBeGreaterThan(stepOneIdx);
+          // All three first-call branches and their safe-window contract
+          // are present before the drill-down step begins.
+          const stepOneSlice = info.slice(stepOneIdx, stepTwoIdx);
           expect(stepOneSlice).toContain("Active failure");
           expect(stepOneSlice).toContain("`get_latest_error`");
           expect(stepOneSlice).toContain("Known route or procedure");
           expect(stepOneSlice).toContain("`find_trace_candidates`");
-          expect(stepOneSlice).toContain("tight time window");
+          expect(stepOneSlice).toContain("omit `timeWindow` on the first search");
           expect(stepOneSlice).toContain("Historical exploration");
-          expect(stepOneSlice).toContain("open window");
+          expect(stepOneSlice).toContain("server-defaulted bounded search");
+          expectSafeDiscoveryWindowGuidance(info);
         });
 
         it("preserves the SDK-050 cost-aware framing alongside the decision-tree §1", () => {
@@ -814,6 +892,9 @@ describe("generateInfoSection", () => {
           );
           // The param-object form (not just naming the `procedure` filter).
           expect(info).toMatch(/find_trace_candidates\(\{ procedure:/);
+          expect(info).toMatch(/Changing the locator starts a fresh search without `cursor`/);
+          expect(info).toMatch(/preserve the exact valid returned effective `start` \/ `end` bounds/);
+          expect(info).toMatch(/not a locator retry or historical continuation/);
           expect(info).toMatch(/preferred over a vague route fragment/);
           expect(info).toMatch(/compare the candidate's `route` pattern against the URL/);
         });
@@ -932,6 +1013,7 @@ describe("generateInfoSection", () => {
   describe("Cursor direct render helpers", () => {
     it("renders the trace-evidence edit-boundary guidance into Cursor .mdc output", () => {
       const info = generateInfoSectionForCursorMdc(ENDPOINT, SDK_VERSION);
+      expectSafeDiscoveryWindowGuidance(info);
       expect(info).toContain("alwaysApply: true");
       expect(info).toContain(`<!-- glasstrace:mcp:start v=${SDK_VERSION} -->`);
       expect(info).toContain("After `find_trace_candidates`");
@@ -945,6 +1027,7 @@ describe("generateInfoSection", () => {
 
     it("renders the trace-evidence edit-boundary guidance into legacy .cursorrules output", () => {
       const info = generateInfoSectionForCursorrulesLegacy(ENDPOINT, SDK_VERSION);
+      expectSafeDiscoveryWindowGuidance(info);
       expect(info).toContain(`# glasstrace:mcp:start v=${SDK_VERSION}`);
       expect(info).toContain("After `find_trace_candidates`");
       expect(info).toContain("Candidate rows can locate the right trace without including every decisive semantic field");
