@@ -1,7 +1,8 @@
 # Wave Planning Core
 
-This is the shared base template for multi-agent or wave-based execution.
-Use it for both `glasstrace-product` and `glasstrace-sdk`.
+This repository copy applies the shared wave-planning principles to
+`glasstrace-sdk`. Product keeps its own copy and workflow; Product process
+rules do not apply in this repository.
 
 ## Layering Model
 
@@ -9,7 +10,7 @@ Use it for both `glasstrace-product` and `glasstrace-sdk`.
 2. If `review_class = brand-sensitive` or the brief makes architectural,
    infrastructure, contract, or user-flow claims, add
    `docs/agent-reference/high-integrity-briefing.md`.
-3. If `workstream = sdk`, add the SDK-only public-repo overlay.
+3. Add the SDK-only public-repo overlay.
 
 ## Planning Phase
 
@@ -25,9 +26,30 @@ Use it for both `glasstrace-product` and `glasstrace-sdk`.
 7. For each item that depends on live behavior, define the evidence plan and
    abort threshold before execution begins.
 8. Keep every `TEST-NNN` item off the dependency critical path. A TEST item
-   may run at any time, reports unavailable modes as `SKIP`, and never grants
-   authority to or blocks another wave item. Put real compatibility ordering
-   on the implementing components.
+   may run at any time, reports an available execution as `PASS` or `FAIL`
+   and an unavailable mode as `SKIP`, and never grants authority to or blocks
+   another wave item. Put real compatibility ordering on the implementing
+   components.
+
+## Per-Item Evidence Plan
+
+Before launching a wave item that depends on runtime behavior, external
+targets, or review-sensitive factual claims, write down the evidence contract:
+
+```text
+Item:
+Owner:
+Target / Env:
+Commands of Record:
+Primary Proof:
+Negative Proof:
+Artifact / Evidence File:
+Fallback Deliverable:
+Abort Threshold:
+```
+
+Every filled row should make it obvious what counts as success, what will be
+captured, and when the owner should stop instead of guessing.
 
 ## Wave Design Pattern
 
@@ -39,9 +61,7 @@ Use it for both `glasstrace-product` and `glasstrace-sdk`.
   briefs, resolve conflicts, and re-order remaining work.
 - TEST work may run before, during, or after any wave. Its results are
   evidence and do not form a wave checkpoint or release/activation gate.
-- Reconcile SDK documentation through this repository's normal workflow;
-  Product maintenance prompts, status-flip rules, and process checkpoints do
-  not apply here.
+- Reconcile SDK documentation through this repository's normal workflow.
 
 ## File Conflict Analysis
 
@@ -50,12 +70,12 @@ Before assigning work, write down the file zones and owners:
 ```text
 | File Zone | Touched By |
 |-----------|------------|
-| shared contracts / schema | |
-| routes / handlers | |
-| package-specific modules | |
-| docs/task-briefs/ | |
-| docs/discoveries/ | |
-| release metadata / package manifests | |
+| `packages/protocol/src/` + `tests/unit/protocol/` | |
+| `packages/sdk/src/` + `tests/unit/sdk/` | |
+| package barrels / public exports / package READMEs | |
+| root and workspace manifests / lockfile / `.changeset/` | |
+| `.github/workflows/` / build and release configuration | |
+| explicit cross-repo artifacts in `../glasstrace-product/` | |
 ```
 
 If two items materially overlap, they do not belong in the same wave.
@@ -97,8 +117,9 @@ considered ready:
 2. Run `100` adversarial review passes as structured coverage, not filler.
    Revisit the diff through multiple lenses until every file, claim,
    interface, test, and user-facing change has been examined repeatedly.
-3. Classify real findings for ODC/quality-scorecard tracking.
-4. Fix valid findings and file discoveries for the important non-fixes.
+3. Classify real findings for the SDK PR or handoff's ODC summary.
+4. Fix valid findings and record important non-fixes in an SDK-owned tracked
+   surface, or in the owning repository when the finding is cross-repo.
 5. Request Codex review and wait for it before marking ready.
 6. Address every valid review comment.
 7. Do not leave the branch as a pile of review-fixup commits. Amend or
@@ -127,8 +148,8 @@ comments.
 During each wave, the conductor keeps a running tally:
 
 ```text
-| Source | Total | Valid | FP | Fixed | Filed DISC | P0 | P1 | P2 | P3 |
-|--------|-------|-------|----|-------|------------|----|----|----|----|
+| Source | Total | Valid | FP | Fixed | Routed non-fix | P0 | P1 | P2 | P3 |
+|--------|-------|-------|----|-------|----------------|----|----|----|----|
 | Agent / PR | | | | | | | | | |
 | Codex | | | | | | | | | |
 | Total | | | | | | | | | |
@@ -139,7 +160,7 @@ At wave completion, summarize:
 1. total findings and validity breakdown
 2. ODC distribution
 3. severity distribution
-4. action breakdown: fixed, filed, discarded
+4. action breakdown: fixed, recorded/routed with destination, discarded
 5. provenance: which agents and which PRs
 
 ## Batch PR Guidance

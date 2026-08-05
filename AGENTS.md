@@ -10,7 +10,7 @@ This file is the shared cross-tool policy layer for the
   `@glasstrace/sdk` and `@glasstrace/protocol`.
 - Related workspaces:
   - `../glasstrace-product` for product/backend consumers, discoveries,
-    scorecard tracking, and internal process docs
+    and internal planning context
   - `../glasstrace-validation` for third-party verification and dogfood
     validation
 
@@ -26,8 +26,9 @@ This file is the shared cross-tool policy layer for the
 5. `docs/agent-reference/sdk-public-overlay.md` for SDK-only public-repo
    wave rules
 6. `../glasstrace-product/docs/discoveries/INDEX.md` and
-   `../glasstrace-product/docs/project-state.md` when SDK work depends on
-   product-side status or findings
+   `../glasstrace-product/docs/project-state.md` as navigation/context when SDK
+   work depends on Product findings; verify source briefs and current repository
+   state because Product-generated snapshots do not govern SDK readiness
 
 ## Routing Model
 
@@ -88,9 +89,13 @@ merged change becomes part of the public package history.
 - Write to `../glasstrace-product` only via an isolated worktree or other
   explicit isolated flow; do not treat the product working tree as a safe
   write target.
-- Contract changes between SDK/protocol and backend follow the canary
-  workflow: update here, publish canary, test in product, then publish
-  stable.
+- Contract changes between SDK/protocol and backend must prove compatibility
+  with the deployed counterpart for every inbound or otherwise immediately
+  active boundary, or preserve an explicitly backward-compatible/default-off
+  path until that counterpart is compatible. A canary may supply that proof.
+  This repository's release change owns canary/stable acceptance and
+  publication; no Product process checkpoint, `TEST-NNN` task, report, or
+  status is a prerequisite.
 
 ## Validation Workspace
 

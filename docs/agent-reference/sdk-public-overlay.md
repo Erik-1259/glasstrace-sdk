@@ -37,13 +37,14 @@ The additional `400` passes should stress:
 - CJS/ESM or package-resolution behavior where relevant
 - build/package output, tree-shaking, and dependency hygiene
 
-## Discovery Filing
+## Finding Routing
 
 - Important non-fix findings still belong in tracked product or SDK
-  artifacts, not just PR comments.
+  artifacts or in the SDK PR/handoff, not only transient review notes.
 - When SDK work needs a discovery in `glasstrace-product`, use an isolated
   worktree or equivalent isolated flow rather than writing into the main
   product working tree directly.
+- Product discovery or maintenance write-back is not an SDK readiness gate.
 
 ## Release-Mechanics Verification
 
