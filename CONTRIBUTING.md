@@ -103,10 +103,16 @@ The documented order:
 6. Trigger `release.yml` `workflow_dispatch` with `mode: stable`. The
    stable publishes from the bumped state.
 
-Stable-direct (skipping canary) is supported by the workflow but loses
-the pre-stable validation gate. The recommended path is canary →
-validate → stable, in that order, with the Version Packages PR merged
-between steps 4 and 5.
+Stable-direct (skipping canary) is supported by the workflow but loses evidence
+from an npm-published canary. It does not remove pre-stable verification: pack
+and install the exact release candidate before stable dispatch as described
+below. If the change consumes an inbound wire contract or is otherwise active
+immediately, also exercise that candidate against the deployed counterpart or
+retain an explicitly backward-compatible/default-off path until compatibility
+is established. The recommended path is canary → validate → stable, in that
+order, with the Version Packages PR merged between steps 4 and 5. The
+compatibility check belongs to the release change; no separate `TEST-NNN`
+package, report, or status authorizes stable publication.
 
 ## Modifying Dependencies
 
@@ -319,6 +325,12 @@ project the same way npm will install it: from a packed tarball, never
 through `npm link` or a path-based `file:` dependency. Linked workspaces
 share a single `node_modules`, which hides peer-resolution bugs and
 duplicate-dependency hazards that a real install would expose.
+
+For an inbound or otherwise immediately active cross-repository wire change,
+the consumer check must exercise the currently deployed counterpart as well as
+the installed artifact. A local build alone cannot prove that boundary. The
+alternative is an explicitly backward-compatible/default-off path that cannot
+observe the new behavior until the counterpart is compatible.
 
 The recommended workflow uses `npm pack` and a sibling consumer project:
 

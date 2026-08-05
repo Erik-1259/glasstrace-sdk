@@ -52,7 +52,8 @@ For claim-heavy briefs, explicitly verify the relevant classes:
 If the reconnaissance artifact refutes part of the proposed brief:
 
 1. narrow the brief's scope
-2. file a discovery for the architectural mismatch
+2. record the architectural mismatch in a tracked surface owned by the
+   affected repository
 3. escalate if the wave premise is wrong
 
 Never leave a refuted claim in place with "best-effort" wording.

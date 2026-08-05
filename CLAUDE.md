@@ -22,8 +22,7 @@ duplicating it here.
 
 ## Quality Standard: Every Commit Is a Brand Statement
 
-This repo has a **higher commit quality bar** than the private
-glasstrace-product repo:
+This public repository uses a **strict commit quality bar**:
 
 - **No iteration commits.** Work in worktrees or local branches. Only the
   final, polished state gets pushed. Squash merge all PRs.
@@ -93,7 +92,7 @@ glasstrace-sdk/
 - Test: `npm run test` (or `vitest run`)
 - Build: `npm run build` (or `turbo run build`)
 - Lint: `npm run lint` (or `eslint .`)
-- All must pass before pushing: `npm run typecheck && npm run test && npm run build && npm run lint`
+- Run each command separately. All four must pass before pushing.
 
 ## Dependency & Tooling Practices
 
@@ -140,8 +139,7 @@ glasstrace-sdk/
 ## Post-PR Process (MANDATORY)
 
 Every PR must complete this full process before being marked ready.
-This repo has a **stricter process** than glasstrace-product because
-every merged PR becomes a public commit.
+Every merged PR becomes a public commit.
 
 ### Step 1: Pre-Push Quality Gate
 
@@ -158,8 +156,7 @@ broken, fix it or don't push.
 
 ### Step 2: Adversarial Self-Review — 500 rounds
 
-Significantly more thorough than glasstrace-product's 30 rounds because
-this is a public repo and every commit is a brand statement.
+This is a public repo and every commit is a brand statement.
 
 There are 50 unique review angles organized in 7 categories below.
 Perform 500 total review passes — approximately 10 passes per angle,
@@ -249,8 +246,8 @@ edge case examined from multiple perspectives.
 - Every comment must be addressed — no skipping
 - Valid fixes: amend the commit (not a new fixup commit), force-push
   with lease if needed
-- Valid but out of scope: file a discovery in glasstrace-product
-  (see "Filing Discoveries" below)
+- Valid but out of scope: record it clearly and route it to the repository
+  that owns the issue. A Product discovery is not an SDK closeout prerequisite.
 
 ### Step 6: Resolve Threads and Verify CI
 
@@ -272,155 +269,39 @@ and context. Reading does not cause conflicts — only writing does.
 
 | When | Read |
 |---|---|
-| Planning SDK work | `../glasstrace-product/docs/discoveries/INDEX.md` — scan for OPEN and ACCEPTED discoveries with `Affects: glasstrace-sdk` or SDK-related keywords (DISC-347, DISC-377, etc.). OPEN = not yet triaged. ACCEPTED = reviewed and approved for action. Both are actionable. |
+| Planning SDK work | Use `../glasstrace-product/docs/discoveries/INDEX.md` only to locate source discoveries that explicitly affect the SDK, then read the source file and latest merged decision. Generated index status is context, not SDK execution authority. |
 | Understanding schemas | `../glasstrace-product/shared/types/*.ts` — the Zod schemas that define the wire contract |
-| Checking project state | `../glasstrace-product/docs/project-state.md` — SDK section shows what's merged, what's pending |
+| Checking project state | `../glasstrace-product/docs/project-state.md` is a Product-maintained snapshot; verify dependency and merge facts against current source/repository state. |
 | Design decisions | `../glasstrace-product/docs/component-designs/sdk.md` — the SDK component design |
 | Cross-references | `../glasstrace-product/docs/component-designs/CROSS-REFERENCES.md` — how SDK interfaces with ingestion, MCP, extension |
-| Quality data | `../glasstrace-product/docs/quality-scorecard.md` — current ODC/Rayleigh state, trend indicators |
 | Task briefs | `../glasstrace-product/docs/task-briefs/*.md` — any SDK-related task briefs |
 
 **When NOT to read:**
 - During adversarial reviews (use methodology embedded in this CLAUDE.md)
-- For discovery file templates (use templates embedded in this CLAUDE.md)
+- For Product discovery workflow or templates (use the Product repository's
+  current instructions only when a cross-repo finding actually needs filing)
 - For ODC classification (use mapping embedded in this CLAUDE.md)
 
-**Rule: READ freely, WRITE only via sub-agent worktree** (see Filing
-Discoveries below).
+**Rule:** Read Product freely. Write only through an isolated worktree or other
+explicit isolated flow, and follow the Product repository's current rules.
 
-## Filing Discoveries (write via sub-agent)
+## Cross-Repo Findings
 
-This repo does NOT have its own discovery system. All discoveries are
-tracked in the private `glasstrace-product` repo at
-`../glasstrace-product/docs/discoveries/`.
+Keep SDK-local findings in the SDK PR or another SDK-owned tracked surface. If
+a material finding belongs to Product and needs durable Product tracking, use
+the isolated cross-repo flow in `AGENTS.md` and the Product repository's current
+instructions. Do not copy Product discovery templates, ID allocation, PR
+commands, maintenance steps, or status rules into this public repository.
 
-When you find an issue that needs tracking, spawn a sub-agent with
-these instructions. The SDK session does NOT read or write to
-glasstrace-product directly — the sub-agent handles everything using
-a git worktree to avoid interfering with any active work.
-
-**Sub-agent prompt template:**
-
-> You are filing a discovery in the glasstrace-product repo located at
-> `/Users/erik/SoftwareDevelopment/glasstrace-product`.
->
-> IMPORTANT: Do NOT checkout or modify the main working tree — another
-> session may be using it. Use a git worktree instead.
->
-> Steps:
-> 1. Fetch latest main:
->    `git -C /Users/erik/SoftwareDevelopment/glasstrace-product fetch origin main`
-> 2. Find the highest DISC-NNN ID:
->    `ls /Users/erik/SoftwareDevelopment/glasstrace-product/docs/discoveries/ | grep DISC- | sort -t- -k2 -n | tail -1`
-> 3. Determine next ID (highest + 1)
-> 4. Create a worktree for the discovery branch:
->    `git -C /Users/erik/SoftwareDevelopment/glasstrace-product worktree add /tmp/disc-{next ID} -b disc/DISC-{next ID} origin/main`
-> 5. Write the discovery file at `/tmp/disc-{next ID}/docs/discoveries/DISC-{next ID}.md`
->    using the template provided below
-> 6. Include `**Found by:** SDK session` and `**Affects:** glasstrace-sdk`
-> 7. Commit from the worktree:
->    `git -C /tmp/disc-{next ID} add docs/discoveries/DISC-{next ID}.md`
->    `git -C /tmp/disc-{next ID} commit -m "docs: file DISC-{next ID} from SDK session"`
-> 8. Push:
->    `git -C /tmp/disc-{next ID} push -u origin disc/DISC-{next ID}`
-> 9. Create PR:
->    `gh pr create --repo Erik-1259/glasstrace --head disc/DISC-{next ID} --draft --title "docs: DISC-{next ID} — {short title}" --body "{summary}"`
-> 10. Clean up worktree:
->     `git -C /Users/erik/SoftwareDevelopment/glasstrace-product worktree remove /tmp/disc-{next ID}`
-> 11. Report back the DISC ID and PR number
->
-> Discovery content: {paste the finding details here}
-
-**Why this design works:**
-
-- **Worktree instead of checkout** — glasstrace-product's working tree
-  may have uncommitted changes or be on a feature branch from an active
-  session. `git worktree add` creates a completely isolated copy from
-  `origin/main` without touching the working tree at all.
-- **`origin/main` instead of local main** — local main might be behind
-  remote. Fetching then branching from `origin/main` ensures the
-  discovery is based on the latest merged state.
-- **`--repo` flag on `gh pr create`** — the sub-agent runs from `/tmp`,
-  not inside glasstrace-product, so `gh` can't auto-detect the repo.
-- **Worktree cleanup** — stale worktrees cause Vitest to pick up old
-  test files. Always remove after push.
-- **Verified 2026-04-04** — full sequence tested end-to-end including
-  with dirty working tree and dry-run PR creation.
-
-### Discovery File Template
-
-Use either format. The sub-agent writes this file in glasstrace-product.
-
-**Format A (bullet list):**
-
-```markdown
-# Discovery: DISC-NNN
-
-- **Date:** YYYY-MM-DD
-- **Found by:** SDK session
-- **Category:** [see category list below]
-- **Summary:** One paragraph describing the finding.
-- **Impact:** What parts of the system are affected.
-- **Suggested resolution:** How to fix it.
-- **Affected types:** List of affected types, or None.
-- **Affects:** glasstrace-sdk
-- **Status:** OPEN
-```
-
-**Format B (extended):**
-
-```markdown
-<!-- version: 1 -->
-# DISC-NNN: Short descriptive title
-
-**Date:** YYYY-MM-DD
-**Status:** OPEN
-**Priority:** P0 | P1 | P2 | P3
-**Category:** [see category list below]
-**Source:** SDK session
-**Affects:** glasstrace-sdk
-
-## Summary
-
-[Description of the finding.]
-
-## Suggested Resolution
-
-[How to fix it.]
-```
-
-### Discovery Categories
-
-| Category | Description |
-|---|---|
-| `spec_correction` | Spec says X but actual behavior is Y |
-| `spec_accuracy` | Product spec contains an inaccuracy |
-| `implementation_constraint` | Technical limitation blocks an approach |
-| `dependency_surprise` | Library doesn't work as assumed |
-| `performance_observation` | Slower/larger/more expensive than expected |
-| `design_correction` | Design says X but implementation requires Y |
-| `design_gap` | Required capability the design omitted |
-| `version_mismatch` | Document versions have drifted |
-| `bug` | Existing code has a defect |
-| `security` | Vulnerability, exposure, or insufficient hardening |
-| `implementation_gap` | Required behavior not yet implemented |
-| `schema_gap` | Missing type, field, or constraint |
-| `documentation_gap` | Missing or incomplete documentation |
-| `code_quality` | Works but has maintainability/readability issues |
-| `test_quality` | Tests have gaps, flakiness, or weak coverage |
-| `test_coverage` | Insufficient test coverage for a module |
-| `enhancement` | Improvement beyond current requirements |
-| `timing_bug` | Race condition, ordering, or time-dependent defect |
-
----
+Creating or merging a Product discovery is never an SDK implementation, merge,
+publication, or release prerequisite. A real contract incompatibility may still
+block the implementing SDK change on its technical merits.
 
 ## Quality Monitoring (ODC + Rayleigh)
 
-Quality metrics for both this repo and glasstrace-product are tracked in
-a unified scorecard at `../glasstrace-product/docs/quality-scorecard.md`.
-SDK sessions contribute data points to the same Rayleigh curve. This
-section contains the full methodology so you can classify findings
-without reading cross-repo files.
+SDK review sessions use the self-contained methodology below. Product may
+aggregate a copy under its own maintenance workflow, but that write-back does
+not govern SDK readiness.
 
 ### ODC Defect Type Mapping
 
@@ -484,8 +365,7 @@ was **found**. Escape rate = found in a later phase than introduced.
 
 ### Session Summary Format
 
-After each review session or wave, compile this data for the
-glasstrace-product maintenance agent to add to the quality scorecard:
+After each review session or wave, compile this data in the SDK PR or handoff:
 
 ```markdown
 **SDK Session: YYYY-MM-DD**
@@ -493,23 +373,23 @@ glasstrace-product maintenance agent to add to the quality scorecard:
 - Scope: [what was reviewed]
 - Total findings: N
 - Valid: N | False positive: N | FP rate: N%
-- Fixed: N | Filed as DISC: N (list IDs)
+- Fixed: N | Recorded non-fix: N (list SDK PR/handoff destinations or Product
+  DISC IDs when Product owns the finding)
 - P0: N | P1: N | P2: N | P3: N
 - ODC distribution: Function: N, Assignment: N, Checking: N, Interface: N,
   Timing: N, Build/Package: N, Algorithm: N, Documentation: N
 - Provenance: [which agents, which PRs]
 ```
 
-This summary is included in the discovery PR to glasstrace-product so
-the maintenance agent can ingest it into the scorecard.
+No Product discovery PR or maintenance update is required for SDK closeout.
 
 ### Rayleigh Model Context
 
 The Rayleigh model predicts total defects and time to peak discovery
-rate: `f(t) = (N/σ²) × t × e^(-t²/2σ²)`. Requires 5+ data points
-(sessions) to fit. Each SDK session adds one data point to the shared
-curve. Zero Bug Bounce = open defect count reaches 0 and stays at 0
-for ≥2 consecutive sessions.
+rate: `f(t) = (N/σ²) × t × e^(-t²/2σ²)`. It requires 5+ comparable sessions
+to fit. Cross-repo aggregation is optional Product-owned analysis, not an SDK
+process checkpoint. Zero Bug Bounce = open defect count reaches 0 and stays at
+0 for ≥2 consecutive sessions.
 
 ### What Counts as a Finding
 
@@ -532,9 +412,9 @@ This public repo and the private `glasstrace-product` repo are related:
 - **glasstrace-product consumes `@glasstrace/protocol` from npm** for
   SDK-facing types used by the backend (e.g., `SdkInitResponse` in
   ingestion)
-- **Contract changes** (wire format between SDK and backend) start here,
-  get published as a canary, tested in glasstrace-product, then published
-  stable
+- **Contract changes** (wire format between SDK and backend) start here and
+  may publish a canary for consumer evidence; the SDK release change owns the
+  stable-publication decision
 - **SDK-only changes** are done entirely in this repo
 - **Backend-only changes** are done entirely in glasstrace-product
 
@@ -542,16 +422,34 @@ This public repo and the private `glasstrace-product` repo are related:
 
 1. Update `@glasstrace/protocol` in this repo
 2. Run `npx changeset` to describe the change
-3. Publish a canary release via workflow_dispatch
-4. In glasstrace-product: `npm install @glasstrace/protocol@canary`
-5. Run glasstrace-product integration tests
-6. If green: publish stable from this repo, update glasstrace-product
-   to stable version
+3. Choose the release path described in `CONTRIBUTING.md`:
+   - for canary-assisted release, publish a canary via workflow_dispatch,
+     complete this repository's acceptance against it, and let a consumer
+     install it when that is the chosen compatibility proof;
+   - for stable-direct release, pack the exact release candidate and complete
+     this repository's unit, packaging, public-contract, and required real-
+     consumer installation checks without inventing a canary or `TEST-NNN`
+     prerequisite. For either path, an inbound or otherwise immediately active
+     contract change must also be exercised against the deployed counterpart,
+     or retain an explicitly backward-compatible/default-off path until the
+     counterpart is compatible.
+4. The SDK release owner decides stable publication from the release change's
+   acceptance; consumers update to stable on their own schedule
+
+Deployed-counterpart compatibility is mandatory where a contract is inbound or
+immediately active, but its proof is owned by the SDK release change: no Product
+process checkpoint, `TEST-NNN` task, report, or status is the authority. An
+outbound producer still remains inactive where runtime correctness requires a
+compatible receiver; that is component-owned activation ordering. The packed-
+candidate real-consumer check in `CONTRIBUTING.md` remains mandatory and is
+owned by the SDK release change, not by a Product workflow or TEST task.
 
 ## Constraints
 
-- Never commit secrets, credentials, or internal process docs
-- Never reference glasstrace-product's internal docs in public commits
+- Never commit secrets or credentials.
+- Never copy glasstrace-product's internal process content into published
+  package code, READMEs, API docs, comments, or release metadata. This
+  repository-local agent file may name sibling paths only as workflow context.
 - All public-facing text (README, CONTRIBUTING, comments) should be
   professional and brand-appropriate
 - When in doubt about whether something should be public, err on the

@@ -37,13 +37,14 @@ The additional `400` passes should stress:
 - CJS/ESM or package-resolution behavior where relevant
 - build/package output, tree-shaking, and dependency hygiene
 
-## Discovery Filing
+## Finding Routing
 
 - Important non-fix findings still belong in tracked product or SDK
-  artifacts, not just PR comments.
+  artifacts or in the SDK PR/handoff, not only transient review notes.
 - When SDK work needs a discovery in `glasstrace-product`, use an isolated
   worktree or equivalent isolated flow rather than writing into the main
   product working tree directly.
+- Product discovery or maintenance write-back is not an SDK readiness gate.
 
 ## Release-Mechanics Verification
 
@@ -73,3 +74,7 @@ Before final ready, also confirm:
 - the changeset matches the intended release semantics (verified per
   "Release-Mechanics Verification" above, not assumed)
 - the package/build output matches the claimed behavior
+
+These implementation and package checks remain owned by the SDK change. A
+separate `TEST-NNN` report may supplement them at any time but never grants or
+withholds merge, publication, release, deployment, or activation authority.

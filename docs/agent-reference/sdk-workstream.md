@@ -55,9 +55,22 @@ document reflects the Glasstrace brand.
 
 ## Release and Contract Rules
 
-- Contract changes between SDK/protocol and product backend follow the
-  canary workflow: update here, publish canary, install in
-  `../glasstrace-product`, run tests there, then publish stable.
+- Contract changes between SDK/protocol and the Product backend may publish a
+  canary for consumer evidence. The implementing SDK release change owns its
+  acceptance and stable-publication decision; a Product process checkpoint or
+  `TEST-NNN` status is not the authority.
+- For an inbound or otherwise immediately active contract, that release change
+  must prove compatibility with the deployed counterpart or preserve an
+  explicitly backward-compatible/default-off path until the counterpart is
+  compatible. Product-owned evidence may supplement the proof, but the
+  compatibility requirement itself is not optional.
+- Stable-direct release still requires the SDK-owned packed-candidate
+  real-consumer installation check in `CONTRIBUTING.md`; removing Product or
+  TEST authority does not waive artifact-level release acceptance.
+- Any producer behavior that can emit a new wire shape must remain inactive
+  until a compatible receiver is deployed. Enforce that receiver-first order
+  through the implementing runtime's default-off capability contract; it is a
+  binding technical dependency, not authority granted by a TEST result.
 - `changeset` metadata should match the actual release intent; do not rely
   on misunderstood `linked` semantics to co-bump packages automatically.
 - For metadata-only `package.json` edits, be careful with lockfile drift
