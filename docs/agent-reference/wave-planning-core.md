@@ -22,6 +22,12 @@ Use it for both `glasstrace-product` and `glasstrace-sdk`.
 5. Sequence later waves on earlier-wave merges or accepted briefs.
 6. Pre-allocate IDs, branch ownership, or write zones when discoveries or
    shared docs are likely to collide.
+7. For each item that depends on live behavior, define the evidence plan and
+   abort threshold before execution begins.
+8. Keep every `TEST-NNN` item off the dependency critical path. A TEST item
+   may run at any time, reports unavailable modes as `SKIP`, and never grants
+   authority to or blocks another wave item. Put real compatibility ordering
+   on the implementing components.
 
 ## Wave Design Pattern
 
@@ -31,8 +37,11 @@ Use it for both `glasstrace-product` and `glasstrace-sdk`.
   when file zones overlap.
 - Human checkpoints happen between waves: merge PRs, approve or reject
   briefs, resolve conflicts, and re-order remaining work.
-- After each wave, run the maintenance/documentation pass before starting
-  the next one.
+- TEST work may run before, during, or after any wave. Its results are
+  evidence and do not form a wave checkpoint or release/activation gate.
+- Reconcile SDK documentation through this repository's normal workflow;
+  Product maintenance prompts, status-flip rules, and process checkpoints do
+  not apply here.
 
 ## File Conflict Analysis
 

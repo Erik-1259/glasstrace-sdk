@@ -73,3 +73,7 @@ Before final ready, also confirm:
 - the changeset matches the intended release semantics (verified per
   "Release-Mechanics Verification" above, not assumed)
 - the package/build output matches the claimed behavior
+
+These implementation and package checks remain owned by the SDK change. A
+separate `TEST-NNN` report may supplement them at any time but never grants or
+withholds merge, publication, release, deployment, or activation authority.

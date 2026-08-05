@@ -77,6 +77,10 @@ merged change becomes part of the public package history.
 - Adversarial review must explicitly check module boundaries: callback
   signatures, event payloads, public API returns, and cross-module data
   flow.
+- TEST work packages are independently runnable evidence sidecars. They use
+  `PASS`, `FAIL`, or `SKIP` for available/unavailable targets and never
+  authorize or block implementation, merge, publication, release,
+  deployment, or activation in another work package.
 
 ## Cross-Repo Rules
 
