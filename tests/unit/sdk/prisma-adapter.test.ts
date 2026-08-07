@@ -1953,6 +1953,52 @@ describe("Phase 1 aggregate-result capture (family 1 / family 2)", () => {
       expect(thrown).toBe(sentinel);
     });
 
+    it("a host attribute-count limit drops the marker before any scalar (fail-closed truncation)", async () => {
+      // Rebuild the harness provider with a tight span attribute limit.
+      // OTel silently drops attribute writes beyond the limit; because the
+      // adapter attaches the family marker LAST, a truncated bundle loses
+      // its marker — the receiver then strips the unmarked remainder
+      // instead of retaining a shape-valid partial family as complete.
+      await provider.shutdown();
+      otelApi.trace.disable();
+      exporter = new InMemorySpanExporter();
+      provider = new BasicTracerProvider({
+        spanProcessors: [new SimpleSpanProcessor(exporter)],
+        spanLimits: { attributeCountLimit: 3 },
+      });
+      otelApi.trace.setGlobalTracerProvider(provider);
+      tracer = otelApi.trace.getTracer("glasstrace-prisma-test");
+      grantAggregateScalars();
+
+      const aggregateAllow = Array.from({ length: 5 }, (_, i) =>
+        countFieldEntry(`field${i}`, `field${i}Amount`),
+      );
+      const countResult = Object.freeze(
+        Object.fromEntries(
+          Array.from({ length: 5 }, (_, i) => [`field${i}`, i + 1]),
+        ),
+      );
+      const { result, thrown } = await runOperation({
+        allow: [],
+        aggregateAllow,
+        model: "Order",
+        operation: "count",
+        query: async () => countResult,
+      });
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(countResult);
+      const owned = ownedSpanAttrs();
+      // The truncation genuinely happened: the earliest scalars survived
+      // the limit (so the bundle write ran), later ones were dropped, and
+      // the marker — written last — was dropped too. No receiver can
+      // retain this as a complete family.
+      expect(owned).toBeDefined();
+      expect(owned?.[scalarKey("field0Amount")]).toBe(1);
+      expect(owned?.[scalarKey("field4Amount")]).toBeUndefined();
+      expect(owned?.[FAMILY_KEY]).toBeUndefined();
+      expect(Object.keys(owned ?? {}).length).toBeLessThanOrEqual(3);
+    });
+
     it("keeps the host unaffected when attribute emission itself fails", async () => {
       grantAggregateScalars();
       // Spy on the live span prototype (shared by every span this
@@ -1965,16 +2011,23 @@ describe("Phase 1 aggregate-result capture (family 1 / family 2)", () => {
       probe.end();
       exporter.reset();
       const original = spanPrototype.setAttributes;
-      // Throw only for the family-bundle write; span construction and any
-      // other attribute write pass through, so only the adapter's one
-      // bundle call fails.
+      // Throw only for the scalar-bundle write; span construction and any
+      // other attribute write pass through, so only the adapter's bundle
+      // call fails — and the marker write that follows it in the same
+      // fence is skipped.
       const setAttributesSpy = vi
         .spyOn(spanPrototype, "setAttributes")
         .mockImplementation(function (
           this: unknown,
           attributes: Record<string, unknown>,
         ) {
-          if (attributes !== null && typeof attributes === "object" && FAMILY_KEY in attributes) {
+          const isScalarBundle =
+            attributes !== null &&
+            typeof attributes === "object" &&
+            Object.keys(attributes).some((key) =>
+              key.startsWith(SIDE_EFFECT_SCALAR_PREFIX),
+            );
+          if (isScalarBundle) {
             throw new Error("attribute sink failure");
           }
           return original.call(this as never, attributes);
