@@ -245,6 +245,11 @@ export const SIDE_EFFECT_SCALAR_KEY_PATTERN =
  * The emitted attribute is `${SIDE_EFFECT_SCALAR_PREFIX}${key}` carrying
  * a native `number` / `boolean` / `string` value (no stringify — the
  * product validator rejects numeric- and boolean-shaped strings).
+ *
+ * Result evidence additionally defines row-qualified keys on this
+ * channel — `${SIDE_EFFECT_SCALAR_PREFIX}r<n>.<baseKey>` — whose
+ * grammar lives in the result-evidence module alongside its builders
+ * and parsers.
  */
 export const SIDE_EFFECT_SCALAR_PREFIX = "glasstrace.side_effect.scalar.";
 

@@ -36,6 +36,7 @@ import { installContextManager } from "../../../packages/sdk/src/context-manager
 import type { SdkInitResponse } from "../../../packages/protocol/src/wire.js";
 import {
   GLASSTRACE_ATTRIBUTE_NAMES,
+  RESULT_EVIDENCE_ATTRIBUTE_PREFIX,
   SIDE_EFFECT_SCALAR_PREFIX,
 } from "../../../packages/protocol/src/index.js";
 
@@ -1162,5 +1163,114 @@ describe("prismaAdapter — id intent (full-fidelity pseudonymized capture)", ()
     expect(
       owned?.[GLASSTRACE_ATTRIBUTE_NAMES.SIDE_EFFECT_OMITTED_UNHASHED_ID],
     ).toBeUndefined();
+  });
+});
+
+describe("result-evidence wire-v1 inertness regression", () => {
+  // The result-evidence protocol ships ahead of any producer. These
+  // regressions prove the widened-result operations stay inert even
+  // when the server grants both result-evidence capabilities: no owned
+  // span, no `glasstrace.side_effect.result.v1.*` attribute, and no
+  // row-scalar (`scalar.r<n>.*`) attribute may appear anywhere.
+  function grantBothCapabilities(): void {
+    const granted = configWith(true);
+    granted.config.resultEvidenceCapabilities = {
+      wireVersion: 1,
+      aggregateScalars: true,
+      boundedRows: true,
+    };
+    _setCurrentConfig(granted);
+  }
+
+  function expectNoResultEvidenceAttributes(): void {
+    const attributeKeys = exporter
+      .getFinishedSpans()
+      .flatMap((span) => Object.keys(span.attributes ?? {}));
+    expect(
+      attributeKeys.filter((key) =>
+        key.startsWith(RESULT_EVIDENCE_ATTRIBUTE_PREFIX),
+      ),
+    ).toEqual([]);
+    // Family-1/2 evidence is flat scalars plus the marker, so the
+    // whole scalar channel must also stay silent — a partial flat
+    // emission would otherwise slip past a result.v1-only filter.
+    expect(
+      attributeKeys.filter((key) =>
+        key.startsWith(SIDE_EFFECT_SCALAR_PREFIX),
+      ),
+    ).toEqual([]);
+  }
+
+  it("count emits no result evidence with both capabilities granted", async () => {
+    grantBothCapabilities();
+    const countResult = Object.freeze({ _all: 7 });
+    const query = vi.fn(async () => countResult);
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "metric", as: "value" }],
+      model: "Order",
+      operation: "count",
+      query,
+    });
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(countResult);
+    expectNoOwnedSpan();
+    expectNoResultEvidenceAttributes();
+  });
+
+  it("aggregate emits no result evidence with both capabilities granted", async () => {
+    grantBothCapabilities();
+    const aggregateResult = Object.freeze({
+      _sum: Object.freeze({ total: 7 }),
+      _count: 1,
+    });
+    const query = vi.fn(async () => aggregateResult);
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "total", as: "amount" }],
+      model: "Order",
+      operation: "aggregate",
+      query,
+    });
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(aggregateResult);
+    expectNoOwnedSpan();
+    expectNoResultEvidenceAttributes();
+  });
+
+  it("findMany emits no result evidence with both capabilities granted", async () => {
+    grantBothCapabilities();
+    const rows = [{ muted: false }, { muted: true }];
+    const query = vi.fn(async () => rows);
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Poll", column: "muted" }],
+      model: "Poll",
+      operation: "findMany",
+      query,
+    });
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(rows);
+    expectNoOwnedSpan();
+    expectNoResultEvidenceAttributes();
+  });
+
+  it("groupBy emits no result evidence with both capabilities granted", async () => {
+    grantBothCapabilities();
+    const groupResult = Object.freeze([
+      Object.freeze({ status: "open", _count: 7 }),
+    ]);
+    const query = vi.fn(async () => groupResult);
+    const { result, thrown } = await runOperation({
+      allow: [{ model: "Order", column: "metric", as: "value" }],
+      model: "Order",
+      operation: "groupBy",
+      query,
+    });
+    expect(thrown).toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toBe(groupResult);
+    expectNoOwnedSpan();
+    expectNoResultEvidenceAttributes();
   });
 });

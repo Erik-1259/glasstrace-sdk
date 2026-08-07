@@ -3,6 +3,36 @@
  */
 
 import { z } from "zod";
+import { RESULT_EVIDENCE_WIRE_VERSION } from "./result-evidence.js";
+
+/**
+ * Server-derived result-evidence capability envelope (wire version 1).
+ *
+ * The envelope is closed: exactly `wireVersion: 1` plus one native
+ * boolean per capability, with no unknown members, no aliases, no
+ * coercion, and no partial form. The two booleans are independent —
+ * all four combinations are valid. `aggregateScalars` governs
+ * production of the flat result families (family `1` count and family
+ * `2` aggregate); `boundedRows` governs production of family `3`
+ * bounded-row evidence. The server owns this value end-to-end: it
+ * strips any owner-supplied value and injects a server-derived one, so
+ * the envelope is compatibility configuration, not proof of server or
+ * producer provenance.
+ */
+export const ResultEvidenceCapabilitiesSchema = z.strictObject({
+  wireVersion: z.literal(RESULT_EVIDENCE_WIRE_VERSION),
+  aggregateScalars: z.boolean(),
+  boundedRows: z.boolean(),
+});
+
+/**
+ * One valid result-evidence capability envelope.
+ *
+ * @see {@link ResultEvidenceCapabilitiesSchema}
+ */
+export type ResultEvidenceCapabilities = z.infer<
+  typeof ResultEvidenceCapabilitiesSchema
+>;
 
 /** SDK capture configuration: which events to capture. */
 export const CaptureConfigSchema = z.object({
@@ -50,6 +80,18 @@ export const CaptureConfigSchema = z.object({
    * not correlate across accounts.
    */
   attrHmacKey: z.string().optional(),
+  /**
+   * Server-injected result-evidence capability envelope (strict
+   * optional; no default). Absence means neither result-evidence
+   * capability is usable — there is no default that converts absence
+   * into presence — and an invalid or future-version envelope fails
+   * this schema rather than degrading. Directly parsing a config with
+   * a malformed envelope therefore rejects the whole value; softer
+   * end-to-end handling, where an otherwise valid response applies
+   * with both capabilities unavailable, belongs to the SDK's
+   * config-application layer, not to this schema.
+   */
+  resultEvidenceCapabilities: ResultEvidenceCapabilitiesSchema.optional(),
 });
 export type CaptureConfig = z.infer<typeof CaptureConfigSchema>;
 
