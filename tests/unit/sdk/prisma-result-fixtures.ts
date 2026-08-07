@@ -95,6 +95,21 @@ export function accessorKeyEntry(): PrismaAggregateCaptureEntry {
   return hostile as unknown as PrismaAggregateCaptureEntry;
 }
 
+/**
+ * An entry whose `key` member is an accessor with BOTH hooks undefined —
+ * still an accessor descriptor per the spec (no `value` field), even
+ * though reading it invokes nothing and yields `undefined`.
+ */
+export function undefinedHookAccessorKeyEntry(): PrismaAggregateCaptureEntry {
+  const entry = countAllEntry();
+  const hostile = { ...entry } as Record<string, unknown>;
+  Object.defineProperty(hostile, "key", {
+    enumerable: true,
+    get: undefined,
+  });
+  return hostile as unknown as PrismaAggregateCaptureEntry;
+}
+
 /** An entry that inherits `key` from its prototype (missing as own data). */
 export function inheritedKeyEntry(): PrismaAggregateCaptureEntry {
   const { key, ...rest } = countAllEntry();
@@ -128,6 +143,21 @@ export function revokedAllowlistProxy(): ReadonlyArray<PrismaAggregateCaptureEnt
   const { proxy, revoke } = Proxy.revocable([countAllEntry()], {});
   revoke();
   return proxy as unknown as ReadonlyArray<PrismaAggregateCaptureEntry>;
+}
+
+/**
+ * A proxy over a genuine array whose descriptor trap is hostile only for
+ * `length`; every other observation answers honestly. Discriminates the
+ * own-data `length` observation: a plain `.length` property get would
+ * forward to the target and succeed.
+ */
+export function lengthHostileArrayProxy<T>(entries: ReadonlyArray<T>): ReadonlyArray<T> {
+  return new Proxy(entries as T[], {
+    getOwnPropertyDescriptor: (target, property) => {
+      if (property === "length") throw new Error("hostile length");
+      return Object.getOwnPropertyDescriptor(target, property);
+    },
+  });
 }
 
 /** A result object whose named field is accessor-backed; the getter records calls. */

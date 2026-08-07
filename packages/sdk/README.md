@@ -1037,11 +1037,14 @@ not match its intent is dropped, never captured.
 
 Value capture is limited to the single-record-result operations `findUnique`,
 `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
-`upsert`, and `delete`. Every other operation is inert by default: for count,
-aggregate, group, list (including `findMany`), bulk, raw, and unknown
-operations, `prismaAdapter` opens no owned value-capture span and emits no
-scalar or omission attribute — `count` and `aggregate` become eligible only
-through the separate, explicit `aggregateAllow` list described below. This
+`upsert`, and `delete`. Every other operation is inert by default: for
+group, bulk, raw, and unknown operations, `prismaAdapter` opens no owned
+value-capture span and emits no scalar or omission attribute. `count` and
+`aggregate` become eligible only through the separate, explicit
+`aggregateAllow` list described below, and `findMany` results become
+eligible only as bounded row evidence when the server grants the
+bounded-rows result-evidence capability for models named by `allow` (see
+[Bounded-row result capture](#bounded-row-result-capture-findmany)). This
 boundary affects only `prismaAdapter` value capture; automatic Prisma query
 instrumentation described in
 [Database query spans (Prisma)](#database-query-spans-prisma) is independent
@@ -1089,6 +1092,49 @@ truncating): a malformed entry is dropped, while a conflicting or
 duplicate-key selection, more than 16 selectors for one model + operation, or
 an unsafely observable list disables the affected capture entirely rather than
 guessing.
+
+#### Bounded-row result capture (`findMany`)
+
+When the server additionally grants the **bounded-rows** result-evidence
+capability, `findMany` results for models named by your existing `allow`
+entries are captured as bounded row evidence — no separate allowlist. The
+adapter samples **at most 8 returned rows** (the first eight array
+positions), projects each allowlisted column by its `as` intent onto
+row-qualified scalars (`glasstrace.side_effect.scalar.r<n>.<key>`), and
+emits everything as one evidence bundle with truthful cardinality: the
+real returned-array length (`rows_total` — never an unpaginated database
+total), the fixed `row_cap` of 8, how many rows were selected, and how
+many contributed at least one value. `r<n>` is the original
+returned-array position, nothing more — never an identity, never reused.
+
+The operation shares the same **16-scalar ceiling** as every other
+capture, allocated deterministically in configured-column order across
+rows, with a fixed internal attempt budget so a hostile or huge result
+can never create unbounded work. Values follow the same rules as
+elsewhere (`flag` booleans; finite native numbers under the safe-integer
+rule and the timestamp privacy screen; `id` columns as pseudonymized
+`gthid_` tokens only under full fidelity with a provisioned key — the
+raw identifier never reaches the wire). Only own data properties of each
+row are read; accessors are never invoked, prototypes never traversed,
+and candidate values are snapshotted before any asynchronous work so
+later result mutation cannot change the emitted evidence. An empty
+result, an unsupported shape, or a policy that cannot be observed safely
+emits nothing at all. Group, bulk, raw, `*ManyAndReturn`, and unknown
+operations remain inert. Attribute transport is best effort, so the
+backend independently validates bundle completeness and discards any
+partial family — the marker is written last precisely so a truncated
+bundle fails closed.
+
+Bounded-row admission is deliberately stricter than single-record
+capture, and fails closed rather than guessing: the `allow` list is
+compiled for this path under a fixed defensive inspection budget (in
+practice about 64 entries — a larger list disables bounded-row capture
+entirely rather than truncating), model and column names must be ASCII
+identifiers (`[A-Za-z][A-Za-z0-9_]{0,63}`) whose derived scalar keys
+satisfy the camelCase scalar-key grammar, and a non-conforming column, a
+conflicting duplicate, or a derived-key collision disables bounded-row
+capture for that entire model. Legacy single-record capture is unaffected
+by any of this.
 
 `as: "id"` is an operator escalation: it emits a `gthid_` token (the raw id
 hashed under a provisioned per-account key — the raw value never reaches the

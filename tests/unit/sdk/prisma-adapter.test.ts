@@ -39,11 +39,13 @@ import {
   holedAllowlist,
   inheritedKeyEntry,
   justOverBudgetAllowlist,
+  lengthHostileArrayProxy,
   overBudgetAllowlist,
   revokedAllowlistProxy,
   throwingAllowlistProxy,
   throwingResultProxy,
   underBudgetAllowlist,
+  undefinedHookAccessorKeyEntry,
 } from "./prisma-result-fixtures.js";
 import { hashIdWeb } from "../../../packages/sdk/src/side-effect/hash-id-web.js";
 import {
@@ -57,6 +59,7 @@ import {
   RESULT_EVIDENCE_ATTRIBUTE_PREFIX,
   RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY,
   SIDE_EFFECT_SCALAR_PREFIX,
+  validateResultEvidenceCompleteFamily,
 } from "../../../packages/protocol/src/index.js";
 
 installContextManager();
@@ -1262,7 +1265,12 @@ describe("result-evidence wire-v1 inertness regression", () => {
     expectNoResultEvidenceAttributes();
   });
 
-  it("findMany emits no result evidence with both capabilities granted", async () => {
+  it("findMany with both capabilities granted now captures bounded-row evidence (superseded inertness)", async () => {
+    // This case originally pinned findMany inertness while the protocol
+    // shipped ahead of any producer. The bounded-row producer explicitly
+    // supersedes it: with an allow policy AND the granted boundedRows
+    // capability, findMany emits a family-3 bundle. Default-inert
+    // regressions (capability or policy absent) live in the Phase 2 suite.
     grantBothCapabilities();
     const rows = [{ muted: false }, { muted: true }];
     const query = vi.fn(async () => rows);
@@ -1275,8 +1283,8 @@ describe("result-evidence wire-v1 inertness regression", () => {
     expect(thrown).toBeUndefined();
     expect(query).toHaveBeenCalledTimes(1);
     expect(result).toBe(rows);
-    expectNoOwnedSpan();
-    expectNoResultEvidenceAttributes();
+    const owned = ownedSpanAttrs();
+    expect(owned?.[RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY]).toBe(3);
   });
 
   it("groupBy emits no result evidence with both capabilities granted", async () => {
@@ -1512,6 +1520,30 @@ describe("Phase 1 aggregate-result capture (family 1 / family 2)", () => {
       expect(owned?.[scalarKey("matchedAmount")]).toBe(5);
     });
 
+    it("omission counters ride the admission view across a mid-query refresh", async () => {
+      grantAggregateScalars();
+      // The master capture switch goes off while the query is in flight:
+      // the admitted view governs the WHOLE emission — the valid scalar,
+      // the family marker, and the invalid-value omission counter alike.
+      await runOperation({
+        allow: [],
+        aggregateAllow: [
+          aggregateEntry("_sum", "total", "revenueAmount"),
+          aggregateEntry("_sum", "tax", "taxAmount"),
+        ],
+        model: "Order",
+        operation: "aggregate",
+        query: async () => {
+          _setCurrentConfig(configWith(false));
+          return { _sum: { total: 5, tax: "bad" } };
+        },
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(2);
+      expect(owned?.[scalarKey("revenueAmount")]).toBe(5);
+      expect(owned?.["glasstrace.side_effect.omitted.raw_payload"]).toBe(1);
+    });
+
     it.each(["groupBy", "createMany", "findMany", "aggregateRaw", "findRaw"])(
       "%s stays inert even with an aggregate allowlist and capability granted",
       async (operation) => {
@@ -1703,8 +1735,10 @@ describe("Phase 1 aggregate-result capture (family 1 / family 2)", () => {
       // single-entry proxy cases), so surviving compilation would emit and
       // fail the test — proving whole-policy inertness discriminately.
       ["an accessor-backed entry member", [countAllEntry("Other", "otherAmount"), accessorKeyEntry()], "Other"],
+      ["an undefined-hook accessor entry member", [countAllEntry("Other", "otherAmount"), undefinedHookAccessorKeyEntry()], "Other"],
       ["an inherited entry member", [countAllEntry("Other", "otherAmount"), inheritedKeyEntry()], "Other"],
       ["a throwing allowlist proxy", throwingAllowlistProxy(), "Order"],
+      ["a length-hostile allowlist proxy", lengthHostileArrayProxy([countAllEntry()]), "Order"],
       ["a revoked allowlist proxy", revokedAllowlistProxy(), "Order"],
       ["a non-array allowlist", { 0: countAllEntry() }, "Order"],
       ["an array hole", holedAllowlist(), "Other"],
@@ -2049,6 +2083,1042 @@ describe("Phase 1 aggregate-result capture (family 1 / family 2)", () => {
         expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
       } finally {
         setAttributesSpy.mockRestore();
+      }
+    });
+  });
+});
+
+describe("Phase 2 bounded-row capture (family 3)", () => {
+  const FAMILY_KEY = RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY;
+  const RESULT_PREFIX = "glasstrace.side_effect.result.v1.";
+  const rowScalar = (n: number, baseKey: string): string =>
+    `${SIDE_EFFECT_SCALAR_PREFIX}r${n}.${baseKey}`;
+  const rowMeta = (n: number, kind: string): string =>
+    `${RESULT_PREFIX}row.r${n}.${kind}`;
+
+  /** Grants the bounded-rows capability on the active config. */
+  function grantBoundedRows(options?: {
+    aggregateScalars?: boolean;
+    captureFidelity?: "strict" | "full";
+    attrHmacKey?: string;
+  }): void {
+    const granted = configWith(true);
+    granted.config.resultEvidenceCapabilities = {
+      wireVersion: 1,
+      aggregateScalars: options?.aggregateScalars ?? false,
+      boundedRows: true,
+    };
+    if (options?.captureFidelity) {
+      granted.config.captureFidelity = options.captureFidelity;
+    }
+    if (options?.attrHmacKey) {
+      granted.config.attrHmacKey = options.attrHmacKey;
+    }
+    _setCurrentConfig(granted);
+  }
+
+  const pollAllow = [
+    { model: "Poll", column: "muted", as: "flag" as const },
+    { model: "Poll", column: "votes", as: "value" as const },
+  ];
+
+  function pollRows(count: number): Array<Record<string, unknown>> {
+    return Array.from({ length: count }, (_, i) => ({
+      muted: i % 2 === 0,
+      votes: (i + 1) * 10,
+    }));
+  }
+
+  describe("admission, bounds, and cardinality", () => {
+    it("captures a family-3 bundle with exact metadata for a three-row result", async () => {
+      grantBoundedRows();
+      const rows = pollRows(3);
+      const query = vi.fn(async () => rows);
+      const { result, thrown } = await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query,
+      });
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(rows);
+      expect(query).toHaveBeenCalledTimes(1);
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      expect(owned?.[`${RESULT_PREFIX}rows_total`]).toBe(3);
+      expect(owned?.[`${RESULT_PREFIX}row_cap`]).toBe(8);
+      expect(owned?.[`${RESULT_PREFIX}rows_selected`]).toBe(3);
+      expect(owned?.[`${RESULT_PREFIX}rows_emitted`]).toBe(3);
+      for (let i = 0; i < 3; i += 1) {
+        expect(owned?.[rowMeta(i, "candidates")]).toBe(2);
+        expect(owned?.[rowMeta(i, "emitted")]).toBe(2);
+        expect(owned?.[rowScalar(i, "mutedFlag")]).toBe(i % 2 === 0);
+        expect(owned?.[rowScalar(i, "votesValue")]).toBe((i + 1) * 10);
+      }
+    });
+
+    it("the emitted bundle satisfies the receiver's complete-family validation", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(2),
+      });
+      const owned = ownedSpanAttrs() ?? {};
+      const verdict = validateResultEvidenceCompleteFamily(owned);
+      expect(verdict).toEqual({
+        ok: true,
+        family: 3,
+        scalarCount: 4,
+        rowsTotal: 2,
+        rowCap: 8,
+        rowsSelected: 2,
+        rowsEmitted: 2,
+      });
+    });
+
+    it("selects at most eight rows and reports the true returned length", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(9),
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[`${RESULT_PREFIX}rows_total`]).toBe(9);
+      expect(owned?.[`${RESULT_PREFIX}rows_selected`]).toBe(8);
+      expect(owned?.[rowScalar(7, "votesValue")]).toBe(80);
+      expect(owned?.[rowScalar(8, "votesValue")]).toBeUndefined();
+      expect(owned?.[rowMeta(8, "candidates")]).toBeUndefined();
+    });
+
+    it("never observes returned-array positions beyond the row cap", async () => {
+      grantBoundedRows();
+      const rows = pollRows(8) as unknown[];
+      let ninthReads = 0;
+      Object.defineProperty(rows, 8, {
+        enumerable: true,
+        get: () => {
+          ninthReads += 1;
+          return { muted: true, votes: 1 };
+        },
+      });
+      (rows as { length: number }).length = 9;
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      expect(ninthReads).toBe(0);
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      expect(owned?.[`${RESULT_PREFIX}rows_total`]).toBe(9);
+      expect(owned?.[`${RESULT_PREFIX}rows_selected`]).toBe(8);
+    });
+
+    it("an empty array is observationally inert — no family, no rows_total claim", async () => {
+      grantBoundedRows();
+      const empty: unknown[] = [];
+      const { result } = await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => empty,
+      });
+      expect(result).toBe(empty);
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBeUndefined();
+      expect(owned?.[`${RESULT_PREFIX}rows_total`]).toBeUndefined();
+    });
+
+    it("commits at most sixteen scalars in deterministic column-major order", async () => {
+      grantBoundedRows();
+      const allow = [
+        { model: "Poll", column: "a", as: "value" as const },
+        { model: "Poll", column: "b", as: "value" as const },
+        { model: "Poll", column: "c", as: "value" as const },
+      ];
+      const rows = Array.from({ length: 8 }, (_, i) => ({
+        a: i + 1,
+        b: (i + 1) * 100,
+        c: (i + 1) * 10_000,
+      }));
+      await runOperation({
+        allow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      // Column-major: all eight `a` values, then all eight `b` values —
+      // sixteen commits — and no `c` value at all.
+      for (let i = 0; i < 8; i += 1) {
+        expect(owned?.[rowScalar(i, "aValue")]).toBe(i + 1);
+        expect(owned?.[rowScalar(i, "bValue")]).toBe((i + 1) * 100);
+        expect(owned?.[rowScalar(i, "cValue")]).toBeUndefined();
+      }
+      expect(owned?.[`${RESULT_PREFIX}rows_emitted`]).toBe(8);
+      for (let i = 0; i < 8; i += 1) {
+        expect(owned?.[rowMeta(i, "candidates")]).toBe(3);
+        expect(owned?.[rowMeta(i, "emitted")]).toBe(2);
+      }
+    });
+
+    it("caps projection attempts at thirty-two across the operation", async () => {
+      grantBoundedRows();
+      // Five columns × eight rows = forty present candidates, all invalid:
+      // exactly thirty-two attempts record omissions, the rest are never
+      // attempted, and nothing is emitted.
+      const allow = ["a", "b", "c", "d", "e"].map((column) => ({
+        model: "Poll",
+        column,
+        as: "value" as const,
+      }));
+      const rows = Array.from({ length: 8 }, () => ({
+        a: "bad",
+        b: "bad",
+        c: "bad",
+        d: "bad",
+        e: "bad",
+      }));
+      await runOperation({
+        allow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBeUndefined();
+      expect(owned?.["glasstrace.side_effect.omitted.raw_payload"]).toBe(32);
+    });
+
+    it("failed values do not consume scalar slots — later candidates fill in", async () => {
+      grantBoundedRows();
+      const rows = pollRows(2);
+      rows[0].votes = "invalid" as unknown as number;
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      expect(owned?.[rowScalar(0, "votesValue")]).toBeUndefined();
+      expect(owned?.[rowScalar(1, "votesValue")]).toBe(20);
+      expect(owned?.[rowMeta(0, "candidates")]).toBe(2);
+      expect(owned?.[rowMeta(0, "emitted")]).toBe(1);
+      expect(owned?.[rowMeta(1, "emitted")]).toBe(2);
+      expect(owned?.[`${RESULT_PREFIX}rows_emitted`]).toBe(2);
+      expect(owned?.["glasstrace.side_effect.omitted.raw_payload"]).toBe(1);
+    });
+
+    it("reports truthful cardinality when a whole row emits nothing", async () => {
+      grantBoundedRows();
+      const rows = [
+        { muted: true, votes: 10 },
+        { muted: "bad", votes: NaN },
+      ];
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      const owned = ownedSpanAttrs() ?? {};
+      expect(owned[FAMILY_KEY]).toBe(3);
+      expect(owned[`${RESULT_PREFIX}rows_emitted`]).toBe(1);
+      expect(owned[rowMeta(1, "candidates")]).toBe(2);
+      expect(owned[rowMeta(1, "emitted")]).toBe(0);
+      // The receiver accepts the truthfully-reported partial row.
+      expect(validateResultEvidenceCompleteFamily(owned).ok).toBe(true);
+    });
+
+    it("emits nothing at all when no scalar survives", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => [{ muted: "bad", votes: "bad" }],
+      });
+      const owned = ownedSpanAttrs() ?? {};
+      expect(
+        Object.keys(owned).filter((k) => k.startsWith(RESULT_PREFIX)),
+      ).toEqual([]);
+      expect(owned[FAMILY_KEY]).toBeUndefined();
+    });
+  });
+
+  describe("capability and policy gating", () => {
+    it.each([
+      ["capability absent", () => _setCurrentConfig(configWith(true))],
+      [
+        "boundedRows false (aggregateScalars true)",
+        () => {
+          const granted = configWith(true);
+          granted.config.resultEvidenceCapabilities = {
+            wireVersion: 1,
+            aggregateScalars: true,
+            boundedRows: false,
+          };
+          _setCurrentConfig(granted);
+        },
+      ],
+      [
+        "master capture switch off",
+        () => {
+          const granted = configWith(false);
+          granted.config.resultEvidenceCapabilities = {
+            wireVersion: 1,
+            aggregateScalars: false,
+            boundedRows: true,
+          };
+          _setCurrentConfig(granted);
+        },
+      ],
+    ])("findMany stays inert by default when %s", async (_label, setup) => {
+      setup();
+      const rows = pollRows(2);
+      const query = vi.fn(async () => rows);
+      const { result } = await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query,
+      });
+      expect(result).toBe(rows);
+      expect(query).toHaveBeenCalledTimes(1);
+      expectNoOwnedSpan();
+    });
+
+    it("stays inert without a recording request span", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+        withRequestSpan: false,
+      });
+      expect(exporter.getFinishedSpans()).toEqual([]);
+    });
+
+    it("stays inert for a model with no bounded-row policy", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "User",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      expectNoOwnedSpan();
+    });
+
+    it("a config refresh applies to the next operation", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(3);
+      exporter.reset();
+      _setCurrentConfig(configWith(true));
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      expectNoOwnedSpan();
+    });
+
+    it("the admission view governs across a mid-query refresh", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => {
+          _setCurrentConfig(configWith(true));
+          return pollRows(1);
+        },
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(3);
+    });
+
+    it("omission counters ride the admission view across a mid-query refresh", async () => {
+      grantBoundedRows();
+      // The master capture switch goes off while the query is in flight:
+      // the admitted view governs the WHOLE emission — the valid scalar,
+      // the bundle, and the invalid-value omission counter alike.
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => {
+          _setCurrentConfig(configWith(false));
+          return [{ muted: 7, votes: 5 }];
+        },
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      expect(owned?.[rowScalar(0, "votesValue")]).toBe(5);
+      expect(owned?.["glasstrace.side_effect.omitted.raw_payload"]).toBe(1);
+    });
+
+    it("a conflicting duplicate column voids bounded-row capture but not legacy capture", async () => {
+      grantBoundedRows();
+      const conflicted = [
+        { model: "Poll", column: "muted", as: "flag" as const },
+        { model: "Poll", column: "muted", as: "value" as const },
+      ];
+      await runOperation({
+        allow: conflicted,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      expectNoOwnedSpan();
+      exporter.reset();
+      // The legacy single-record path keeps its last-wins behavior.
+      grantBoundedRows();
+      await runOperation({
+        allow: conflicted,
+        model: "Poll",
+        operation: "findUnique",
+        query: async () => ({ muted: 7 }),
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[scalarKey("mutedValue")]).toBe(7);
+    });
+
+    it("fails the whole bounded-row policy closed on a length-hostile allow proxy", async () => {
+      grantBoundedRows();
+      // Only `length` observation is hostile; every entry answers honestly,
+      // so surviving compilation would emit and fail the test.
+      const rows = pollRows(1);
+      const query = vi.fn(async () => rows);
+      const { result } = await runOperation({
+        allow: lengthHostileArrayProxy(pollAllow),
+        model: "Poll",
+        operation: "findMany",
+        query,
+      });
+      expect(result).toBe(rows);
+      expect(query).toHaveBeenCalledTimes(1);
+      expectNoOwnedSpan();
+    });
+
+    it("fails the whole bounded-row policy closed on an entry with an inherited member", async () => {
+      grantBoundedRows();
+      // `as` inherited from the prototype (absent as own data) is unsafe
+      // observation: the whole policy voids, so the valid sibling entry
+      // admits nothing either.
+      const entry = Object.create(
+        { as: "flag" },
+        {
+          model: { value: "Poll", enumerable: true },
+          column: { value: "muted", enumerable: true },
+        },
+      ) as { model: string; column: string };
+      await runOperation({
+        allow: [entry, { model: "Poll", column: "votes", as: "value" as const }],
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      expectNoOwnedSpan();
+    });
+
+    it("fails the whole bounded-row policy closed on an undefined-hook accessor member", async () => {
+      grantBoundedRows();
+      // `{ get: undefined }` still defines an ACCESSOR property (no value
+      // field in its descriptor); the fail-closed accessor rule applies
+      // even though reading it would invoke nothing.
+      const entry = { model: "Poll", column: "muted" } as Record<string, unknown>;
+      Object.defineProperty(entry, "as", { enumerable: true, get: undefined });
+      await runOperation({
+        allow: [
+          entry as unknown as { model: string; column: string },
+          { model: "Poll", column: "votes", as: "value" as const },
+        ],
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      expectNoOwnedSpan();
+    });
+
+    it("a lying `has` trap gains only the absent-member default, never a wider intent", async () => {
+      grantBoundedRows();
+      // The target inherits `as: "value"`; the proxy hides that inheritance
+      // from the `in` probe while every descriptor read stays honest. The
+      // lie is worth exactly an honestly absent `as` — the flag default,
+      // the weakest intent — not the inherited one.
+      const target = Object.create(
+        { as: "value" },
+        {
+          model: { value: "Poll", enumerable: true },
+          column: { value: "muted", enumerable: true },
+        },
+      ) as object;
+      const lyingEntry = new Proxy(target, { has: () => false }) as {
+        model: string;
+        column: string;
+      };
+      await runOperation({
+        allow: [lyingEntry],
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      expect(owned?.[rowScalar(0, "mutedFlag")]).toBe(true);
+      expect(owned?.[rowScalar(0, "mutedValue")]).toBeUndefined();
+    });
+
+    it.each([
+      ["a snake_case column name", { model: "Poll", column: "vote_count", as: "value" as const }],
+      ["a PascalCase-derived key outside the scalar grammar", { model: "Poll", column: "Muted", as: "flag" as const }],
+      ["a column name over 64 chars", { model: "Poll", column: "a".repeat(65), as: "value" as const }],
+      ["an out-of-contract intent", { model: "Poll", column: "muted", as: "bogus" as unknown as ScalarIntent }],
+    ])(
+      "voids the model's bounded-row policy on %s while valid siblings stay inert too",
+      async (_label, badEntry) => {
+        grantBoundedRows();
+        // The valid sibling column would capture if the model survived —
+        // the new bounded-row admission voids the whole model instead.
+        await runOperation({
+          allow: [badEntry, { model: "Poll", column: "votes", as: "value" as const }],
+          model: "Poll",
+          operation: "findMany",
+          query: async () => [{ votes: 5, muted: true }],
+        });
+        expectNoOwnedSpan();
+      },
+    );
+
+    it("an id-only model under strict fidelity opens no span at all", async () => {
+      grantBoundedRows();
+      const query = vi.fn(async () => [{ owner: "user-1" }]);
+      const { result } = await runOperation({
+        allow: [{ model: "Poll", column: "owner", as: "id" as const }],
+        model: "Poll",
+        operation: "findMany",
+        query,
+      });
+      expect(result).toEqual([{ owner: "user-1" }]);
+      expect(query).toHaveBeenCalledTimes(1);
+      // No empty owned span is exported for a policy that provably cannot
+      // capture under this operation's fidelity posture.
+      expectNoOwnedSpan();
+    });
+
+    it("dead id candidates do not starve viable columns of the attempt budget", async () => {
+      grantBoundedRows();
+      // Four id columns configured ahead of a flag column, strict
+      // fidelity, eight rows: the 32 dead id candidates are excluded from
+      // the attempt stream, so the flag column still commits all eight
+      // values (previously the id candidates would exhaust the budget).
+      const allow = [
+        { model: "Poll", column: "ida", as: "id" as const },
+        { model: "Poll", column: "idb", as: "id" as const },
+        { model: "Poll", column: "idc", as: "id" as const },
+        { model: "Poll", column: "idd", as: "id" as const },
+        { model: "Poll", column: "muted", as: "flag" as const },
+      ];
+      const rows = Array.from({ length: 8 }, (_, i) => ({
+        ida: "a",
+        idb: "b",
+        idc: "c",
+        idd: "d",
+        muted: i % 2 === 0,
+      }));
+      await runOperation({
+        allow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      for (let i = 0; i < 8; i += 1) {
+        expect(owned?.[rowScalar(i, "mutedFlag")]).toBe(i % 2 === 0);
+        // Present id fields still count as candidates for truthful
+        // metadata even though they cannot be attempted this operation.
+        expect(owned?.[rowMeta(i, "candidates")]).toBe(5);
+        expect(owned?.[rowMeta(i, "emitted")]).toBe(1);
+      }
+    });
+
+    it("byte-identical duplicate columns collapse and capture once", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: [
+          { model: "Poll", column: "votes", as: "value" as const },
+          { model: "Poll", column: "votes", as: "value" as const },
+        ],
+        model: "Poll",
+        operation: "findMany",
+        query: async () => [{ votes: 5 }],
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      expect(owned?.[rowScalar(0, "votesValue")]).toBe(5);
+      expect(owned?.[rowMeta(0, "candidates")]).toBe(1);
+    });
+
+    it("an accessor-backed allow entry member voids bounded-row capture but not legacy capture", async () => {
+      grantBoundedRows();
+      const hostileEntry = { model: "Poll", column: "muted" } as Record<string, unknown>;
+      Object.defineProperty(hostileEntry, "as", {
+        enumerable: true,
+        get: () => "flag",
+      });
+      const allow = [hostileEntry as unknown as { model: string; column: string }];
+      await runOperation({
+        allow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(1),
+      });
+      expectNoOwnedSpan();
+      exporter.reset();
+      grantBoundedRows();
+      await runOperation({
+        allow,
+        model: "Poll",
+        operation: "findUnique",
+        query: async () => ({ muted: true }),
+      });
+      expect(ownedSpanAttrs()?.[scalarKey("mutedFlag")]).toBe(true);
+    });
+
+    it("compiles 64 entries inside the raw-position budget and fails 65 closed", async () => {
+      grantBoundedRows();
+      const inBudget = Array.from({ length: 64 }, (_, i) => ({
+        model: `M${i}`,
+        column: "votes",
+        as: "value" as const,
+      }));
+      await runOperation({
+        allow: inBudget,
+        model: "M0",
+        operation: "findMany",
+        query: async () => [{ votes: 5 }],
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(3);
+      exporter.reset();
+      grantBoundedRows();
+      const overBudget = [
+        ...inBudget,
+        { model: "M64", column: "votes", as: "value" as const },
+      ];
+      await runOperation({
+        allow: overBudget,
+        model: "M0",
+        operation: "findMany",
+        query: async () => [{ votes: 5 }],
+      });
+      expectNoOwnedSpan();
+    });
+
+    it.each(["groupBy", "createManyAndReturn", "updateManyAndReturn", "findRaw", "createMany"])(
+      "%s stays inert with the bounded-rows capability granted",
+      async (operation) => {
+        grantBoundedRows();
+        const opResult = Object.freeze([Object.freeze({ muted: true, votes: 1 })]);
+        const query = vi.fn(async () => opResult);
+        const { result } = await runOperation({
+          allow: pollAllow,
+          model: "Poll",
+          operation,
+          query,
+        });
+        expect(result).toBe(opResult);
+        expect(query).toHaveBeenCalledTimes(1);
+        expectNoOwnedSpan();
+      },
+    );
+  });
+
+  describe("row observation and identifier capture", () => {
+    it("keeps unsupported result and row shapes inert with identity preserved", async () => {
+      for (const unsupported of [
+        Object.freeze({ rows: [] }),
+        "rows",
+        Object.freeze([null]),
+        Object.freeze([[1]]),
+        Object.freeze(["row"]),
+        Object.freeze([{ muted: true }, 7]),
+      ]) {
+        grantBoundedRows();
+        const { result, thrown } = await runOperation({
+          allow: pollAllow,
+          model: "Poll",
+          operation: "findMany",
+          query: async () => unsupported,
+        });
+        expect(thrown).toBeUndefined();
+        expect(result).toBe(unsupported);
+        expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+        exporter.reset();
+      }
+    });
+
+    it("never invokes an accessor-backed row field and excludes it from candidates", async () => {
+      grantBoundedRows();
+      let getterCalls = 0;
+      const row: Record<string, unknown> = { votes: 5 };
+      Object.defineProperty(row, "muted", {
+        enumerable: true,
+        get: () => {
+          getterCalls += 1;
+          return true;
+        },
+      });
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => [row],
+      });
+      expect(getterCalls).toBe(0);
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(3);
+      expect(owned?.[rowScalar(0, "mutedFlag")]).toBeUndefined();
+      expect(owned?.[rowScalar(0, "votesValue")]).toBe(5);
+      expect(owned?.[rowMeta(0, "candidates")]).toBe(1);
+    });
+
+    it("ignores inherited row fields", async () => {
+      grantBoundedRows();
+      const row = Object.create({ muted: true }) as Record<string, unknown>;
+      row.votes = 5;
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => [row],
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[rowScalar(0, "mutedFlag")]).toBeUndefined();
+      expect(owned?.[rowMeta(0, "candidates")]).toBe(1);
+    });
+
+    it("an undefined-hook accessor row field is not a candidate", async () => {
+      grantBoundedRows();
+      // `{ get: undefined }` defines an accessor (no value field in its
+      // descriptor): not own DATA, so it is neither a candidate nor an
+      // omission — same posture as a getter-backed field.
+      const row = { votes: 5 } as Record<string, unknown>;
+      Object.defineProperty(row, "muted", { enumerable: true, get: undefined });
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => [row],
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[rowScalar(0, "votesValue")]).toBe(5);
+      expect(owned?.[rowScalar(0, "mutedFlag")]).toBeUndefined();
+      expect(owned?.[rowMeta(0, "candidates")]).toBe(1);
+    });
+
+    it("a throwing row proxy makes the family inert with identity preserved", async () => {
+      grantBoundedRows();
+      const hostileRow = new Proxy(
+        { muted: true, votes: 5 },
+        {
+          getOwnPropertyDescriptor: () => {
+            throw new Error("hostile row");
+          },
+        },
+      );
+      const rows = [hostileRow];
+      const { result, thrown } = await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(rows);
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+    });
+
+    it("a length-hostile result container makes the family inert with identity preserved", async () => {
+      grantBoundedRows();
+      // Only the container's `length` observation is hostile; the rows
+      // themselves answer honestly and would emit if selection proceeded.
+      const rows = lengthHostileArrayProxy(pollRows(2));
+      const { result, thrown } = await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(rows);
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+    });
+
+    it("one hostile row voids the whole family, not just that row", async () => {
+      grantBoundedRows();
+      // A valid first row plus a hostile second: whole-family voiding
+      // (not per-row skipping) means even the valid row emits nothing.
+      const rows = [
+        { muted: true, votes: 5 },
+        new Proxy(
+          { muted: false, votes: 6 },
+          {
+            getOwnPropertyDescriptor: () => {
+              throw new Error("hostile row");
+            },
+          },
+        ),
+      ];
+      const { result, thrown } = await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => rows,
+      });
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(rows);
+      const owned = ownedSpanAttrs() ?? {};
+      expect(owned[FAMILY_KEY]).toBeUndefined();
+      expect(owned[rowScalar(0, "votesValue")]).toBeUndefined();
+    });
+
+    it("snapshots candidate values before asynchronous preparation", async () => {
+      grantBoundedRows({ captureFidelity: "full", attrHmacKey: "phase2-key" });
+      const rows = [
+        { owner: "user-1", votes: 5 } as Record<string, unknown>,
+      ];
+      const allow = [
+        { model: "Poll", column: "owner", as: "id" as const },
+        { model: "Poll", column: "votes", as: "value" as const },
+      ];
+      await runOperation({
+        allow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => {
+          // Defer the mutation two microtask levels: level one runs during
+          // the adapter's `await query` boundary (before the snapshot —
+          // observing a mutation there would be legitimate), level two
+          // runs during the asynchronous id-hash await — strictly AFTER
+          // the synchronous candidate snapshot, where mutation must no
+          // longer change the emitted evidence.
+          queueMicrotask(() => {
+            queueMicrotask(() => {
+              rows[0].votes = 999_999;
+              rows[0].owner = "attacker";
+            });
+          });
+          return rows;
+        },
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[rowScalar(0, "votesValue")]).toBe(5);
+      expect(owned?.[rowScalar(0, "ownerId")]).toBe(
+        await hashIdWeb("user-1", "phase2-key"),
+      );
+    });
+
+    it("hashes identifiers under the admission view's key even across rotation", async () => {
+      grantBoundedRows({ captureFidelity: "full", attrHmacKey: "key-a" });
+      await runOperation({
+        allow: [{ model: "Poll", column: "owner", as: "id" as const }],
+        model: "Poll",
+        operation: "findMany",
+        query: async () => {
+          // Rotate the key mid-operation: the admitted view's key governs.
+          grantBoundedRows({ captureFidelity: "full", attrHmacKey: "key-b" });
+          return [{ owner: "user-1" }];
+        },
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[rowScalar(0, "ownerId")]).toBe(
+        await hashIdWeb("user-1", "key-a"),
+      );
+    });
+
+    it("id columns stay silent under strict fidelity and fail visibly under keyless full", async () => {
+      grantBoundedRows();
+      await runOperation({
+        allow: [{ model: "Poll", column: "owner", as: "id" as const }],
+        model: "Poll",
+        operation: "findMany",
+        query: async () => [{ owner: "user-1" }],
+      });
+      let owned = ownedSpanAttrs() ?? {};
+      expect(owned[FAMILY_KEY]).toBeUndefined();
+      expect(owned["glasstrace.side_effect.omitted.unhashed_id"]).toBeUndefined();
+      exporter.reset();
+
+      grantBoundedRows({ captureFidelity: "full" });
+      await runOperation({
+        allow: [{ model: "Poll", column: "owner", as: "id" as const }],
+        model: "Poll",
+        operation: "findMany",
+        query: async () => [{ owner: "user-1" }],
+      });
+      owned = ownedSpanAttrs() ?? {};
+      expect(owned[FAMILY_KEY]).toBeUndefined();
+      expect(owned["glasstrace.side_effect.omitted.unhashed_id"]).toBe(1);
+    });
+
+    it.each([
+      ["a timestamp-shaped *Value at 1e9", "startValue", "start", 1_000_000_000, "raw_timestamp"],
+      ["a fractional epoch *Ms", "delayMs", "delay", 1_700_000_000_000.5, "raw_timestamp"],
+      ["an unsafe integer", "bigValue", "big", 2 ** 53, "raw_payload"],
+      ["NaN", "nanValue", "nan", NaN, "non_finite"],
+      ["a BigInt", "bigintValue", "bigint", BigInt(7), "raw_payload"],
+      ["a Decimal-like object", "decValue", "dec", decimalLike("1.5"), "raw_payload"],
+      ["a Date", "dateValue", "date", new Date(), "raw_payload"],
+    ])(
+      "omits %s from the row wire with a bounded reason",
+      async (_label, _baseKey, column, value, reason) => {
+        grantBoundedRows();
+        await runOperation({
+          allow: [{ model: "Poll", column, as: "value" as const }],
+          model: "Poll",
+          operation: "findMany",
+          query: async () => [{ [column]: value }],
+        });
+        const owned = ownedSpanAttrs() ?? {};
+        expect(owned[FAMILY_KEY]).toBeUndefined();
+        expect(owned[`glasstrace.side_effect.omitted.${reason}`]).toBe(1);
+      },
+    );
+  });
+
+  describe("pure observation and transport posture", () => {
+    it("forwards findMany arguments by identity and never inspects them", async () => {
+      grantBoundedRows();
+      let structuralReads = 0;
+      const rejectRead = (): never => {
+        structuralReads += 1;
+        throw new Error("the adapter must not inspect findMany args");
+      };
+      const guardedArgs = new Proxy(
+        { where: { active: true }, take: 20 },
+        {
+          get: rejectRead,
+          has: rejectRead,
+          ownKeys: rejectRead,
+          getOwnPropertyDescriptor: rejectRead,
+        },
+      );
+      let seenArgs: unknown;
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        args: guardedArgs,
+        query: async (args) => {
+          seenArgs = args;
+          return pollRows(1);
+        },
+      });
+      expect(seenArgs).toBe(guardedArgs);
+      expect(structuralReads).toBe(0);
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(3);
+    });
+
+    it("propagates a query rejection verbatim with the span ended and no family", async () => {
+      grantBoundedRows();
+      const sentinel = new Error("findMany sentinel");
+      const { result, thrown } = await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => {
+          throw sentinel;
+        },
+      });
+      expect(result).toBeUndefined();
+      expect(thrown).toBe(sentinel);
+      const owned = exporter
+        .getFinishedSpans()
+        .find((s) => s.name === "db.Poll.findMany");
+      expect(owned).toBeDefined();
+      expect(owned?.attributes[FAMILY_KEY]).toBeUndefined();
+    });
+
+    it("a truncated bundle loses its marker before any scalar (fail-closed)", async () => {
+      await provider.shutdown();
+      otelApi.trace.disable();
+      exporter = new InMemorySpanExporter();
+      provider = new BasicTracerProvider({
+        spanProcessors: [new SimpleSpanProcessor(exporter)],
+        spanLimits: { attributeCountLimit: 4 },
+      });
+      otelApi.trace.setGlobalTracerProvider(provider);
+      tracer = otelApi.trace.getTracer("glasstrace-prisma-test");
+      grantBoundedRows();
+      await runOperation({
+        allow: pollAllow,
+        model: "Poll",
+        operation: "findMany",
+        query: async () => pollRows(3),
+      });
+      const owned = ownedSpanAttrs() ?? {};
+      // The earliest metadata survived (proving the bundle write ran),
+      // later attributes and the marker — written last — were dropped.
+      expect(owned[`${RESULT_PREFIX}rows_total`]).toBe(3);
+      expect(owned[FAMILY_KEY]).toBeUndefined();
+      // The receiver rejects the marker-less remainder.
+      expect(validateResultEvidenceCompleteFamily(owned).ok).toBe(false);
+    });
+
+    it("keeps the host unaffected when the bundle write fails", async () => {
+      grantBoundedRows();
+      const probe = tracer.startSpan("prototype-probe");
+      const spanPrototype = Object.getPrototypeOf(probe) as {
+        setAttributes: (attributes: Record<string, unknown>) => unknown;
+      };
+      probe.end();
+      exporter.reset();
+      const original = spanPrototype.setAttributes;
+      const spy = vi
+        .spyOn(spanPrototype, "setAttributes")
+        .mockImplementation(function (
+          this: unknown,
+          attributes: Record<string, unknown>,
+        ) {
+          const isBundle =
+            attributes !== null &&
+            typeof attributes === "object" &&
+            Object.keys(attributes).some((key) => key.startsWith(RESULT_PREFIX));
+          if (isBundle) {
+            throw new Error("attribute sink failure");
+          }
+          return original.call(this as never, attributes);
+        });
+      try {
+        const rows = pollRows(1);
+        const { result, thrown } = await runOperation({
+          allow: pollAllow,
+          model: "Poll",
+          operation: "findMany",
+          query: async () => rows,
+        });
+        expect(thrown).toBeUndefined();
+        expect(result).toBe(rows);
+        expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+      } finally {
+        spy.mockRestore();
       }
     });
   });
