@@ -25,8 +25,26 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import {
   prismaAdapter,
+  type PrismaAggregateCaptureEntry,
   type ScalarIntent,
 } from "../../../packages/sdk/src/adapters/prisma.js";
+import {
+  accessorKeyEntry,
+  accessorResult,
+  aggregateEntry,
+  countAllEntry,
+  countFieldEntry,
+  decimalLike,
+  exactBudgetAllowlist,
+  holedAllowlist,
+  inheritedKeyEntry,
+  justOverBudgetAllowlist,
+  overBudgetAllowlist,
+  revokedAllowlistProxy,
+  throwingAllowlistProxy,
+  throwingResultProxy,
+  underBudgetAllowlist,
+} from "./prisma-result-fixtures.js";
 import { hashIdWeb } from "../../../packages/sdk/src/side-effect/hash-id-web.js";
 import {
   _setCurrentConfig,
@@ -37,6 +55,7 @@ import type { SdkInitResponse } from "../../../packages/protocol/src/wire.js";
 import {
   GLASSTRACE_ATTRIBUTE_NAMES,
   RESULT_EVIDENCE_ATTRIBUTE_PREFIX,
+  RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY,
   SIDE_EFFECT_SCALAR_PREFIX,
 } from "../../../packages/protocol/src/index.js";
 
@@ -97,6 +116,8 @@ afterEach(async () => {
  */
 async function runOperation(opts: {
   allow: ReadonlyArray<{ model: string; column: string; as?: ScalarIntent }>;
+  /** Phase 1 aggregate-result allowlist, forwarded to the adapter. */
+  aggregateAllow?: ReadonlyArray<PrismaAggregateCaptureEntry>;
   model: string;
   operation: string;
   /** Operation arguments forwarded unchanged to the query callback. */
@@ -105,7 +126,10 @@ async function runOperation(opts: {
   /** Omit to simulate an edge runtime with no active request span. */
   withRequestSpan?: boolean;
 }): Promise<{ result: unknown; thrown: unknown }> {
-  const ext = prismaAdapter({ allow: opts.allow });
+  const ext = prismaAdapter({
+    allow: opts.allow,
+    aggregateAllow: opts.aggregateAllow,
+  });
   const invoke = async (): Promise<{ result: unknown; thrown: unknown }> => {
     try {
       const result = await ext.query.$allModels.$allOperations({
@@ -1272,5 +1296,707 @@ describe("result-evidence wire-v1 inertness regression", () => {
     expect(result).toBe(groupResult);
     expectNoOwnedSpan();
     expectNoResultEvidenceAttributes();
+  });
+});
+
+describe("Phase 1 aggregate-result capture (family 1 / family 2)", () => {
+  // The protocol constant, not a re-typed literal, so a wire-string change
+  // cannot silently diverge between producer tests and the contract.
+  const FAMILY_KEY = RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY;
+
+  /** Grants the aggregate-scalars capability (family 1/2) on the active config. */
+  function grantAggregateScalars(boundedRows = false): void {
+    const granted = configWith(true);
+    granted.config.resultEvidenceCapabilities = {
+      wireVersion: 1,
+      aggregateScalars: true,
+      boundedRows,
+    };
+    _setCurrentConfig(granted);
+  }
+
+  describe("admission and capability gating", () => {
+    it("captures a bare count number under a _all selector as family 1", async () => {
+      grantAggregateScalars();
+      const query = vi.fn(async () => 42);
+      const { result, thrown } = await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query,
+      });
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(42);
+      expect(query).toHaveBeenCalledTimes(1);
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(1);
+      expect(owned?.[scalarKey("matchedAmount")]).toBe(42);
+    });
+
+    it("captures a selected _all count map as family 1", async () => {
+      grantAggregateScalars();
+      const countResult = Object.freeze({ _all: 9 });
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => countResult,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(1);
+      expect(owned?.[scalarKey("matchedAmount")]).toBe(9);
+    });
+
+    it("captures a concrete count field only from its own flat property", async () => {
+      grantAggregateScalars();
+      const countResult = Object.freeze({ metric: 7, other: 3 });
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countFieldEntry("metric", "metricAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => countResult,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(1);
+      expect(owned?.[scalarKey("metricAmount")]).toBe(7);
+      expect(owned?.[scalarKey("otherAmount")]).toBeUndefined();
+    });
+
+    it("captures aggregate buckets as family 2, several selections at once", async () => {
+      grantAggregateScalars();
+      const aggregateResult = Object.freeze({
+        _sum: Object.freeze({ total: 1234.5 }),
+        _avg: Object.freeze({ total: 205.75 }),
+        _min: Object.freeze({ total: 1 }),
+        _max: Object.freeze({ total: 999 }),
+        _count: Object.freeze({ total: 6 }),
+      });
+      await runOperation({
+        allow: [],
+        aggregateAllow: [
+          aggregateEntry("_sum", "total", "sumAmount"),
+          aggregateEntry("_avg", "total", "avgAmount"),
+          aggregateEntry("_min", "total", "minAmount"),
+          aggregateEntry("_max", "total", "maxAmount"),
+          aggregateEntry("_count", "total", "rowsAmount"),
+        ],
+        model: "Order",
+        operation: "aggregate",
+        query: async () => aggregateResult,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(2);
+      expect(owned?.[scalarKey("sumAmount")]).toBe(1234.5);
+      expect(owned?.[scalarKey("avgAmount")]).toBe(205.75);
+      expect(owned?.[scalarKey("minAmount")]).toBe(1);
+      expect(owned?.[scalarKey("maxAmount")]).toBe(999);
+      expect(owned?.[scalarKey("rowsAmount")]).toBe(6);
+    });
+
+    it("admits the _count._all exception when the bucket itself is a number", async () => {
+      grantAggregateScalars();
+      const aggregateResult = Object.freeze({ _count: 11 });
+      await runOperation({
+        allow: [],
+        aggregateAllow: [
+          { model: "Order", operation: "aggregate", aggregate: "_count", field: "_all", key: "rowsAmount" },
+        ],
+        model: "Order",
+        operation: "aggregate",
+        query: async () => aggregateResult,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(2);
+      expect(owned?.[scalarKey("rowsAmount")]).toBe(11);
+    });
+
+    it.each([
+      ["capability absent", () => _setCurrentConfig(configWith(true))],
+      [
+        "aggregateScalars false",
+        () => {
+          const granted = configWith(true);
+          granted.config.resultEvidenceCapabilities = {
+            wireVersion: 1,
+            aggregateScalars: false,
+            boundedRows: true,
+          };
+          _setCurrentConfig(granted);
+        },
+      ],
+      [
+        "master capture switch off",
+        () => {
+          const granted = configWith(false);
+          granted.config.resultEvidenceCapabilities = {
+            wireVersion: 1,
+            aggregateScalars: true,
+            boundedRows: false,
+          };
+          _setCurrentConfig(granted);
+        },
+      ],
+    ])("opens no span when %s", async (_label, setup) => {
+      setup();
+      const query = vi.fn(async () => 42);
+      const { result } = await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query,
+      });
+      expect(result).toBe(42);
+      expect(query).toHaveBeenCalledTimes(1);
+      expectNoOwnedSpan();
+    });
+
+    it("opens no span without a recording request span", async () => {
+      grantAggregateScalars();
+      const { result } = await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => 42,
+        withRequestSpan: false,
+      });
+      expect(result).toBe(42);
+      expect(exporter.getFinishedSpans()).toEqual([]);
+    });
+
+    it("a config refresh applies to the next operation", async () => {
+      grantAggregateScalars();
+      const aggregateAllow = [countAllEntry("Order", "matchedAmount")];
+      await runOperation({
+        allow: [],
+        aggregateAllow,
+        model: "Order",
+        operation: "count",
+        query: async () => 1,
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(1);
+      exporter.reset();
+
+      _setCurrentConfig(configWith(true)); // capability revoked
+      await runOperation({
+        allow: [],
+        aggregateAllow,
+        model: "Order",
+        operation: "count",
+        query: async () => 2,
+      });
+      expectNoOwnedSpan();
+    });
+
+    it("the admission view governs an operation across a mid-query refresh", async () => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => {
+          // Capability revoked while the query is in flight: the operation
+          // already admitted under its coherent view, so the family still
+          // emits; the receiver independently rechecks current state.
+          _setCurrentConfig(configWith(true));
+          return 5;
+        },
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(1);
+      expect(owned?.[scalarKey("matchedAmount")]).toBe(5);
+    });
+
+    it.each(["groupBy", "createMany", "findMany", "aggregateRaw", "findRaw"])(
+      "%s stays inert even with an aggregate allowlist and capability granted",
+      async (operation) => {
+        grantAggregateScalars(true);
+        const opResult = Object.freeze({ _all: 7 });
+        const query = vi.fn(async () => opResult);
+        const { result } = await runOperation({
+          allow: [],
+          aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+          model: "Order",
+          operation,
+          query,
+        });
+        expect(result).toBe(opResult);
+        expect(query).toHaveBeenCalledTimes(1);
+        expectNoOwnedSpan();
+      },
+    );
+
+    it("a model without a bucket stays inert", async () => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "User",
+        operation: "count",
+        query: async () => 42,
+      });
+      expectNoOwnedSpan();
+    });
+  });
+
+  describe("allowlist validation (default-deny, bounded, hostile-safe)", () => {
+    it.each([
+      // Each case runs the operation against exactly the model and
+      // operation the entry names, so removing the named validation check
+      // makes the entry compile and emit — failing the test — rather than
+      // the case passing vacuously against an unrelated model.
+      ["bad model grammar", { ...countAllEntry(), model: "bad-name" }, "bad-name", "count"],
+      ["model over 64 chars", { ...countAllEntry(), model: "A".repeat(65) }, "A".repeat(65), "count"],
+      ["unknown operation", { ...countAllEntry(), operation: "Count" }, "Order", "Count"],
+      ["unknown aggregate", { ...countAllEntry(), aggregate: "_median" }, "Order", "count"],
+      ["count with a non-_count bucket", { ...countAllEntry(), aggregate: "_sum" }, "Order", "count"],
+      ["_all on a non-_count bucket", aggregateEntry("_avg", "_all", "avgAmount"), "Order", "aggregate"],
+      ["key with an Id suffix", { ...countAllEntry(), key: "ownerId" }, "Order", "count"],
+      ["key with a Flag suffix", { ...countAllEntry(), key: "activeFlag" }, "Order", "count"],
+      ["key outside the scalar grammar", { ...countAllEntry(), key: "snake_caseAmount" }, "Order", "count"],
+      ["key over the 80-char cap", { ...countAllEntry(), key: `${"a".repeat(79)}Ms` }, "Order", "count"],
+      ["non-object entry", "entry", "Order", "count"],
+    ])("drops an entry with %s (default-deny)", async (_label, entry, model, operation) => {
+      grantAggregateScalars();
+      const query = vi.fn(async () =>
+        operation === "aggregate"
+          ? Object.freeze({ _avg: Object.freeze({ _all: 7 }) })
+          : 42,
+      );
+      await runOperation({
+        allow: [],
+        aggregateAllow: [entry as PrismaAggregateCaptureEntry],
+        model,
+        operation,
+        query,
+      });
+      expect(query).toHaveBeenCalledTimes(1);
+      expectNoOwnedSpan();
+    });
+
+    it("collapses a byte-identical duplicate to its first occurrence", async () => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry(), countAllEntry()],
+        model: "Order",
+        operation: "count",
+        query: async () => 3,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(1);
+      expect(owned?.[scalarKey("matchedAmount")]).toBe(3);
+    });
+
+    it.each([
+      [
+        "a conflicting selector (same selector, different key)",
+        [countAllEntry("Order", "matchedAmount"), countAllEntry("Order", "otherAmount")],
+      ],
+      [
+        "a duplicate output key across selectors",
+        [
+          countFieldEntry("metric", "metricAmount"),
+          countFieldEntry("other", "metricAmount"),
+        ],
+      ],
+      [
+        "more than 16 distinct selectors in one bucket",
+        Array.from({ length: 17 }, (_, i) =>
+          countFieldEntry(`field${i}`, `field${i}Amount`),
+        ),
+      ],
+    ])("fails a bucket closed on %s", async (_label, aggregateAllow) => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow,
+        model: "Order",
+        operation: "count",
+        query: async () => Object.freeze({ metric: 1, other: 2, field0: 3 }),
+      });
+      expectNoOwnedSpan();
+    });
+
+    it("admits exactly 16 distinct selectors in one bucket", async () => {
+      grantAggregateScalars();
+      const aggregateAllow = Array.from({ length: 16 }, (_, i) =>
+        countFieldEntry(`field${i}`, `field${i}Amount`),
+      );
+      const countResult = Object.freeze(
+        Object.fromEntries(
+          Array.from({ length: 16 }, (_, i) => [`field${i}`, i + 1]),
+        ),
+      );
+      await runOperation({
+        allow: [],
+        aggregateAllow,
+        model: "Order",
+        operation: "count",
+        query: async () => countResult,
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(1);
+      for (let i = 0; i < 16; i += 1) {
+        expect(owned?.[scalarKey(`field${i}Amount`)]).toBe(i + 1);
+      }
+    });
+
+    it("stays within the raw-position budget for a 42-entry policy", async () => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: underBudgetAllowlist(),
+        model: "Model0",
+        operation: "count",
+        query: async () => 4,
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(1);
+    });
+
+    it("compiles at exactly raw position 256", async () => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: exactBudgetAllowlist(),
+        model: "Model0",
+        operation: "count",
+        query: async () => 4,
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(1);
+    });
+
+    it("fails the whole policy closed at raw position 257", async () => {
+      grantAggregateScalars();
+      // One position past the budget — even the FIRST entry admits
+      // nothing: overflow fails the whole policy closed, never truncates.
+      await runOperation({
+        allow: [],
+        aggregateAllow: justOverBudgetAllowlist(),
+        model: "Model0",
+        operation: "count",
+        query: async () => 4,
+      });
+      expectNoOwnedSpan();
+    });
+
+    it("fails the whole policy closed for a 43-entry object list", async () => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: overBudgetAllowlist(),
+        model: "Model0",
+        operation: "count",
+        query: async () => 4,
+      });
+      expectNoOwnedSpan();
+    });
+
+    it.each([
+      // Every case runs against a model that a VALID entry in the hostile
+      // list names (the sibling "Other" entry, or "Order" for the
+      // single-entry proxy cases), so surviving compilation would emit and
+      // fail the test — proving whole-policy inertness discriminately.
+      ["an accessor-backed entry member", [countAllEntry("Other", "otherAmount"), accessorKeyEntry()], "Other"],
+      ["an inherited entry member", [countAllEntry("Other", "otherAmount"), inheritedKeyEntry()], "Other"],
+      ["a throwing allowlist proxy", throwingAllowlistProxy(), "Order"],
+      ["a revoked allowlist proxy", revokedAllowlistProxy(), "Order"],
+      ["a non-array allowlist", { 0: countAllEntry() }, "Order"],
+      ["an array hole", holedAllowlist(), "Other"],
+    ])("fails the whole policy closed on %s", async (_label, aggregateAllow, model) => {
+      grantAggregateScalars();
+      // The otherwise-valid entries admit nothing either.
+      await runOperation({
+        allow: [],
+        aggregateAllow: aggregateAllow as ReadonlyArray<PrismaAggregateCaptureEntry>,
+        model,
+        operation: "count",
+        query: async () => 4,
+      });
+      expectNoOwnedSpan();
+    });
+  });
+
+  describe("value admission and privacy", () => {
+    async function runSingleAggregate(
+      key: string,
+      value: unknown,
+      aggregate: PrismaAggregateCaptureEntry["aggregate"] = "_sum",
+    ): Promise<Record<string, unknown> | undefined> {
+      await runOperation({
+        allow: [],
+        aggregateAllow: [aggregateEntry(aggregate, "total", key)],
+        model: "Order",
+        operation: "aggregate",
+        query: async () =>
+          Object.freeze({ [aggregate]: Object.freeze({ total: value }) }),
+      });
+      return ownedSpanAttrs();
+    }
+
+    it("admits numeric edges: zero, negatives, fractions, sub-threshold magnitudes", async () => {
+      grantAggregateScalars();
+      expect((await runSingleAggregate("zeroAmount", 0))?.[scalarKey("zeroAmount")]).toBe(0);
+      exporter.reset();
+      grantAggregateScalars();
+      expect((await runSingleAggregate("deltaAmount", -12.5))?.[scalarKey("deltaAmount")]).toBe(-12.5);
+      exporter.reset();
+      grantAggregateScalars();
+      expect(
+        (await runSingleAggregate("bigBytes", Number.MAX_SAFE_INTEGER))?.[
+          scalarKey("bigBytes")
+        ],
+      ).toBe(Number.MAX_SAFE_INTEGER);
+      exporter.reset();
+      grantAggregateScalars();
+      expect(
+        (await runSingleAggregate("okValue", 999_999_999))?.[scalarKey("okValue")],
+      ).toBe(999_999_999);
+    });
+
+    it.each([
+      ["a timestamp-shaped *Value at 1e9", "startValue", 1_000_000_000, "raw_timestamp"],
+      ["a timestamp-shaped *Ms at 1e12", "epochMs", 1_000_000_000_000, "raw_timestamp"],
+      ["a fractional epoch *Ms", "epochMs", 1_700_000_000_000.5, "raw_timestamp"],
+      ["an unsafe integer", "hugeAmount", 2 ** 53, "raw_payload"],
+      ["NaN", "nanAmount", NaN, "non_finite"],
+      ["Infinity", "infAmount", Infinity, "non_finite"],
+      ["a numeric string", "strAmount", "7", "raw_payload"],
+      ["a boolean", "boolAmount", true, "raw_payload"],
+      ["a BigInt", "bigintAmount", BigInt(7), "raw_payload"],
+      ["a Decimal-like object", "decAmount", decimalLike("1.5"), "raw_payload"],
+      ["null", "nullAmount", null, "raw_payload"],
+      ["a Date", "dateAmount", new Date(), "raw_payload"],
+      ["an array", "arrAmount", [7], "raw_payload"],
+    ])(
+      "omits %s with a bounded reason and no family",
+      async (_label, key, value, reason) => {
+        grantAggregateScalars();
+        const owned = await runSingleAggregate(key, value);
+        expect(owned?.[FAMILY_KEY]).toBeUndefined();
+        expect(owned?.[scalarKey(key)]).toBeUndefined();
+        expect(
+          owned?.[`glasstrace.side_effect.omitted.${reason}`],
+        ).toBe(1);
+      },
+    );
+
+    it("rejects a negative or fractional _count value", async () => {
+      grantAggregateScalars();
+      let owned = await runSingleAggregate("rowsAmount", -1, "_count");
+      expect(owned?.[FAMILY_KEY]).toBeUndefined();
+      expect(owned?.["glasstrace.side_effect.omitted.raw_payload"]).toBe(1);
+      exporter.reset();
+      grantAggregateScalars();
+      owned = await runSingleAggregate("rowsAmount", 1.5, "_count");
+      expect(owned?.[FAMILY_KEY]).toBeUndefined();
+    });
+
+    it("emits the surviving scalars when only some candidates are invalid", async () => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: [
+          aggregateEntry("_sum", "total", "sumAmount"),
+          aggregateEntry("_avg", "total", "avgAmount"),
+        ],
+        model: "Order",
+        operation: "aggregate",
+        query: async () =>
+          Object.freeze({
+            _sum: Object.freeze({ total: 100 }),
+            _avg: Object.freeze({ total: "bad" }),
+          }),
+      });
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBe(2);
+      expect(owned?.[scalarKey("sumAmount")]).toBe(100);
+      expect(owned?.[scalarKey("avgAmount")]).toBeUndefined();
+      expect(owned?.["glasstrace.side_effect.omitted.raw_payload"]).toBe(1);
+    });
+  });
+
+  describe("result observation (own data only, hostile-safe)", () => {
+    it("never invokes an accessor-backed result field", async () => {
+      grantAggregateScalars();
+      const { result: hostileResult, getterCalls } = accessorResult("metric");
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countFieldEntry("metric", "metricAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => hostileResult,
+      });
+      expect(getterCalls()).toBe(0);
+      const owned = ownedSpanAttrs();
+      expect(owned?.[FAMILY_KEY]).toBeUndefined();
+      expect(owned?.[scalarKey("metricAmount")]).toBeUndefined();
+    });
+
+    it("ignores an inherited result field", async () => {
+      grantAggregateScalars();
+      const inherited = Object.create({ metric: 7 });
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countFieldEntry("metric", "metricAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => inherited,
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+    });
+
+    it("keeps a throwing result proxy inert with identity preserved", async () => {
+      grantAggregateScalars();
+      const hostile = throwingResultProxy();
+      const { result, thrown } = await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => hostile,
+      });
+      expect(thrown).toBeUndefined();
+      expect(result).toBe(hostile);
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+    });
+
+    it.each([
+      ["an array result", Object.freeze([7])],
+      ["a null result", null],
+      ["a string result", "7"],
+      ["an array aggregate bucket", Object.freeze({ _sum: Object.freeze([7]) })],
+      ["a numeric non-_all bucket", Object.freeze({ _sum: 7 })],
+    ])("keeps %s inert", async (_label, unsupported) => {
+      grantAggregateScalars();
+      await runOperation({
+        allow: [],
+        aggregateAllow: [aggregateEntry("_sum", "total", "sumAmount")],
+        model: "Order",
+        operation: "aggregate",
+        query: async () => unsupported,
+      });
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+    });
+  });
+
+  describe("pure observation", () => {
+    it("forwards arguments by identity and never inspects them", async () => {
+      grantAggregateScalars();
+      let structuralReads = 0;
+      const rejectRead = (): never => {
+        structuralReads += 1;
+        throw new Error("the adapter must not inspect count/aggregate args");
+      };
+      const rawArgs = { where: { active: true } };
+      const guardedArgs = new Proxy(rawArgs, {
+        get: rejectRead,
+        has: rejectRead,
+        ownKeys: rejectRead,
+        getOwnPropertyDescriptor: rejectRead,
+      });
+      let seenArgs: unknown;
+      await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        args: guardedArgs,
+        query: async (args) => {
+          seenArgs = args;
+          return 42;
+        },
+      });
+      expect(seenArgs).toBe(guardedArgs);
+      expect(structuralReads).toBe(0);
+      expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBe(1);
+    });
+
+    it("propagates a query rejection verbatim with the span ended and no family", async () => {
+      grantAggregateScalars();
+      const sentinel = new Error("aggregate sentinel");
+      const { result, thrown } = await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query: async () => {
+          throw sentinel;
+        },
+      });
+      expect(result).toBeUndefined();
+      expect(thrown).toBe(sentinel);
+      const owned = exporter
+        .getFinishedSpans()
+        .find((s) => s.name === "db.Order.count");
+      expect(owned).toBeDefined();
+      expect(owned?.attributes[FAMILY_KEY]).toBeUndefined();
+    });
+
+    it("propagates a synchronous query throw verbatim", async () => {
+      grantAggregateScalars();
+      const sentinel = new Error("sync sentinel");
+      const { thrown } = await runOperation({
+        allow: [],
+        aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+        model: "Order",
+        operation: "count",
+        query: (() => {
+          throw sentinel;
+        }) as unknown as (args: unknown) => Promise<unknown>,
+      });
+      expect(thrown).toBe(sentinel);
+    });
+
+    it("keeps the host unaffected when attribute emission itself fails", async () => {
+      grantAggregateScalars();
+      // Spy on the live span prototype (shared by every span this
+      // provider creates, including the adapter's owned span) so the
+      // bundle write throws inside the projection fence.
+      const probe = tracer.startSpan("prototype-probe");
+      const spanPrototype = Object.getPrototypeOf(probe) as {
+        setAttributes: (attributes: Record<string, unknown>) => unknown;
+      };
+      probe.end();
+      exporter.reset();
+      const original = spanPrototype.setAttributes;
+      // Throw only for the family-bundle write; span construction and any
+      // other attribute write pass through, so only the adapter's one
+      // bundle call fails.
+      const setAttributesSpy = vi
+        .spyOn(spanPrototype, "setAttributes")
+        .mockImplementation(function (
+          this: unknown,
+          attributes: Record<string, unknown>,
+        ) {
+          if (attributes !== null && typeof attributes === "object" && FAMILY_KEY in attributes) {
+            throw new Error("attribute sink failure");
+          }
+          return original.call(this as never, attributes);
+        });
+      try {
+        const query = vi.fn(async () => 42);
+        const { result, thrown } = await runOperation({
+          allow: [],
+          aggregateAllow: [countAllEntry("Order", "matchedAmount")],
+          model: "Order",
+          operation: "count",
+          query,
+        });
+        expect(thrown).toBeUndefined();
+        expect(result).toBe(42);
+        expect(query).toHaveBeenCalledTimes(1);
+        // The bundle write failed inside the fence: the evidence is inert
+        // and the owned span still ended.
+        expect(ownedSpanAttrs()?.[FAMILY_KEY]).toBeUndefined();
+      } finally {
+        setAttributesSpy.mockRestore();
+      }
+    });
   });
 });

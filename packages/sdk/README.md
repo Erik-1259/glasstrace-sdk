@@ -1037,13 +1037,58 @@ not match its intent is dropped, never captured.
 
 Value capture is limited to the single-record-result operations `findUnique`,
 `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
-`upsert`, and `delete`. Every other operation is inert: for count, aggregate,
-group, list (including `findMany`), bulk, raw, and unknown operations,
-`prismaAdapter` opens no owned value-capture span and emits no scalar or
-omission attribute. This boundary affects only `prismaAdapter` value capture;
-automatic Prisma query instrumentation described in
+`upsert`, and `delete`. Every other operation is inert by default: for count,
+aggregate, group, list (including `findMany`), bulk, raw, and unknown
+operations, `prismaAdapter` opens no owned value-capture span and emits no
+scalar or omission attribute — `count` and `aggregate` become eligible only
+through the separate, explicit `aggregateAllow` list described below. This
+boundary affects only `prismaAdapter` value capture; automatic Prisma query
+instrumentation described in
 [Database query spans (Prisma)](#database-query-spans-prisma) is independent
 and unchanged.
+
+#### Aggregate-result capture (`aggregateAllow`)
+
+`aggregateAllow` opts specific `count` / `aggregate` results into
+provider-neutral **result evidence** — a family marker plus 1..16 numeric
+scalars, emitted as one best-effort bundle on the adapter's owned span. It is
+default-deny at three independent layers: an entry must explicitly name the
+selection, the server must grant the aggregate-scalars result-evidence
+capability on your account's configuration, and the backend independently
+validates completeness and current state before retaining anything.
+
+```ts
+prismaAdapter({
+  aggregateAllow: [
+    // count(): the _all sentinel maps a bare numeric result or a selected _all
+    { model: "Order", operation: "count", aggregate: "_count", field: "_all", key: "matchedAmount" },
+    // aggregate(): a named bucket and concrete field
+    { model: "Order", operation: "aggregate", aggregate: "_sum", field: "total", key: "revenueAmount" },
+  ],
+});
+```
+
+Every entry member is required: `model` and concrete `field` names are ASCII
+(`[A-Za-z][A-Za-z0-9_]{0,63}`, with `_all` as the only sentinel, valid only on
+`_count`); `operation` is `"count"` or `"aggregate"` (`count` permits only the
+`_count` bucket); and `key` is the emitted scalar key under the unchanged
+80-character grammar with a numeric suffix (`Ms` / `Amount` / `Bytes` /
+`Ratio` / `Value` — never `Id` or `Flag`). Selection is never inferred from a
+result's shape, arguments are never inspected, and the adapter remains a pure
+observer — the query result and any error pass through untouched.
+
+Values are strictly validated: `_count` values must be nonnegative safe
+integers; other buckets accept finite native numbers (a `Decimal` or `BigInt`
+is dropped, never converted); and timestamp-shaped magnitudes are rejected by
+the shared privacy screen regardless of fidelity posture. An invalid value
+routes to a bounded omission counter, and when no value survives, nothing is
+emitted at all — never a marker without evidence. The allowlist itself is
+observed defensively under a fixed total inspection budget (in practice about
+40 entries — a larger list disables aggregate capture entirely rather than
+truncating): a malformed entry is dropped, while a conflicting or
+duplicate-key selection, more than 16 selectors for one model + operation, or
+an unsafely observable list disables the affected capture entirely rather than
+guessing.
 
 `as: "id"` is an operator escalation: it emits a `gthid_` token (the raw id
 hashed under a provisioned per-account key — the raw value never reaches the
