@@ -6,6 +6,7 @@ import {
 import type {
   SdkInitResponse,
   CaptureConfig,
+  CaptureFidelity,
   AnonApiKey,
   ImportGraphPayload,
   SdkHealthReport,
@@ -128,11 +129,52 @@ function normalizeCachedCaptureConfig(config: CaptureConfig): CaptureConfig {
 }
 
 /**
- * Reads and validates a cached config file from `.glasstrace/config`.
- * Returns the parsed `SdkInitResponse` or `null` on any failure,
- * including when `node:fs` is unavailable (non-Node environments).
+ * Interprets a candidate init-response value with fail-closed tolerance for
+ * the optional result-evidence capability envelope. A value that satisfies
+ * the full strict schema parses as-is. When strict parsing fails and the
+ * value carries a `config.resultEvidenceCapabilities` member, one retry
+ * re-parses the identical value with only that member removed — so a
+ * response whose sole defect is a malformed, partial, unknown-member, or
+ * future-version envelope still applies, with both result-evidence
+ * capabilities unavailable (envelope absent on the stored config). Nothing
+ * else is repaired: a response invalid anywhere outside the envelope fails
+ * the retry identically and stays rejected.
+ *
+ * Internal: the exported {@link sendInitRequest} and
+ * {@link loadCachedConfig} direct-call contracts stay strict; this
+ * tolerance applies only behind the active-configuration application
+ * boundary (`performInit`, the lazy cache promotion, and the eager
+ * register-time cache application). Nonthrowing for any input the
+ * surrounding config handling can produce; a structurally valid envelope is
+ * compatibility configuration, not proof of server provenance.
  */
-export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
+function parseInitResponseWithEnvelopeTolerance(
+  body: unknown,
+): SdkInitResponse | null {
+  const strict = SdkInitResponseSchema.safeParse(body);
+  if (strict.success) return strict.data;
+  if (body === null || typeof body !== "object") return null;
+  const config = (body as Record<string, unknown>).config;
+  if (config === null || typeof config !== "object") return null;
+  if (!("resultEvidenceCapabilities" in config)) return null;
+  const { resultEvidenceCapabilities: _omit, ...configRest } =
+    config as Record<string, unknown>;
+  void _omit;
+  const retry = SdkInitResponseSchema.safeParse({ ...body, config: configRest });
+  return retry.success ? retry.data : null;
+}
+
+/**
+ * Shared implementation of the cached-config read. `tolerant` selects the
+ * response interpretation: strict schema parsing for the public
+ * {@link loadCachedConfig}, or envelope-tolerant interpretation (see
+ * {@link parseInitResponseWithEnvelopeTolerance}) for the internal
+ * application-boundary loader.
+ */
+function loadCachedConfigCore(
+  projectRoot: string | undefined,
+  tolerant: boolean,
+): SdkInitResponse | null {
   const modules = loadFsSyncOrNull();
   if (!modules) return null;
 
@@ -154,12 +196,17 @@ export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
     }
 
     // Parse the response through the schema
-    const result = SdkInitResponseSchema.safeParse(cached.response);
-    if (result.success) {
+    const result = tolerant
+      ? parseInitResponseWithEnvelopeTolerance(cached.response)
+      : (() => {
+          const strict = SdkInitResponseSchema.safeParse(cached.response);
+          return strict.success ? strict.data : null;
+        })();
+    if (result !== null) {
       recordConfigSync(cached.cachedAt);
       return {
-        ...result.data,
-        config: normalizeCachedCaptureConfig(result.data.config),
+        ...result,
+        config: normalizeCachedCaptureConfig(result.config),
       };
     }
 
@@ -168,6 +215,37 @@ export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Reads and validates a cached config file from `.glasstrace/config`.
+ * Returns the parsed `SdkInitResponse` or `null` on any failure,
+ * including when `node:fs` is unavailable (non-Node environments).
+ *
+ * Strict: a cached response that fails the full schema — including one
+ * whose only defect is an invalid result-evidence capability envelope —
+ * returns `null`. The envelope-tolerant interpretation is applied only
+ * behind the active-configuration application boundary, not on this
+ * public direct-call surface.
+ */
+export function loadCachedConfig(projectRoot?: string): SdkInitResponse | null {
+  return loadCachedConfigCore(projectRoot, false);
+}
+
+/**
+ * Envelope-tolerant variant of {@link loadCachedConfig} for the
+ * active-configuration application boundary (the lazy cache promotion in
+ * {@link getActiveConfig}'s resolution and the eager register-time cache
+ * application). A cached response whose only defect is an invalid
+ * result-evidence capability envelope applies with both capabilities
+ * unavailable; any other invalid cache still returns `null`.
+ *
+ * @internal Not exported from the package barrel.
+ */
+export function loadCachedConfigTolerant(
+  projectRoot?: string,
+): SdkInitResponse | null {
+  return loadCachedConfigCore(projectRoot, true);
 }
 
 /**
@@ -246,6 +324,36 @@ export async function sendInitRequest(
   diagnostics?: Array<{ code: SdkDiagnosticCode; message: string; timestamp: number }>,
   signal?: AbortSignal,
 ): Promise<SdkInitResponse> {
+  return SdkInitResponseSchema.parse(
+    await sendInitRequestBody(
+      config,
+      anonKey,
+      sdkVersion,
+      importGraph,
+      healthReport,
+      diagnostics,
+      signal,
+    ),
+  );
+}
+
+/**
+ * Transport half of {@link sendInitRequest}: performs the POST and error
+ * classification, returning the raw parsed-JSON response body without
+ * schema validation. The public {@link sendInitRequest} applies the strict
+ * schema; {@link performInit} applies the envelope-tolerant interpretation
+ * at the application boundary. Internal — keeping one transport path means
+ * the strict and tolerant consumers cannot drift in error classification.
+ */
+async function sendInitRequestBody(
+  config: ResolvedConfig,
+  anonKey: AnonApiKey | null,
+  sdkVersion: string,
+  importGraph?: ImportGraphPayload,
+  healthReport?: SdkHealthReport,
+  diagnostics?: Array<{ code: SdkDiagnosticCode; message: string; timestamp: number }>,
+  signal?: AbortSignal,
+): Promise<unknown> {
   // Determine the API key for auth. Use || (not ??) so empty strings
   // fall through to the anonymous key — defense in depth for DISC-467.
   const effectiveKey = config.apiKey || anonKey;
@@ -309,7 +417,7 @@ export async function sendInitRequest(
     throw err;
   }
 
-  return SdkInitResponseSchema.parse(result.body);
+  return result.body;
 }
 
 /**
@@ -444,6 +552,12 @@ export async function writeClaimedKey(
  * Orchestrates the full init flow: send request, update config, cache result.
  * This function MUST NOT throw.
  *
+ * Response interpretation is envelope-tolerant: a response whose only
+ * defect is an invalid optional result-evidence capability envelope still
+ * applies, with both result-evidence capabilities unavailable. A response
+ * invalid anywhere else is rejected exactly as before. The strict
+ * {@link sendInitRequest} direct-call contract is unaffected.
+ *
  * Returns the claim result when the backend reports an account claim
  * transition, or `null` when no claim result is available (including
  * when init is skipped due to rate-limit backoff, missing API key,
@@ -484,8 +598,14 @@ export async function performInit(
     // attempt's own timeout and prevent the backoff-retry window from
     // ever running, defeating the transport's retry behavior.
     try {
-      // Delegate to sendInitRequest to avoid duplicating fetch logic
-      const result = await sendInitRequest(
+      // Delegate to the shared transport path to avoid duplicating fetch
+      // logic, then interpret the body with envelope tolerance: a response
+      // whose only defect is an invalid result-evidence capability envelope
+      // still applies (with both capabilities unavailable) instead of
+      // discarding the whole otherwise-valid config. A response invalid
+      // anywhere else re-parses strictly so the existing ZodError
+      // classification below is preserved byte-for-byte.
+      const body = await sendInitRequestBody(
         config,
         anonKey,
         sdkVersion,
@@ -493,6 +613,9 @@ export async function performInit(
         healthReport ?? undefined,
         undefined,
       );
+      const result =
+        parseInitResponseWithEnvelopeTolerance(body) ??
+        SdkInitResponseSchema.parse(body);
 
       // Update the shared active config (visible to every bundle instance)
       setActiveConfig(result);
@@ -650,10 +773,14 @@ function resolveActiveConfig(): CaptureConfig {
     return current.config;
   }
 
-  // Tier 2: file cache (only attempt once per process)
+  // Tier 2: file cache (only attempt once per process). The application
+  // boundary uses the envelope-tolerant loader: a cached response whose only
+  // defect is an invalid capability envelope still applies (capabilities
+  // unavailable) rather than downgrading the whole config to defaults. The
+  // public direct-call `loadCachedConfig` stays strict.
   if (!isConfigCacheChecked()) {
     markConfigCacheChecked();
-    const cached = loadCachedConfig();
+    const cached = loadCachedConfigTolerant();
     if (cached) {
       // Promote the disk cache into the shared store tagged with its `cache`
       // origin, so a subsequent read takes the tier-1 branch but still reports
@@ -690,15 +817,123 @@ function resolveActiveConfig(): CaptureConfig {
  * redaction is a defensive safety net for any path that surfaces a config still
  * holding the field — it is kept to preserve the invariant regardless of how
  * the config reaches here.
+ *
+ * The returned object is always a fresh copy (including the nested
+ * result-evidence capability envelope), so caller-side mutation of a
+ * returned config can never change the stored state that later reads and
+ * per-operation snapshots observe.
  */
 export function getActiveConfig(): CaptureConfig {
   const config = resolveActiveConfig();
-  if (config.attrHmacKey === undefined) {
-    return config;
+  const copy: CaptureConfig = { ...config };
+  delete copy.attrHmacKey;
+  if (copy.resultEvidenceCapabilities !== undefined) {
+    copy.resultEvidenceCapabilities = { ...copy.resultEvidenceCapabilities };
   }
-  const redacted: CaptureConfig = { ...config };
-  delete redacted.attrHmacKey;
-  return redacted;
+  return copy;
+}
+
+/**
+ * Provider-neutral result-evidence capability state as one immutable
+ * snapshot: the accepted wire version (`1`, or `null` when no valid
+ * version-1 envelope is active) and the two independent availability bits.
+ * Absence, a cleared config, the built-in defaults, or any envelope the
+ * application boundary stripped as invalid all present as
+ * `{ wireVersion: null, aggregateScalars: false, boundedRows: false }`.
+ */
+export interface ResultEvidenceCapabilityState {
+  readonly wireVersion: 1 | null;
+  readonly aggregateScalars: boolean;
+  readonly boundedRows: boolean;
+}
+
+/**
+ * One coherent, immutable view of every dynamic config value a
+ * result-evidence producer uses during a single operation: the master
+ * side-effect capture switch, the fidelity posture, the capability state,
+ * and the identifier-key state of the same config generation. Provider
+ * policy and recording-span admission are deliberately NOT part of this
+ * view — an adapter combines its own local policy and span check with this
+ * one dynamic view at its operation boundary.
+ *
+ * The view is frozen and aliases no mutable store state: the scalar fields
+ * are copied, the capability object is freshly created, and the
+ * identifier key is captured in a closure at snapshot time — so
+ * `JSON.stringify` of a view never carries the key, and a later config
+ * refresh or key rotation never changes a view already taken.
+ */
+export interface OperationConfigView {
+  readonly sideEffectEvidence: boolean;
+  readonly captureFidelity: CaptureFidelity;
+  readonly resultEvidence: ResultEvidenceCapabilityState;
+  /**
+   * The per-account identifier key of this view's config generation, or
+   * `undefined` when none is provisioned. A closure rather than a field so
+   * the raw secret stays off the view's enumerable surface.
+   */
+  readonly readAttrHmacKey: () => string | undefined;
+}
+
+/**
+ * The unavailable capability state: no accepted wire version, both
+ * capabilities off. Shared by the no-envelope snapshot path and the
+ * fail-closed view so the two cannot drift.
+ */
+const UNAVAILABLE_RESULT_EVIDENCE: ResultEvidenceCapabilityState =
+  Object.freeze({
+    wireVersion: null,
+    aggregateScalars: false,
+    boundedRows: false,
+  });
+
+/**
+ * Takes one coherent per-operation snapshot of the dynamic capture
+ * configuration. Reads through the ordinary three-tier resolution
+ * ({@link getActiveConfig}'s server → cache → default order, including the
+ * lazy once-per-process cache promotion and the decision-trace
+ * `config.tier` gate), then snapshots the master capture switch, fidelity,
+ * result-evidence capability state, and identifier key of that single
+ * resolved generation. The snapshot is synchronous, so no concurrent
+ * config apply can interleave between the fields — a producer that reads
+ * one view at operation admission observes one generation throughout the
+ * operation, and a refresh or key rotation lands on the next operation's
+ * view, never a view already taken.
+ *
+ * Fail-closed like its sibling admission read {@link isCaptureEnabled}: any
+ * error during resolution (e.g. a failing `process.cwd()` inside the lazy
+ * disk-cache tier) yields the everything-off view rather than throwing into
+ * a producer's operation path.
+ *
+ * Internal — deliberately NOT exported from the package barrel; producers
+ * inside the SDK are the only consumers.
+ */
+export function getOperationConfigView(): OperationConfigView {
+  try {
+    const config = resolveActiveConfig();
+    const attrHmacKey = config.attrHmacKey ?? getStoredAttrHmacKey();
+    const envelope = config.resultEvidenceCapabilities;
+    const resultEvidence: ResultEvidenceCapabilityState =
+      envelope !== undefined
+        ? Object.freeze({
+            wireVersion: envelope.wireVersion,
+            aggregateScalars: envelope.aggregateScalars,
+            boundedRows: envelope.boundedRows,
+          })
+        : UNAVAILABLE_RESULT_EVIDENCE;
+    return Object.freeze({
+      sideEffectEvidence: config.sideEffectEvidence === true,
+      captureFidelity: config.captureFidelity ?? "strict",
+      resultEvidence,
+      readAttrHmacKey: () => attrHmacKey,
+    });
+  } catch {
+    return Object.freeze({
+      sideEffectEvidence: false,
+      captureFidelity: "strict" as CaptureFidelity,
+      resultEvidence: UNAVAILABLE_RESULT_EVIDENCE,
+      readAttrHmacKey: () => undefined,
+    });
+  }
 }
 
 /**
@@ -854,6 +1089,13 @@ export type VerifyInitResult =
  * runtime fire-and-forget call which can silently fail inside a
  * Next.js 16 process.
  *
+ * Verification matches the application boundary's envelope tolerance: a
+ * response whose only defect is an invalid result-evidence capability
+ * envelope verifies as reachable (the runtime applies exactly that
+ * response, with both capabilities unavailable), so the CLI never reports
+ * a server as malformed that the running SDK accepts. A response invalid
+ * anywhere else is still classified `malformed`.
+ *
  * The anon key is NEVER logged by this function. Error `detail`
  * strings are sanitized to the failure class only — the key does not
  * appear in transport, rejection, or malformed messages.
@@ -864,7 +1106,10 @@ export async function verifyInitReachable(
   sdkVersion: string,
 ): Promise<VerifyInitResult> {
   try {
-    const response = await sendInitRequest(config, anonKey, sdkVersion);
+    const body = await sendInitRequestBody(config, anonKey, sdkVersion);
+    const response =
+      parseInitResponseWithEnvelopeTolerance(body) ??
+      SdkInitResponseSchema.parse(body);
     return { ok: true, response };
   } catch (err) {
     // HTTP status error — server rejected the key.
