@@ -277,3 +277,58 @@ describe("config-apply decision — fail-closed branch", () => {
     });
   });
 });
+
+describe("register-time eager cache application — envelope tolerance", () => {
+  it("applies an envelope-invalid cache at registration with the rest of the config intact", async () => {
+    // Write a cache whose ONLY defect is a malformed capability envelope
+    // into this test's temp cwd. The eager register-time application must
+    // route through the envelope-tolerant loader: the rest of the config
+    // (sideEffectEvidence: true) applies. Reverting register.ts to the
+    // strict loader makes this cache load as null (defaults, capture off)
+    // and fails this test.
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const cacheDir = join(process.cwd(), ".glasstrace");
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(
+      join(cacheDir, "config"),
+      JSON.stringify({
+        response: {
+          ...STANDARD_INIT_FIELDS,
+          subscriptionStatus: "anonymous",
+          config: {
+            requestBodies: false,
+            queryParamValues: false,
+            envVarValues: false,
+            fullConsoleOutput: false,
+            importGraph: false,
+            sideEffectEvidence: true,
+            resultEvidenceCapabilities: { wireVersion: 2 },
+          },
+        },
+        cachedAt: Date.now(),
+      }),
+      "utf-8",
+    );
+
+    // A failing transport keeps the live init from replacing the eagerly
+    // applied cache during the settle window.
+    _setTransportForTesting(
+      vi.fn(async () => {
+        throw new Error("offline");
+      }) as never,
+    );
+
+    const { getActiveConfig, getOperationConfigView } = await import(
+      "../../../packages/sdk/src/init-client.js"
+    );
+    registerGlasstrace({ apiKey: TEST_DEV_API_KEY });
+    await settle();
+
+    expect(getActiveConfig().sideEffectEvidence).toBe(true);
+    expect(getOperationConfigView().resultEvidence).toEqual({
+      wireVersion: null,
+      aggregateScalars: false,
+      boundedRows: false,
+    });
+  });
+});

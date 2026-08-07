@@ -7,11 +7,13 @@ import type { SdkInitResponse, SdkHealthReport } from "@glasstrace/protocol";
 import { DEFAULT_CAPTURE_CONFIG } from "@glasstrace/protocol";
 import {
   loadCachedConfig,
+  loadCachedConfigTolerant,
   saveCachedConfig,
   sendInitRequest,
   performInit,
   getActiveConfig,
   getAttrHmacKey,
+  getOperationConfigView,
   writeClaimedKey,
   _resetConfigForTesting,
   _isRateLimitBackoff,
@@ -20,6 +22,7 @@ import {
   consumeRateLimitFlag,
   didLastInitSucceed,
 } from "../../../packages/sdk/src/init-client.js";
+import { markConfigCacheChecked } from "../../../packages/sdk/src/active-config-store.js";
 import {
   HttpsStatusError,
   HttpsTransportError,
@@ -1099,6 +1102,512 @@ describe("Init Client + Config Cache", () => {
       await performInit(makeResolvedConfig({ apiKey: undefined }), null, "1.0.0");
 
       expect(didLastInitSucceed()).toBe(false);
+    });
+  });
+});
+
+describe("Result-evidence capability state (config lifecycle)", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "glasstrace-capability-test-"));
+    _resetConfigForTesting();
+    // Keep pristine-default reads off the disk-cache tier so assertions do
+    // not depend on the runner's cwd; promotion tests re-reset and spy cwd.
+    markConfigCacheChecked();
+    vi.restoreAllMocks();
+  });
+
+  afterEach(async () => {
+    try {
+      await rm(tempDir, { recursive: true, force: true });
+    } finally {
+      vi.unstubAllGlobals();
+      _resetConfigForTesting();
+    }
+  });
+
+  const validEnvelope = {
+    wireVersion: 1,
+    aggregateScalars: true,
+    boundedRows: false,
+  } as const;
+
+  /** An init response whose config carries the given envelope value. */
+  function makeEnvelopeResponse(
+    envelope: unknown,
+    configOverrides?: Record<string, unknown>,
+  ): SdkInitResponse {
+    const base = makeInitResponse();
+    return {
+      ...base,
+      config: {
+        ...base.config,
+        ...configOverrides,
+        ...(envelope === undefined
+          ? {}
+          : { resultEvidenceCapabilities: envelope }),
+      },
+    } as SdkInitResponse;
+  }
+
+  function writeCacheFile(root: string, response: unknown): void {
+    const dirPath = join(root, ".glasstrace");
+    mkdirSync(dirPath, { recursive: true });
+    writeFileSync(
+      join(dirPath, "config"),
+      JSON.stringify({ response, cachedAt: Date.now() }),
+      "utf-8",
+    );
+  }
+
+  describe("getOperationConfigView — defaults, clear, and combinations", () => {
+    it("presents the unavailable capability state with no config applied", () => {
+      const view = getOperationConfigView();
+      expect(view.resultEvidence).toEqual({
+        wireVersion: null,
+        aggregateScalars: false,
+        boundedRows: false,
+      });
+      expect(view.sideEffectEvidence).toBe(false);
+      expect(view.captureFidelity).toBe("strict");
+      expect(view.readAttrHmacKey()).toBeUndefined();
+    });
+
+    it("returns to the unavailable state after an explicit clear", () => {
+      _setCurrentConfig(
+        makeEnvelopeResponse({
+          wireVersion: 1,
+          aggregateScalars: true,
+          boundedRows: true,
+        }),
+      );
+      expect(getOperationConfigView().resultEvidence.aggregateScalars).toBe(
+        true,
+      );
+      _resetConfigForTesting();
+      markConfigCacheChecked();
+      const view = getOperationConfigView();
+      expect(view.resultEvidence).toEqual({
+        wireVersion: null,
+        aggregateScalars: false,
+        boundedRows: false,
+      });
+      expect(view.sideEffectEvidence).toBe(false);
+      expect(view.captureFidelity).toBe("strict");
+      expect(view.readAttrHmacKey()).toBeUndefined();
+    });
+
+    it("represents all four valid capability combinations independently", () => {
+      for (const aggregateScalars of [false, true]) {
+        for (const boundedRows of [false, true]) {
+          _setCurrentConfig(
+            makeEnvelopeResponse({
+              wireVersion: 1,
+              aggregateScalars,
+              boundedRows,
+            }),
+          );
+          expect(getOperationConfigView().resultEvidence).toEqual({
+            wireVersion: 1,
+            aggregateScalars,
+            boundedRows,
+          });
+        }
+      }
+    });
+  });
+
+  describe("application-boundary envelope tolerance (performInit)", () => {
+    const initConfig = makeResolvedConfig();
+
+    beforeEach(() => {
+      // performInit persists the applied response to `cwd`/.glasstrace —
+      // point it at this test's temp dir so no cache leaks into the repo
+      // root or a sibling test's tier-2 read.
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+    });
+
+    it.each([
+      ["future wire version", { ...validEnvelope, wireVersion: 2 }],
+      ["partial envelope", { wireVersion: 1 }],
+      [
+        "unknown member",
+        { ...validEnvelope, provider: "prisma" },
+      ],
+      [
+        "non-boolean member",
+        { wireVersion: 1, aggregateScalars: "true", boundedRows: false },
+      ],
+      ["non-object envelope", "enabled"],
+      ["null envelope", null],
+    ])(
+      "applies an otherwise-valid response with a %s, capabilities unavailable",
+      async (_label, envelope) => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        installMockTransport({
+          json: makeEnvelopeResponse(envelope, { sideEffectEvidence: true }),
+        });
+        const result = await performInit(initConfig, null, "1.0.0");
+        expect(result).toBeNull();
+        // The rest of the response applied: the master switch came through.
+        expect(getActiveConfig().sideEffectEvidence).toBe(true);
+        // The capability envelope failed closed.
+        expect(getOperationConfigView().resultEvidence).toEqual({
+          wireVersion: null,
+          aggregateScalars: false,
+          boundedRows: false,
+        });
+        expect(didLastInitSucceed()).toBe(true);
+        // The recovery is deliberately silent: no validation-failure warning
+        // is emitted for a response the SDK applied.
+        expect(
+          warnSpy.mock.calls.some(([msg]) =>
+            String(msg).includes("failed validation"),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it("rejects a null response body without applying anything", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      installMockTransport({ json: null });
+      await performInit(initConfig, null, "1.0.0");
+      expect(getActiveConfig()).toEqual(DEFAULT_CAPTURE_CONFIG);
+      expect(didLastInitSucceed()).toBe(false);
+    });
+
+    it("applies a valid envelope from a live response", async () => {
+      installMockTransport({ json: makeEnvelopeResponse(validEnvelope) });
+      await performInit(initConfig, null, "1.0.0");
+      expect(getOperationConfigView().resultEvidence).toEqual(validEnvelope);
+    });
+
+    it("still rejects a response that is invalid outside the envelope", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const invalid = makeEnvelopeResponse(
+        { ...validEnvelope, wireVersion: 2 },
+        { sideEffectEvidence: true },
+      ) as unknown as Record<string, unknown>;
+      delete invalid.tierLimits;
+      installMockTransport({ json: invalid });
+      await performInit(initConfig, null, "1.0.0");
+      // Whole-response rejection: nothing applied, existing warn preserved.
+      expect(getActiveConfig()).toEqual(DEFAULT_CAPTURE_CONFIG);
+      expect(didLastInitSucceed()).toBe(false);
+      expect(
+        warnSpy.mock.calls.some(([msg]) =>
+          String(msg).includes("failed validation"),
+        ),
+      ).toBe(true);
+    });
+
+    it("rejects an unrelated-invalid response even when its envelope is valid", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const invalid = makeEnvelopeResponse(validEnvelope) as unknown as Record<
+        string,
+        unknown
+      >;
+      invalid.subscriptionStatus = 42;
+      installMockTransport({ json: invalid });
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+      expect(getActiveConfig()).toEqual(DEFAULT_CAPTURE_CONFIG);
+      expect(didLastInitSucceed()).toBe(false);
+    });
+
+    it("transitions absent → valid → future → absent across refreshes", async () => {
+      installMockTransport({ json: makeEnvelopeResponse(undefined) });
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+      expect(getOperationConfigView().resultEvidence.wireVersion).toBeNull();
+
+      installMockTransport({ json: makeEnvelopeResponse(validEnvelope) });
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+      expect(getOperationConfigView().resultEvidence).toEqual(validEnvelope);
+
+      installMockTransport({
+        json: makeEnvelopeResponse({ ...validEnvelope, wireVersion: 2 }),
+      });
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+      // The prior true bit is not retained through an invalid envelope.
+      expect(getOperationConfigView().resultEvidence).toEqual({
+        wireVersion: null,
+        aggregateScalars: false,
+        boundedRows: false,
+      });
+
+      installMockTransport({ json: makeEnvelopeResponse(undefined) });
+      await performInit(makeResolvedConfig(), null, "1.0.0");
+      expect(getOperationConfigView().resultEvidence).toEqual({
+        wireVersion: null,
+        aggregateScalars: false,
+        boundedRows: false,
+      });
+    });
+  });
+
+  describe("public direct-parse APIs stay strict", () => {
+    it("sendInitRequest throws on an envelope-invalid response", async () => {
+      installMockTransport({
+        json: makeEnvelopeResponse({ ...validEnvelope, wireVersion: 2 }),
+      });
+      await expect(
+        sendInitRequest(makeResolvedConfig(), null, "1.0.0"),
+      ).rejects.toMatchObject({ name: "ZodError" });
+    });
+
+    it("loadCachedConfig returns null for an envelope-invalid cache", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      writeCacheFile(
+        tempDir,
+        makeEnvelopeResponse({ wireVersion: 1 }, { sideEffectEvidence: true }),
+      );
+      expect(loadCachedConfig(tempDir)).toBeNull();
+      expect(
+        warnSpy.mock.calls.some(([msg]) =>
+          String(msg).includes("failed validation"),
+        ),
+      ).toBe(true);
+    });
+
+    it("loadCachedConfigTolerant recovers an envelope-invalid cache", () => {
+      writeCacheFile(
+        tempDir,
+        makeEnvelopeResponse({ wireVersion: 1 }, { sideEffectEvidence: true }),
+      );
+      const result = loadCachedConfigTolerant(tempDir);
+      expect(result).not.toBeNull();
+      expect(result!.config.sideEffectEvidence).toBe(true);
+      expect(result!.config.resultEvidenceCapabilities).toBeUndefined();
+    });
+
+    it("loadCachedConfigTolerant still rejects an unrelated-invalid cache", () => {
+      const response = makeEnvelopeResponse({ wireVersion: 1 }) as unknown as Record<
+        string,
+        unknown
+      >;
+      delete response.tierLimits;
+      writeCacheFile(tempDir, response);
+      expect(loadCachedConfigTolerant(tempDir)).toBeNull();
+    });
+
+    it("loadCachedConfigTolerant preserves a valid cached envelope through normalization", () => {
+      const response = makeEnvelopeResponse(validEnvelope);
+      response.config.captureFidelity = "full";
+      response.config.attrHmacKey = "cached-secret";
+      writeCacheFile(tempDir, response);
+      const result = loadCachedConfigTolerant(tempDir);
+      expect(result).not.toBeNull();
+      // Existing normalization is unchanged: key stripped, unkeyed full
+      // downgraded — while the valid envelope survives.
+      expect(result!.config.attrHmacKey).toBeUndefined();
+      expect(result!.config.captureFidelity).toBe("strict");
+      expect(result!.config.resultEvidenceCapabilities).toEqual(validEnvelope);
+    });
+
+    it("loadCachedConfigTolerant returns null when the cache file is absent", () => {
+      expect(loadCachedConfigTolerant(tempDir)).toBeNull();
+    });
+  });
+
+  describe("cache promotion at the application boundary", () => {
+    it("promotes an envelope-invalid cache with capabilities unavailable", () => {
+      _resetConfigForTesting();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+      writeCacheFile(
+        tempDir,
+        makeEnvelopeResponse(
+          { ...validEnvelope, extra: 1 },
+          { sideEffectEvidence: true },
+        ),
+      );
+      const view = getOperationConfigView();
+      expect(view.sideEffectEvidence).toBe(true);
+      expect(view.resultEvidence).toEqual({
+        wireVersion: null,
+        aggregateScalars: false,
+        boundedRows: false,
+      });
+    });
+
+    it("promotes a valid cached envelope into the capability view", () => {
+      _resetConfigForTesting();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+      writeCacheFile(tempDir, makeEnvelopeResponse(validEnvelope));
+      expect(getOperationConfigView().resultEvidence).toEqual(validEnvelope);
+    });
+
+    it("keeps an old envelope-less cache promotable with capabilities unavailable", () => {
+      _resetConfigForTesting();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+      writeCacheFile(
+        tempDir,
+        makeEnvelopeResponse(undefined, { sideEffectEvidence: true }),
+      );
+      const view = getOperationConfigView();
+      expect(view.sideEffectEvidence).toBe(true);
+      expect(view.resultEvidence.wireVersion).toBeNull();
+    });
+  });
+
+  describe("coherent per-operation view", () => {
+    it("a view retains its generation across a config refresh and key rotation", () => {
+      const generationA = makeEnvelopeResponse(
+        { wireVersion: 1, aggregateScalars: true, boundedRows: true },
+        { sideEffectEvidence: true, captureFidelity: "full", attrHmacKey: "key-a" },
+      );
+      _setCurrentConfig(generationA);
+      const viewA = getOperationConfigView();
+
+      const generationB = makeEnvelopeResponse(undefined, {
+        sideEffectEvidence: false,
+      });
+      _setCurrentConfig(generationB);
+      const viewB = getOperationConfigView();
+
+      // The earlier view is untouched by the refresh — same generation
+      // throughout an operation already being evaluated.
+      expect(viewA.sideEffectEvidence).toBe(true);
+      expect(viewA.captureFidelity).toBe("full");
+      expect(viewA.resultEvidence).toEqual({
+        wireVersion: 1,
+        aggregateScalars: true,
+        boundedRows: true,
+      });
+      expect(viewA.readAttrHmacKey()).toBe("key-a");
+      // The next operation's view observes the refresh.
+      expect(viewB.sideEffectEvidence).toBe(false);
+      expect(viewB.captureFidelity).toBe("strict");
+      expect(viewB.resultEvidence.wireVersion).toBeNull();
+      expect(viewB.readAttrHmacKey()).toBeUndefined();
+    });
+
+    it("key rotation lands on the next view, never a view already taken", () => {
+      _setCurrentConfig(
+        makeEnvelopeResponse(validEnvelope, {
+          captureFidelity: "full",
+          attrHmacKey: "key-a",
+        }),
+      );
+      const viewA = getOperationConfigView();
+      _setCurrentConfig(
+        makeEnvelopeResponse(validEnvelope, {
+          captureFidelity: "full",
+          attrHmacKey: "key-b",
+        }),
+      );
+      expect(viewA.readAttrHmacKey()).toBe("key-a");
+      expect(getOperationConfigView().readAttrHmacKey()).toBe("key-b");
+    });
+
+    it("views are frozen and mutation cannot change stored state", () => {
+      _setCurrentConfig(makeEnvelopeResponse(validEnvelope));
+      const view = getOperationConfigView();
+      expect(Object.isFrozen(view)).toBe(true);
+      expect(Object.isFrozen(view.resultEvidence)).toBe(true);
+      expect(() => {
+        (view as { sideEffectEvidence: boolean }).sideEffectEvidence = true;
+      }).toThrow(TypeError);
+      expect(() => {
+        (view.resultEvidence as { aggregateScalars: boolean }).aggregateScalars =
+          false;
+      }).toThrow(TypeError);
+      // Stored state is unaffected by the attempted mutations.
+      expect(getOperationConfigView().resultEvidence).toEqual(validEnvelope);
+    });
+
+    it("mutating the input response after apply does not change stored state", () => {
+      const response = makeEnvelopeResponse(
+        { wireVersion: 1, aggregateScalars: true, boundedRows: true },
+        { sideEffectEvidence: true },
+      );
+      _setCurrentConfig(response);
+      response.config.sideEffectEvidence = false;
+      response.config.captureFidelity = "full";
+      (response.config.resultEvidenceCapabilities as {
+        aggregateScalars: boolean;
+      }).aggregateScalars = false;
+      const view = getOperationConfigView();
+      expect(view.sideEffectEvidence).toBe(true);
+      expect(view.captureFidelity).toBe("strict");
+      expect(view.resultEvidence.aggregateScalars).toBe(true);
+    });
+
+    it("serializing a view never carries the identifier key", () => {
+      _setCurrentConfig(
+        makeEnvelopeResponse(validEnvelope, {
+          captureFidelity: "full",
+          attrHmacKey: "view-secret",
+        }),
+      );
+      const view = getOperationConfigView();
+      expect(JSON.stringify(view)).not.toContain("view-secret");
+      expect(Object.keys(view)).not.toContain("attrHmacKey");
+      expect(view.readAttrHmacKey()).toBe("view-secret");
+    });
+
+    it("fails closed to the everything-off view when resolution throws", () => {
+      _resetConfigForTesting();
+      // With the store empty and the cache tier unchecked, resolution reaches
+      // the disk-cache tier, whose root lookup calls process.cwd() — make it
+      // throw to simulate a torn-down working directory.
+      vi.spyOn(process, "cwd").mockImplementation(() => {
+        throw new Error("cwd unavailable");
+      });
+      const view = getOperationConfigView();
+      expect(view.sideEffectEvidence).toBe(false);
+      expect(view.captureFidelity).toBe("strict");
+      expect(view.resultEvidence).toEqual({
+        wireVersion: null,
+        aggregateScalars: false,
+        boundedRows: false,
+      });
+      expect(view.readAttrHmacKey()).toBeUndefined();
+    });
+
+    it("mutating a getActiveConfig() result does not change stored state", () => {
+      _setCurrentConfig(makeEnvelopeResponse(validEnvelope));
+      const returned = getActiveConfig();
+      returned.sideEffectEvidence = true;
+      returned.resultEvidenceCapabilities!.aggregateScalars = false;
+      // The stored generation is unaffected by mutating the returned copy.
+      expect(getActiveConfig().sideEffectEvidence).toBe(false);
+      expect(getOperationConfigView().resultEvidence).toEqual(validEnvelope);
+    });
+  });
+
+  describe("verifyInitReachable matches the application boundary", () => {
+    it("verifies a response whose only defect is the capability envelope", async () => {
+      installMockTransport({
+        json: makeEnvelopeResponse(
+          { wireVersion: 2, aggregateScalars: true, boundedRows: false },
+          { sideEffectEvidence: true },
+        ),
+      });
+      const result = await (
+        await import("../../../packages/sdk/src/init-client.js")
+      ).verifyInitReachable(makeResolvedConfig(), null, "1.0.0");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        // The verified response is the same recovered value the runtime
+        // applies: envelope stripped, remainder intact.
+        expect(result.response.config.sideEffectEvidence).toBe(true);
+        expect(
+          result.response.config.resultEvidenceCapabilities,
+        ).toBeUndefined();
+      }
+    });
+
+    it("still classifies an unrelated-invalid response as malformed", async () => {
+      const invalid = makeEnvelopeResponse(validEnvelope) as unknown as Record<
+        string,
+        unknown
+      >;
+      delete invalid.tierLimits;
+      installMockTransport({ json: invalid });
+      const result = await (
+        await import("../../../packages/sdk/src/init-client.js")
+      ).verifyInitReachable(makeResolvedConfig(), null, "1.0.0");
+      expect(result).toMatchObject({ ok: false, reason: "malformed" });
     });
   });
 });

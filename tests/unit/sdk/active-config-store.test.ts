@@ -258,3 +258,96 @@ describe("active-config store — cross-bundle-instance sharing", () => {
     expect(instanceB.isCaptureEnabled()).toBe(true);
   });
 });
+
+describe("active-config store — result-evidence capability generation sharing", () => {
+  beforeEach(async () => {
+    const store = await import(
+      "../../../packages/sdk/src/active-config-store.js"
+    );
+    store._resetActiveConfigForTesting();
+    store.markConfigCacheChecked();
+  });
+
+  afterEach(() => {
+    delete (globalThis as Record<symbol, unknown>)[STORE_SYMBOL];
+    vi.resetModules();
+  });
+
+  it("a capability envelope applied in one module instance is observed by a view in another", async () => {
+    const instanceA = await freshInitClientInstance();
+    const instanceB = await freshInitClientInstance();
+
+    const base = makeInitResponse(true);
+    instanceA._setCurrentConfig({
+      ...base,
+      config: {
+        ...base.config,
+        resultEvidenceCapabilities: {
+          wireVersion: 1,
+          aggregateScalars: true,
+          boundedRows: true,
+        },
+      },
+    } as SdkInitResponse);
+
+    // A different module evaluation reads the same generation through the
+    // shared record: capability bits, master switch, and key state all come
+    // from the one apply.
+    const view = instanceB.getOperationConfigView();
+    expect(view.resultEvidence).toEqual({
+      wireVersion: 1,
+      aggregateScalars: true,
+      boundedRows: true,
+    });
+    expect(view.sideEffectEvidence).toBe(true);
+  });
+
+  it("stored state does not alias the caller's response object", async () => {
+    const instanceA = await freshInitClientInstance();
+    const response = makeInitResponse(true);
+    instanceA._setCurrentConfig(response);
+
+    // Mutating the caller's object after apply must not reach the store —
+    // a coherent later read still sees the applied generation.
+    response.config.sideEffectEvidence = false;
+    expect(instanceA.isCaptureEnabled()).toBe(true);
+  });
+});
+
+describe("active-config store — full input isolation", () => {
+  beforeEach(async () => {
+    const store = await import(
+      "../../../packages/sdk/src/active-config-store.js"
+    );
+    store._resetActiveConfigForTesting();
+    store.markConfigCacheChecked();
+  });
+
+  afterEach(() => {
+    delete (globalThis as Record<symbol, unknown>)[STORE_SYMBOL];
+    vi.resetModules();
+  });
+
+  it("nested tierLimits and claimResult do not alias the caller's objects", async () => {
+    const store = await import(
+      "../../../packages/sdk/src/active-config-store.js"
+    );
+    const response = makeInitResponse(true);
+    (response as { claimResult?: unknown }).claimResult = {
+      newApiKey: "gt_dev_" + "b".repeat(48),
+      accountId: "6f9619ff-8b86-4d01-b42d-00cf4fc964ff",
+      graceExpiresAt: Date.now() + 60_000,
+    };
+    store.setActiveConfig(response);
+
+    // Mutating the caller's nested objects after apply must not reach the
+    // stored generation.
+    response.tierLimits.tracesPerMinute = 1;
+    (response as { claimResult: { newApiKey: string } }).claimResult.newApiKey =
+      "mutated";
+
+    const stored = store.getActiveConfigResponse();
+    expect(stored?.tierLimits.tracesPerMinute).toBe(100);
+    expect(stored?.claimResult?.newApiKey).toBe("gt_dev_" + "b".repeat(48));
+  });
+});

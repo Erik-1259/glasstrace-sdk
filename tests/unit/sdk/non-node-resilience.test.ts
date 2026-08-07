@@ -78,6 +78,16 @@ describe("init-client without node:fs", () => {
     expect(result).toBeNull();
   });
 
+  it("loadCachedConfigTolerant returns null when node:fs is unavailable", async () => {
+    const { loadCachedConfigTolerant } = await import(
+      "../../../packages/sdk/src/init-client.js"
+    );
+    // The envelope-tolerant application-boundary loader shares the same
+    // no-fs guard as the strict public loader.
+    const result = loadCachedConfigTolerant("/tmp/nonexistent");
+    expect(result).toBeNull();
+  });
+
   it("saveCachedConfig is a no-op when node:fs is unavailable", async () => {
     const { saveCachedConfig } = await import(
       "../../../packages/sdk/src/init-client.js"

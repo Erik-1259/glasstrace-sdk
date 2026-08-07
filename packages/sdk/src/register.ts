@@ -5,7 +5,7 @@ import { resolveConfig, isProductionDisabled, isAnonymousMode } from "./env-dete
 import type { ResolvedConfig } from "./env-detection.js";
 import { SessionManager } from "./session.js";
 import { getOrCreateAnonKey, readAnonKey } from "./anon-key.js";
-import { loadCachedConfig, performInit, _setCurrentConfig, getActiveConfig, getLinkedAccountId, getClaimResult, didLastInitSucceed } from "./init-client.js";
+import { loadCachedConfigTolerant, performInit, _setCurrentConfig, getActiveConfig, getLinkedAccountId, getClaimResult, didLastInitSucceed } from "./init-client.js";
 import { createDiscoveryHandler } from "./discovery-endpoint.js";
 import { configureOtel, setResolvedApiKey, getResolvedApiKey, notifyApiKeyResolved, resetOtelConfigForTesting } from "./otel-config.js";
 import { installContextManager } from "./context-manager.js";
@@ -255,8 +255,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     // Load cached config and apply to in-memory store. Tag it with the `cache`
     // origin so the decision-trace `config.tier` gate reports `cached` (not
-    // `served`) until a live init response replaces it.
-    const cachedInitResponse = loadCachedConfig();
+    // `served`) until a live init response replaces it. This is an
+    // active-configuration application boundary, so it uses the
+    // envelope-tolerant loader: a cache whose only defect is an invalid
+    // result-evidence capability envelope still applies, with both
+    // capabilities unavailable.
+    const cachedInitResponse = loadCachedConfigTolerant();
     if (cachedInitResponse) {
       _setCurrentConfig(cachedInitResponse, "cache");
     }

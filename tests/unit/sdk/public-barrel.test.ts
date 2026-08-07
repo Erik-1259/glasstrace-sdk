@@ -29,4 +29,18 @@ describe("public-barrel snapshot (SDK-029)", () => {
 
     expect(actual).toEqual(fixture);
   });
+
+  it("keeps internal config accessors off the public surface", () => {
+    // The exact-match snapshot above already forbids these; the explicit
+    // negative pins document the intent — the coherent operation view, the
+    // envelope-tolerant cache loader, and the identifier-key accessor are
+    // SDK-internal and must never gain a public export.
+    for (const internalName of [
+      "getOperationConfigView",
+      "loadCachedConfigTolerant",
+      "getAttrHmacKey",
+    ]) {
+      expect(internalName in rootBarrel, internalName).toBe(false);
+    }
+  });
 });

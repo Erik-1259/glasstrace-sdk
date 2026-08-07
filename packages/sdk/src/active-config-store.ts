@@ -199,6 +199,14 @@ export function getActiveConfigResponse(): SdkInitResponse | null {
  * promotion — overwrites or clears the key, so no copy hashes with a stale key.
  * Passing `null` clears both.
  *
+ * The stored value never aliases the caller's objects: the response, its
+ * `config`, and the nested result-evidence capability envelope are each
+ * copied on apply, so mutating the input after this call cannot change the
+ * stored state a later coherent read observes. The apply is one synchronous
+ * record assignment, so capability state replaces atomically with the rest
+ * of the response — a reader never sees one update's capability bits paired
+ * with another update's capture or fidelity state.
+ *
  * `origin` records where the config came from — `"server"` (a live init /
  * heartbeat response, the default) or `"cache"` (a promotion from the on-disk
  * cache). It is read by the decision-trace `config.tier` gate so a promoted
@@ -216,22 +224,28 @@ export function setActiveConfig(
     return;
   }
   store.origin = origin;
+  // Defensive copy: fresh response, `config`, capability-envelope,
+  // `tierLimits`, and `claimResult` objects, with the secret removed from
+  // the copy (it goes into the closure holder, never an enumerable field)
+  // — so the caller retains no reference into stored state.
   const innerKey = config.config.attrHmacKey;
-  if (innerKey === undefined) {
-    // No key in this config — including the key-less disk-cache promotion path
-    // (`init-client.ts` strips the secret before caching). Clear any
-    // previously-applied key so this key-less apply wins (last-writer-wins).
-    store.config = config;
-    store.attrHmacKeyHolder.set(undefined);
-    return;
-  }
-  // Store a secret-free copy on the shared record. The clone is shallow at the
-  // response level with a fresh `config` object so the stored value does not
-  // alias the caller's object, and `attrHmacKey` is removed from that fresh
-  // `config`; the secret goes into the closure holder, never an enumerable field.
   const { attrHmacKey: _omit, ...redactedInner } = config.config;
   void _omit;
-  store.config = { ...config, config: redactedInner };
+  const inner: SdkInitResponse["config"] = { ...redactedInner };
+  if (inner.resultEvidenceCapabilities !== undefined) {
+    inner.resultEvidenceCapabilities = { ...inner.resultEvidenceCapabilities };
+  }
+  store.config = {
+    ...config,
+    config: inner,
+    tierLimits: { ...config.tierLimits },
+    ...(config.claimResult !== undefined
+      ? { claimResult: { ...config.claimResult } }
+      : {}),
+  };
+  // A key-less apply — including the key-less disk-cache promotion path
+  // (`init-client.ts` strips the secret before caching) — clears any
+  // previously-applied key so the key-less apply wins (last-writer-wins).
   store.attrHmacKeyHolder.set(innerKey);
 }
 
