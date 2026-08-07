@@ -697,10 +697,13 @@ function admitAggregateValue(
  *  - aggregate `_avg` / `_sum` / `_min` / `_max` — the named concrete own
  *    field of an own non-array object bucket.
  *
- * The family marker and every prepared scalar attach in one best-effort
- * `setAttributes` call, only when at least one scalar prepared — a
- * marker-only or partial family is never written by this producer, and
- * receiver-side completeness validation remains the transport backstop.
+ * The bundle attaches best-effort in two ordered writes — every prepared
+ * scalar, then the family marker as a separate final call — and only when
+ * at least one scalar prepared. Marker-last is a program-level ordering
+ * guarantee, so a bundle truncated by a host span-attribute limit (or a
+ * throwing sink) loses its marker before any scalar and fails closed at
+ * the receiver: a marker-only or partial family is never retained, with
+ * receiver-side completeness validation as the transport backstop.
  */
 function projectAggregateResult(
   span: Span,
@@ -782,12 +785,21 @@ function projectAggregateResult(
   }
 
   if (preparedCount === 0) return;
-  // One best-effort logical bundle: the marker and every scalar together.
+  // One best-effort logical bundle in two ORDERED writes: every scalar
+  // first, then the family marker as its own second call. Sequencing the
+  // marker in a separate call makes marker-last a program guarantee rather
+  // than a provider detail (the OTel API does not promise any particular
+  // key-iteration order within one `setAttributes` call), so a bundle
+  // truncated by a host-configured span attribute-count limit — or cut
+  // short by a throwing sink — always loses its marker rather than a
+  // scalar suffix; the receiver then strips the unmarked remainder instead
+  // of retaining a shape-valid partial family as complete.
   try {
-    span.setAttributes({
-      [RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY]: operation === "count" ? 1 : 2,
-      ...prepared,
-    });
+    span.setAttributes(prepared);
+    span.setAttribute(
+      RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY,
+      operation === "count" ? 1 : 2,
+    );
   } catch {
     // Attribute failure leaves the family inert; the host query result is
     // unaffected and receiver completeness validation drops any partial.
