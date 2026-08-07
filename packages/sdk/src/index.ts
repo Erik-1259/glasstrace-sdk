@@ -231,6 +231,7 @@ export type { CaptureOptions } from "./side-effect/capture.js";
 export { prismaAdapter } from "./adapters/prisma.js";
 export type {
   PrismaAdapterOptions,
+  PrismaAggregateCaptureEntry,
   PrismaCaptureColumn,
   PrismaCaptureExtension,
   ScalarIntent,

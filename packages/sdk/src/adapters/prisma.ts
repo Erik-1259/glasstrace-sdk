@@ -5,11 +5,14 @@
  * each allowlisted `(model, column)`, projects a result field — a boolean
  * (default), a finite number under a numeric `as` intent, or a pseudonymized
  * identifier under the `id` intent — onto a Glasstrace value-fidelity scalar
- * so an agent can read it back from the trace. The adapter is **passive and
+ * so an agent can read it back from the trace. A separate, equally explicit
+ * `aggregateAllow` list opts named `count` / `aggregate` results into
+ * provider-neutral result-evidence bundles (see
+ * {@link PrismaAggregateCaptureEntry}). The adapter is **passive and
  * observational**: it invokes Prisma's supplied query callback exactly once
- * and never issues an additional query, inspects only own allowlisted fields
- * on eligible single-record results, never mutates query arguments or
- * results, and never changes query behavior or errors.
+ * and never issues an additional query, inspects only own fields named by an
+ * explicit allowlist entry, never mutates query arguments or results, and
+ * never changes query behavior or errors.
  *
  * Apply it like any Prisma extension:
  *
@@ -29,9 +32,12 @@
  *    `db.<Model>.<op>` span — so the adapter opens its own recording
  *    `db.<Model>.<op>` span (a same-trace descendant of the request span) and
  *    emits onto it via {@link capture}.
- *  - **Default-deny.** Nothing is captured unless an explicit `allow` entry
- *    matches AND the server-pushed `sideEffectEvidence` capture flag is on.
- *    An empty / unset `allow` captures nothing.
+ *  - **Default-deny.** Nothing is captured unless an explicit allowlist
+ *    entry matches AND the server-pushed `sideEffectEvidence` capture flag
+ *    is on — `allow` for single-record value capture, `aggregateAllow`
+ *    (additionally gated on the server-granted aggregate-scalars
+ *    result-evidence capability) for count/aggregate result capture. Empty
+ *    or unset lists capture nothing.
  *  - **Allowlisted scalars.** Each column projects onto a value-fidelity
  *    scalar by its `as` intent — a boolean `*Flag` (default), a finite
  *    numeric `*Value`/`*Amount`/`*Ms`/`*Bytes`/`*Ratio`, or a pseudonymized
@@ -47,11 +53,12 @@
  *  - **Pure observer.** Capture work can never throw into the host query;
  *    the owned span is always ended; the original query error is re-thrown
  *    verbatim.
- *  - **Bounded.** Value capture is limited to `findUnique`,
+ *  - **Bounded.** Single-record value capture is limited to `findUnique`,
  *    `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
- *    `upsert`, and `delete`. `findMany` and every other list, count,
- *    aggregate, group, bulk, raw, or unknown operation are inert. The adapter
- *    never widens the app's `select`.
+ *    `upsert`, and `delete`; `count` and `aggregate` results are captured
+ *    only through explicit `aggregateAllow` selectors. `findMany` and every
+ *    other list, group, bulk, raw, or unknown operation is inert. The
+ *    adapter never widens the app's `select` and never inspects arguments.
  *
  * This module has **no dependency on `@prisma/client`** — it is typed
  * structurally against Prisma's client-extension shape (mirroring the
@@ -61,10 +68,17 @@
  */
 
 import { trace, SpanKind, type Span } from "@opentelemetry/api";
+import {
+  RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY,
+  SIDE_EFFECT_SCALAR_PREFIX,
+  isResultEvidenceTimestampShapedNumeric,
+  isSideEffectScalarKey,
+} from "@glasstrace/protocol";
 import { capture, captureOmission } from "../side-effect/capture.js";
 import {
   getActiveConfig,
   getAttrHmacKey,
+  getOperationConfigView,
   isCaptureEnabled,
 } from "../init-client.js";
 import { hashIdWeb } from "../side-effect/hash-id-web.js";
@@ -138,6 +152,44 @@ export interface PrismaCaptureColumn {
   as?: ScalarIntent;
 }
 
+/**
+ * A single explicit Prisma aggregate-result selector for result-evidence
+ * capture. Every member is required and closed:
+ *
+ *  - `model` — the Prisma model name, ASCII `[A-Za-z][A-Za-z0-9_]{0,63}`.
+ *  - `operation` — `"count"` or `"aggregate"`, matched exactly against the
+ *    Prisma operation name; no other operation is ever eligible.
+ *  - `aggregate` — the closed aggregate bucket. The discriminated union
+ *    encodes the operation constraint: `"count"` permits only `"_count"`.
+ *  - `field` — the concrete result field to read, or the `"_all"` sentinel
+ *    (the only sentinel, valid only on the `"_count"` bucket). Concrete
+ *    names follow the same ASCII grammar as `model`.
+ *  - `key` — the emitted numeric scalar key: the unchanged 80-character
+ *    scalar-key grammar with a `Ms` / `Amount` / `Bytes` / `Ratio` /
+ *    `Value` suffix. Aggregate-result capture never emits `Id`, `Flag`, or
+ *    `Count` keys.
+ *
+ * Selection is never inferred from a result's shape — a value is read only
+ * when an entry explicitly names it, and only when the server has granted
+ * the aggregate-scalars result-evidence capability. The same constraints
+ * are re-validated at runtime for untyped callers.
+ */
+export type PrismaAggregateCaptureEntry =
+  | {
+      readonly model: string;
+      readonly operation: "count";
+      readonly aggregate: "_count";
+      readonly field: string;
+      readonly key: string;
+    }
+  | {
+      readonly model: string;
+      readonly operation: "aggregate";
+      readonly aggregate: "_count" | "_avg" | "_sum" | "_min" | "_max";
+      readonly field: string;
+      readonly key: string;
+    };
+
 /** Options for {@link prismaAdapter}. */
 export interface PrismaAdapterOptions {
   /**
@@ -147,6 +199,16 @@ export interface PrismaAdapterOptions {
    * ingestion.
    */
   allow?: ReadonlyArray<PrismaCaptureColumn>;
+  /**
+   * The default-deny aggregate-result allowlist (see
+   * {@link PrismaAggregateCaptureEntry}). Absence is an empty allowlist:
+   * `count` and `aggregate` results are captured only for selectors listed
+   * here, only when the server-derived result-evidence capability grants
+   * aggregate scalars, and only as complete provider-neutral evidence
+   * bundles. `findMany` and every other operation remain unaffected by this
+   * list.
+   */
+  aggregateAllow?: ReadonlyArray<PrismaAggregateCaptureEntry>;
 }
 
 const TRACER_NAME = "glasstrace-prisma";
@@ -168,6 +230,253 @@ const SINGLE_RECORD_RESULT_OPERATIONS: ReadonlySet<string> = new Set([
   "upsert",
   "delete",
 ]);
+
+/**
+ * ASCII name grammar for aggregate-selector model and concrete field names.
+ * `_all` is the only sentinel admitted outside this grammar.
+ */
+const AGGREGATE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/** The closed aggregate buckets an entry may name. */
+const AGGREGATE_BUCKETS: ReadonlySet<string> = new Set([
+  "_count",
+  "_avg",
+  "_sum",
+  "_min",
+  "_max",
+]);
+
+/**
+ * Maximum raw positions inspected across one `aggregateAllow` container —
+ * the total across the whole policy, not per model, operation, or entry. A
+ * private producer inspection budget, deliberately distinct from (and never
+ * imported as) the public per-row protocol bound that shares the number.
+ * Position 257 fails the whole policy closed rather than truncating it.
+ */
+const MAX_AGGREGATE_POLICY_RAW_POSITIONS = 256;
+
+/** Maximum distinct valid selectors per model + operation bucket. */
+const MAX_AGGREGATE_SELECTORS_PER_BUCKET = 16;
+
+/** A compiled, validated aggregate selector. */
+interface AggregateSelector {
+  readonly aggregate: PrismaAggregateCaptureEntry["aggregate"];
+  readonly field: string;
+  readonly key: string;
+}
+
+/**
+ * Compiled Phase 1 policy: `model → operation → ordered selectors`. `null`
+ * means the whole `aggregateAllow` policy failed closed (unsafe
+ * observation or the raw-position budget); an absent bucket means no
+ * admission for that model + operation.
+ */
+type AggregatePolicy = ReadonlyMap<
+  string,
+  ReadonlyMap<"count" | "aggregate", ReadonlyArray<AggregateSelector>>
+>;
+
+/**
+ * Read one own **data** property without invoking accessors or touching the
+ * prototype chain. Returns `{ present: false }` for a missing or inherited
+ * property and `null` for an accessor-backed property or a container whose
+ * descriptor lookup throws (a hostile or revoked proxy) — the caller treats
+ * `null` as an unsafe-observation signal.
+ */
+function readOwnDataProperty(
+  container: object,
+  property: string | number,
+): { present: boolean; value?: unknown } | null {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(container, property);
+  } catch {
+    return null;
+  }
+  if (descriptor === undefined) return { present: false };
+  if (descriptor.get !== undefined || descriptor.set !== undefined) {
+    return null;
+  }
+  return { present: true, value: descriptor.value };
+}
+
+/**
+ * Compile the `aggregateAllow` list into the Phase 1 policy under the
+ * bounded, hostile-safe observation contract:
+ *
+ *  - every read is an own-data-property read — an accessor-backed or
+ *    inherited entry (or entry member), a non-array container, a throwing
+ *    or revoked proxy, or the raw-position budget overflowing fails the
+ *    WHOLE policy closed (`null`), never silently widening or truncating;
+ *  - a plain-data entry that is merely invalid (bad name grammar, unknown
+ *    operation/aggregate, a non-`_count` bucket on `count`, a key outside
+ *    the numeric scalar grammar) is dropped, default-deny;
+ *  - byte-identical duplicate entries collapse to their first occurrence;
+ *    a conflicting selector (same model/operation/aggregate/field with a
+ *    different key) or a duplicate output key within one model + operation
+ *    fails that bucket closed;
+ *  - more than 16 distinct valid selectors in one model + operation bucket
+ *    fails that bucket closed rather than truncating.
+ */
+function compileAggregatePolicy(
+  aggregateAllow: ReadonlyArray<PrismaAggregateCaptureEntry> | undefined,
+): AggregatePolicy | null {
+  if (aggregateAllow === undefined) return new Map();
+  if (!Array.isArray(aggregateAllow)) return null;
+
+  let rawPositions = 0;
+  interface BucketState {
+    selectors: AggregateSelector[];
+    selectorKeys: Map<string, string>;
+    outputKeys: Set<string>;
+    invalid: boolean;
+  }
+  const buckets = new Map<
+    string,
+    Map<"count" | "aggregate", BucketState>
+  >();
+
+  let length: number;
+  try {
+    length = aggregateAllow.length;
+  } catch {
+    return null;
+  }
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    return null;
+  }
+
+  for (let index = 0; index < length; index += 1) {
+    rawPositions += 1;
+    if (rawPositions > MAX_AGGREGATE_POLICY_RAW_POSITIONS) return null;
+    const slot = readOwnDataProperty(aggregateAllow, index);
+    if (slot === null) return null;
+    // A hole is a missing own position — not admissible as a selector, and
+    // not distinguishable from tampering; fail the policy closed.
+    if (!slot.present) return null;
+    const entry = slot.value;
+    if (entry === null || typeof entry !== "object") {
+      // A plain non-object position is an invalid entry: default-deny drop.
+      continue;
+    }
+    // Each of the five members is read as an own data property; an
+    // accessor-backed or throwing member is unsafe observation, and so is a
+    // member that is absent as own data but present on the prototype chain
+    // (an inherited entry member) — a genuinely absent member merely makes
+    // the entry invalid (default-deny drop).
+    const members: Record<string, unknown> = {};
+    let unsafe = false;
+    for (const member of ["model", "operation", "aggregate", "field", "key"]) {
+      rawPositions += 1;
+      if (rawPositions > MAX_AGGREGATE_POLICY_RAW_POSITIONS) return null;
+      const read = readOwnDataProperty(entry, member);
+      if (read === null) {
+        unsafe = true;
+        break;
+      }
+      if (!read.present) {
+        let inherited: boolean;
+        try {
+          inherited = member in entry;
+        } catch {
+          inherited = true;
+        }
+        if (inherited) {
+          unsafe = true;
+          break;
+        }
+        members[member] = undefined;
+        continue;
+      }
+      members[member] = read.value;
+    }
+    if (unsafe) return null;
+
+    const { model, operation, aggregate, field, key } = members;
+    if (
+      typeof model !== "string" ||
+      typeof operation !== "string" ||
+      typeof aggregate !== "string" ||
+      typeof field !== "string" ||
+      typeof key !== "string"
+    ) {
+      continue;
+    }
+    if (!AGGREGATE_NAME_PATTERN.test(model)) continue;
+    if (operation !== "count" && operation !== "aggregate") continue;
+    if (!AGGREGATE_BUCKETS.has(aggregate)) continue;
+    if (operation === "count" && aggregate !== "_count") continue;
+    // `_all` is the only sentinel, and only the `_count` bucket has it; the
+    // other buckets require a concrete field.
+    if (field === "_all" && aggregate !== "_count") continue;
+    if (field !== "_all" && !AGGREGATE_NAME_PATTERN.test(field)) continue;
+    // The output key obeys the unchanged scalar grammar and its shared cap,
+    // restricted to the Phase 1 numeric suffixes.
+    if (!isSideEffectScalarKey(key)) continue;
+    if (!/(Ms|Amount|Bytes|Ratio|Value)$/.test(key) || /Id$|Flag$/.test(key)) {
+      continue;
+    }
+
+    let operations = buckets.get(model);
+    if (!operations) {
+      operations = new Map();
+      buckets.set(model, operations);
+    }
+    let bucket = operations.get(operation);
+    if (!bucket) {
+      bucket = {
+        selectors: [],
+        selectorKeys: new Map(),
+        outputKeys: new Set(),
+        invalid: false,
+      };
+      operations.set(operation, bucket);
+    }
+    if (bucket.invalid) continue;
+
+    // The dot separator is unambiguous: neither an aggregate bucket name
+    // nor a field under the ASCII grammar can contain one.
+    const selectorId = `${aggregate}.${field}`;
+    const existingKey = bucket.selectorKeys.get(selectorId);
+    if (existingKey !== undefined) {
+      if (existingKey === key) continue; // byte-identical duplicate collapses
+      bucket.invalid = true; // conflicting selector
+      continue;
+    }
+    if (bucket.outputKeys.has(key)) {
+      bucket.invalid = true; // duplicate output key
+      continue;
+    }
+    if (bucket.selectors.length >= MAX_AGGREGATE_SELECTORS_PER_BUCKET) {
+      bucket.invalid = true; // over-limit fails closed, never truncates
+      continue;
+    }
+    bucket.selectorKeys.set(selectorId, key);
+    bucket.outputKeys.add(key);
+    bucket.selectors.push({
+      aggregate: aggregate as AggregateSelector["aggregate"],
+      field,
+      key,
+    });
+  }
+
+  const policy = new Map<
+    string,
+    Map<"count" | "aggregate", AggregateSelector[]>
+  >();
+  for (const [model, operations] of buckets) {
+    for (const [operation, bucket] of operations) {
+      if (bucket.invalid || bucket.selectors.length === 0) continue;
+      let admitted = policy.get(model);
+      if (!admitted) {
+        admitted = new Map();
+        policy.set(model, admitted);
+      }
+      admitted.set(operation, bucket.selectors);
+    }
+  }
+  return policy;
+}
 
 /**
  * Whether a **recording** request span is active, fail-closed. The adapter
@@ -337,6 +646,155 @@ async function projectIdentifier(
 }
 
 /**
+ * Admit one aggregate-result candidate value under the Phase 1 value rules:
+ * `_count` values are nonnegative safe integers; other buckets accept
+ * finite native numbers whose integer shapes stay within safe-integer
+ * range; and every accepted candidate passes the provider-neutral
+ * timestamp-shape screen for its key. Everything else — `null`, `BigInt`,
+ * `Decimal`-like objects, strings, booleans, dates, arrays, objects,
+ * non-finite or unsafe numbers — is rejected with a bounded omission
+ * reason and never emitted.
+ */
+function admitAggregateValue(
+  key: string,
+  aggregate: AggregateSelector["aggregate"],
+  value: unknown,
+):
+  | { readonly ok: true; readonly value: number }
+  | { readonly ok: false; readonly reason: "raw_payload" | "non_finite" | "raw_timestamp" } {
+  if (typeof value !== "number") return { ok: false, reason: "raw_payload" };
+  if (!Number.isFinite(value)) return { ok: false, reason: "non_finite" };
+  if (aggregate === "_count") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      return { ok: false, reason: "raw_payload" };
+    }
+  } else if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+    return { ok: false, reason: "raw_payload" };
+  }
+  if (isResultEvidenceTimestampShapedNumeric(key, value)) {
+    return { ok: false, reason: "raw_timestamp" };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Project an admitted `count` / `aggregate` result onto the owned span as
+ * one complete provider-neutral evidence bundle (family `1` for count, `2`
+ * for aggregate) — or nothing at all.
+ *
+ * Observation is explicit and bounded: only the values the admitted
+ * selectors name are read, every read is an own-data-property read (no
+ * accessor invocation, no prototype traversal), and a missing, inherited,
+ * or accessor-backed value is inert for that selector. Mapping rules:
+ *
+ *  - count `_all` — a bare numeric result, or the result's own `_all`
+ *    count property;
+ *  - count concrete field — only the result's own flat count property of
+ *    that name;
+ *  - aggregate `_count` — the named own field of an own non-array `_count`
+ *    bucket; the `_count._all` exception also admits an own `_count`
+ *    bucket that is itself a number;
+ *  - aggregate `_avg` / `_sum` / `_min` / `_max` — the named concrete own
+ *    field of an own non-array object bucket.
+ *
+ * The family marker and every prepared scalar attach in one best-effort
+ * `setAttributes` call, only when at least one scalar prepared — a
+ * marker-only or partial family is never written by this producer, and
+ * receiver-side completeness validation remains the transport backstop.
+ */
+function projectAggregateResult(
+  span: Span,
+  operation: "count" | "aggregate",
+  selectors: ReadonlyArray<AggregateSelector>,
+  result: unknown,
+): void {
+  const prepared: Record<string, number> = {};
+  let preparedCount = 0;
+
+  for (const selector of selectors) {
+    let candidate: { present: boolean; value?: unknown } | null = null;
+
+    if (operation === "count") {
+      if (selector.field === "_all") {
+        if (typeof result === "number") {
+          candidate = { present: true, value: result };
+        } else if (
+          result !== null &&
+          typeof result === "object" &&
+          !Array.isArray(result)
+        ) {
+          candidate = readOwnDataProperty(result, "_all");
+        }
+      } else if (
+        result !== null &&
+        typeof result === "object" &&
+        !Array.isArray(result)
+      ) {
+        candidate = readOwnDataProperty(result, selector.field);
+      }
+    } else {
+      if (
+        result === null ||
+        typeof result !== "object" ||
+        Array.isArray(result)
+      ) {
+        candidate = { present: false };
+      } else {
+        const bucket = readOwnDataProperty(result, selector.aggregate);
+        if (bucket === null || !bucket.present) {
+          candidate = bucket;
+        } else if (
+          selector.aggregate === "_count" &&
+          selector.field === "_all" &&
+          typeof bucket.value === "number"
+        ) {
+          // The accepted `_count._all` exception: the own `_count` bucket
+          // may itself be the number.
+          candidate = { present: true, value: bucket.value };
+        } else if (
+          bucket.value !== null &&
+          typeof bucket.value === "object" &&
+          !Array.isArray(bucket.value)
+        ) {
+          candidate = readOwnDataProperty(bucket.value, selector.field);
+        } else {
+          candidate = { present: false };
+        }
+      }
+    }
+
+    // A missing, inherited, or unsafely observable value is inert for this
+    // selector — no value, no counter (matching the single-record path's
+    // missing-column behavior). Only a present-but-invalid value records a
+    // bounded omission.
+    if (candidate === null || !candidate.present) continue;
+    const admitted = admitAggregateValue(
+      selector.key,
+      selector.aggregate,
+      candidate.value,
+    );
+    if (!admitted.ok) {
+      captureOmission(admitted.reason, { span });
+      continue;
+    }
+    prepared[`${SIDE_EFFECT_SCALAR_PREFIX}${selector.key}`] = admitted.value;
+    preparedCount += 1;
+  }
+
+  if (preparedCount === 0) return;
+  // One best-effort logical bundle: the marker and every scalar together.
+  try {
+    span.setAttributes({
+      [RESULT_EVIDENCE_FAMILY_ATTRIBUTE_KEY]: operation === "count" ? 1 : 2,
+      ...prepared,
+    });
+  } catch {
+    // Attribute failure leaves the family inert; the host query result is
+    // unaffected and receiver completeness validation drops any partial.
+  }
+}
+
+/**
  * Project every own allowlisted column present in an eligible single-record
  * result onto the owned span via {@link capture}. The operation boundary is
  * enforced by the caller; the non-object and array guards remain as defense
@@ -369,14 +827,26 @@ async function projectAllowlisted(
 }
 
 /**
- * Build a passive Prisma value-capture extension for `findUnique`,
- * `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
- * `upsert`, and `delete` results. Other operations execute normally but open
- * no owned value-capture span.
+ * Build a passive Prisma value-capture extension: single-record value
+ * capture (`allow`) for `findUnique`, `findUniqueOrThrow`, `findFirst`,
+ * `findFirstOrThrow`, `create`, `update`, `upsert`, and `delete` results,
+ * plus explicit aggregate-result capture (`aggregateAllow`) for `count` and
+ * `aggregate` results. Operations named by neither allowlist execute
+ * normally and open no owned value-capture span.
  */
 export function prismaAdapter(
   options: PrismaAdapterOptions = {},
 ): PrismaCaptureExtension {
+  // Compile the Phase 1 aggregate policy once at construction under the
+  // bounded hostile-safe observation contract. `null` means the whole
+  // aggregateAllow policy failed closed and admits nothing.
+  let aggregatePolicy: AggregatePolicy | null;
+  try {
+    aggregatePolicy = compileAggregatePolicy(options?.aggregateAllow);
+  } catch {
+    aggregatePolicy = null;
+  }
+
   // Compile the allowlist into model -> map(column -> intent) once at
   // construction. An out-of-contract `as` (untyped callers) drops the entry
   // (default-deny).
@@ -421,6 +891,56 @@ export function prismaAdapter(
           params: PrismaAllOperationsArgs,
         ): Promise<unknown> {
           const { model, operation, args, query } = params;
+
+          // Phase 1 aggregate-result path: an EXPLICIT count/aggregate
+          // selector bucket for this model, admitted under one coherent
+          // per-operation config view. Admission requires the master
+          // capture switch, result-evidence wire version 1 with the
+          // aggregate-scalars capability granted, and a recording request
+          // span; a later config refresh applies to the next operation.
+          // Everything else about the operation is untouched: the query
+          // callback runs exactly once with its original arguments (never
+          // inspected), and the result and any error pass through verbatim.
+          if (
+            (operation === "count" || operation === "aggregate") &&
+            model !== undefined &&
+            aggregatePolicy !== null
+          ) {
+            const selectors = aggregatePolicy.get(model)?.get(operation);
+            if (selectors !== undefined) {
+              const view = getOperationConfigView();
+              if (
+                !view.sideEffectEvidence ||
+                view.resultEvidence.wireVersion !== 1 ||
+                !view.resultEvidence.aggregateScalars ||
+                !hasRecordingActiveSpan()
+              ) {
+                return query(args);
+              }
+              const span = openOwnedSpan(model, operation);
+              if (span === undefined) {
+                return query(args);
+              }
+              try {
+                const result = await query(args);
+                // Fence all projection work: a malformed or hostile result
+                // can never alter the query's own outcome.
+                try {
+                  projectAggregateResult(span, operation, selectors, result);
+                } catch {
+                  // Capture failure leaves the evidence inert.
+                }
+                return result;
+              } finally {
+                try {
+                  span.end();
+                } catch {
+                  // OTel end() failure must not surface to the host query.
+                }
+              }
+            }
+            return query(args);
+          }
 
           // Decide eligibility BEFORE opening a span so the default-deny /
           // disabled path adds zero span volume (hot-path) and never emits

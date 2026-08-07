@@ -193,12 +193,15 @@ allowlisted result column according to its intent (`muted` →
 `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `create`, `update`,
 `upsert`, and `delete`.
 
-Every other operation is value-capture inert. For count, aggregate,
-group, list (including `findMany`), bulk, raw, and unknown operations,
-the adapter opens no owned value-capture span and emits no scalar or
-omission attribute. This boundary affects only `prismaAdapter` value
-capture; automatic Prisma query instrumentation remains independent and
-unchanged.
+Every other operation is value-capture inert by default. For group, list
+(including `findMany`), bulk, raw, and unknown operations, the adapter
+opens no owned value-capture span and emits no scalar or omission
+attribute. `count` and `aggregate` results are likewise inert unless
+explicitly opted in through the separate, default-deny `aggregateAllow`
+list — which also requires a server-granted result-evidence capability —
+described in the package README's aggregate-result capture section. This
+boundary affects only `prismaAdapter` value capture; automatic Prisma
+query instrumentation remains independent and unchanged.
 
 Capture numeric columns with an `as` intent on the allow entry — the
 scalar key is the column with the intent's suffix appended (not doubled
