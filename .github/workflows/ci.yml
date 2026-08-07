@@ -538,13 +538,27 @@ jobs:
           # new process group so we can kill the whole tree cleanly on exit.
           setsid npx next dev --webpack --port "$PORT" > "$LOG" 2>&1 &
           DEV_PID=$!
-          DEV_PGID=$(ps -o pgid= "$DEV_PID" | tr -d ' ')
+          SELF_PGID=$(ps -o pgid= $$ | tr -d ' ')
 
           cleanup() {
-            echo "Stopping next dev (pid=$DEV_PID pgid=$DEV_PGID)..."
+            # Resolve the dev server's process group NOW, not at spawn
+            # time: a read immediately after `&` races the child's
+            # setsid() call and can capture the inherited (this shell's
+            # own) group — a group kill would then take down this step
+            # itself (exit 143) while the dev server survives as an
+            # orphan. By cleanup time setsid has long since completed, so
+            # the read is stable; the self-group guard stays as a belt,
+            # falling back to terminating the child tree by parentage.
+            DEV_PGID=$(ps -o pgid= "$DEV_PID" 2>/dev/null | tr -d ' ' || true)
+            echo "Stopping next dev (pid=$DEV_PID pgid=${DEV_PGID:-unknown} self_pgid=$SELF_PGID)..."
             # SIGTERM the whole process group first, escalate to SIGKILL
             # if it does not exit within 10s.
-            kill -TERM "-$DEV_PGID" 2>/dev/null || true
+            if [ -n "$DEV_PGID" ] && [ "$DEV_PGID" != "$SELF_PGID" ]; then
+              kill -TERM "-$DEV_PGID" 2>/dev/null || true
+            else
+              pkill -TERM -P "$DEV_PID" 2>/dev/null || true
+              kill -TERM "$DEV_PID" 2>/dev/null || true
+            fi
             for _ in $(seq 1 10); do
               if ! kill -0 "$DEV_PID" 2>/dev/null; then
                 break
@@ -553,7 +567,12 @@ jobs:
             done
             if kill -0 "$DEV_PID" 2>/dev/null; then
               echo "next dev did not exit on SIGTERM; sending SIGKILL"
-              kill -KILL "-$DEV_PGID" 2>/dev/null || true
+              if [ -n "$DEV_PGID" ] && [ "$DEV_PGID" != "$SELF_PGID" ]; then
+                kill -KILL "-$DEV_PGID" 2>/dev/null || true
+              else
+                pkill -KILL -P "$DEV_PID" 2>/dev/null || true
+                kill -KILL "$DEV_PID" 2>/dev/null || true
+              fi
             fi
             # Wait so the CI runner does not leave a zombie child.
             wait "$DEV_PID" 2>/dev/null || true
