@@ -42,7 +42,9 @@ name: Update Transitive Dependency
 # WHAT IT DOES
 # ------------
 #   1. Checks out `main`.
-#   2. Sets up Node 22.15 and pins npm to 11.6.1 (matches release.yml).
+#   2. Sets up Node 22.15 and pins npm to 11.6.1 (the npm version
+#      matches release.yml; release.yml's publish job itself now floats
+#      on Node 22).
 #   3. Guards that the target branch name does not already exist on
 #      origin (prevents clobbering in-flight work).
 #   4. Runs `npm update <dependency> --package-lock-only`, which moves

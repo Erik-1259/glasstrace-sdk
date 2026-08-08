@@ -223,10 +223,12 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          # Pin to 22.15 to match release.yml and update-transitive-dep.yml,
-          # avoiding Node 22.22.2's broken bundled npm (a known upstream
-          # regression where the bundled npm fails to load
-          # `promise-retry`).
+          # Pin to 22.15 to match update-transitive-dep.yml, a
+          # historical guard against a Node 22.x whose bundled npm was
+          # broken (failed to load `promise-retry`). release.yml's
+          # publish job has since been unpinned after a probe proved
+          # the current runner's Node 22.x clean; unpinning THIS
+          # workflow is a separately judged follow-up.
           node-version: 22.15
           cache: npm
 
