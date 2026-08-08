@@ -222,9 +222,11 @@ export type { CaptureOptions } from "./side-effect/capture.js";
 
 /**
  * Passive Prisma value-capture extension. Pass to `prisma.$extends(...)` to
- * project allowlisted boolean and numeric columns onto value-fidelity scalars
- * (per-column `as` intent). Passive, default-deny, observational; no
- * `@prisma/client` dependency.
+ * project allowlisted columns onto value-fidelity scalars (per-column `as`
+ * intent): boolean flags, numeric values, and pseudonymized identifiers
+ * (`as: "id"` emits a `gthid_` token — never the raw value — and only under
+ * the full-fidelity, per-account-key gates). Passive, default-deny,
+ * observational; no `@prisma/client` dependency.
  *
  * @see {@link PrismaAdapterOptions}
  */
