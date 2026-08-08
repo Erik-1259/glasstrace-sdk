@@ -92,6 +92,24 @@ async function waitForBackgroundWork(ms = BACKGROUND_SETTLE_MS): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Drains queued background continuations by yielding a fixed number of
+ * zero-delay macrotask turns. Each turn runs everything ALREADY queued
+ * (a promise-only chain completes in one turn), but this does NOT
+ * await in-flight thread-pool file I/O — an fs operation that has not
+ * yet completed contributes nothing to a turn. It is therefore
+ * belt-and-suspenders teardown hygiene only: completion of a chain
+ * that performs real I/O must be proven by a `vi.waitFor` predicate on
+ * a chain-terminal observable (the claim block anchors on
+ * `startHeartbeat`, which `backgroundInit` calls only after every
+ * cache/key write has resolved).
+ */
+async function settleBackgroundTurns(turns = 10): Promise<void> {
+  for (let i = 0; i < turns; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 describe("registerGlasstrace() Orchestrator", () => {
   const originalEnv = { ...process.env };
 
@@ -248,30 +266,73 @@ describe("registerGlasstrace() Orchestrator", () => {
   });
 
   describe("Checkpoint 5: Non-blocking background init", () => {
-    it("should return synchronously without waiting for background work", () => {
+    it("should return synchronously without waiting for background work", async () => {
       process.env.GLASSTRACE_API_KEY = TEST_DEV_API_KEY;
       vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const start = Date.now();
-      registerGlasstrace();
-      const elapsed = Date.now() - start;
+      // Non-blocking invariant, asserted as an ORDERING fact rather
+      // than a wall-clock bound. History: a 100ms elapsed bound was too
+      // tight, 200ms (2× observed cold-start jitter) still flaked on
+      // loaded hosts, and 500ms was rejected per Codex review of
+      // PR #273 because it would admit 150-400ms awaited regressions —
+      // any total-elapsed measurement encodes host scheduler speed, so
+      // no threshold is simultaneously stable and discriminating.
+      //
+      // Instead, the init transport is GATED on an unreleased promise,
+      // and each regression form maps to a deterministic failure: a
+      // synchronous block on background completion cannot proceed
+      // while the gate is held (test fails by timeout on any host); an
+      // async-signature regression returns a non-undefined value (the
+      // toBeUndefined check below); and work moved behind any async
+      // boundary misses the synchronous key-set count. Reaching the
+      // assertions below while the gate is held IS the invariant, and
+      // the only key set observed at that point must be the
+      // synchronous dev-key set (background completion has not
+      // happened). Deliberately dropped incidental coverage: a purely
+      // synchronous CPU slowdown inside registerGlasstrace() is no
+      // longer detected — that was host-speed-dependent incidental
+      // sensitivity of the old elapsed bound, not this test's charter
+      // (the guarded invariant is "never AWAIT background init").
+      const setKeySpy = vi.spyOn(otelConfig, "setResolvedApiKey");
+      // Chain-terminal observable for the post-release drain: the fs
+      // tail (cache write) completes before startHeartbeat runs.
+      const hbSpy = vi.spyOn(heartbeat, "startHeartbeat");
+      let releaseInit!: (value: HttpsPostJsonResult) => void;
+      const gate = new Promise<HttpsPostJsonResult>((resolve) => {
+        releaseInit = resolve;
+      });
+      const gatedTransport = vi.fn(() => gate);
+      _setTransportForTesting(gatedTransport as never);
 
-      // Non-blocking invariant: registerGlasstrace() must NOT await
-      // background init work (OTel registration, key resolution, init
-      // POST). Real background work would be on the order of seconds
-      // (network I/O); a synchronous return is on the order of
-      // single-digit milliseconds even on slow CI agents. The 200ms
-      // threshold is 2× the cold-start jitter observed on a
-      // stable-build runner (121ms; the prior 100ms threshold was too
-      // tight) while staying tight enough to fail fast if a regression
-      // accidentally awaits 150ms+ of work — exactly the class of bug
-      // this assertion is designed to catch. Earlier consideration of
-      // bumping to 500ms was rejected per Codex review of PR #273:
-      // 500ms would let regressions that await 150-400ms operations
-      // pass undetected, weakening the core guarantee. 200ms is the
-      // tightest threshold that reliably tolerates CI cold-start
-      // jitter without weakening regression coverage.
-      expect(elapsed).toBeLessThan(200);
+      // Capturing the return value makes an async-signature regression
+      // (registerGlasstrace() becoming a promise-returning function
+      // that awaits the chain) fail HERE rather than only in the
+      // Checkpoint-4 return-shape test.
+      expect(registerGlasstrace()).toBeUndefined();
+
+      // Reached while the transport gate is still held: the return did
+      // not await background work.
+      expect(setKeySpy).toHaveBeenCalledTimes(1);
+      expect(setKeySpy).toHaveBeenCalledWith(TEST_DEV_API_KEY);
+
+      // Release the gate and drain so background work cannot leak into
+      // another test's mocks or teardown.
+      releaseInit({
+        status: 200,
+        body: {
+          ...STANDARD_INIT_FIELDS,
+          subscriptionStatus: "anonymous",
+        },
+        raw: "",
+      });
+      await vi.waitFor(
+        () => {
+          expect(gatedTransport).toHaveBeenCalledTimes(1);
+          expect(hbSpy).toHaveBeenCalled();
+        },
+        { timeout: 4000 },
+      );
+      await settleBackgroundTurns();
     });
 
     it("should send init request to the backend in the background", async () => {
@@ -573,14 +634,47 @@ describe("registerGlasstrace() Orchestrator", () => {
     // Isolate filesystem side effects from writeClaimedKey() so that
     // claim-path tests never touch .env.local in the repo root.
     let claimTempDir: string;
+    // Chain-terminal observable: backgroundInit calls startHeartbeat
+    // only after performInit fully returned — i.e. after every
+    // cache/key write into claimTempDir has resolved. Waiting on this
+    // spy proves the fs tail is done; zero-delay turns alone cannot
+    // (they do not await in-flight thread-pool I/O).
+    let heartbeatSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(async () => {
       claimTempDir = await mkdtemp(join(tmpdir(), "glasstrace-claim-test-"));
       vi.spyOn(process, "cwd").mockReturnValue(claimTempDir);
       vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      heartbeatSpy = vi.spyOn(heartbeat, "startHeartbeat");
     });
 
     afterEach(async () => {
+      // Teardown order matters for the recorded ENOTEMPTY race:
+      // (1) wait for the chain-terminal observable so every temp-dir
+      //     write has resolved (every test in this block uses a
+      //     succeeding init mock, so startHeartbeat always runs);
+      // (2) reset registration — clears the debounced runtime-state
+      //     writer and the heartbeat timer so nothing can re-arm a
+      //     write into the directory;
+      // (3) belt-and-suspenders drain of any queued continuations;
+      // (4) only then delete the directory.
+      // Best-effort: a test that failed before registering (or an
+      // init that never reached the success path) has no heartbeat to
+      // wait for — teardown hygiene must never mask the test's own
+      // failure signal with a teardown timeout.
+      try {
+        await vi.waitFor(
+          () => {
+            expect(heartbeatSpy).toHaveBeenCalled();
+          },
+          { timeout: 4000 },
+        );
+      } catch {
+        // No completed chain to fence; the reset and force-rm below
+        // still disarm timers and clear whatever exists.
+      }
+      _resetRegistrationForTesting();
+      await settleBackgroundTurns();
       await rm(claimTempDir, { recursive: true, force: true });
     });
 
@@ -595,16 +689,24 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       registerGlasstrace();
 
-      await waitForBackgroundWork(400);
+      // Predicate-driven wait on the claim-propagation OUTCOME (the
+      // DISC-1930 pattern) — a fixed delay races background work on a
+      // loaded host.
+      await vi.waitFor(
+        () => {
+          expect(setKeySpy.mock.calls.map((c) => c[0])).toContain(
+            CLAIMED_DEV_KEY,
+          );
+          expect(notifySpy).toHaveBeenCalled();
+        },
+        { timeout: 4000 },
+      );
 
       // setResolvedApiKey is called once synchronously with the dev key,
       // then a second time from backgroundInit with the claimed key.
       const setKeyCalls = setKeySpy.mock.calls.map((c) => c[0]);
       expect(setKeyCalls).toContain(TEST_DEV_API_KEY);
       expect(setKeyCalls).toContain(CLAIMED_DEV_KEY);
-
-      // notifyApiKeyResolved is called from backgroundInit after the claim
-      expect(notifySpy).toHaveBeenCalled();
     });
 
     it("should not call setResolvedApiKey a second time when init has no claimResult", async () => {
@@ -615,11 +717,23 @@ describe("registerGlasstrace() Orchestrator", () => {
       const notifySpy = vi.spyOn(otelConfig, "notifyApiKeyResolved");
 
       // Standard mock — no claimResult in the response
-      _setTransportForTesting(createMockInitTransport() as never);
+      const transport = createMockInitTransport();
+      _setTransportForTesting(transport as never);
 
       registerGlasstrace();
 
-      await waitForBackgroundWork(400);
+      // Negative-outcome case: wait for background init to COMPLETE
+      // before asserting what did NOT happen. The chain-terminal
+      // observable is startHeartbeat (called only after performInit
+      // returned, downstream of every write) — waiting on the
+      // transport alone would anchor at the chain's START.
+      await vi.waitFor(
+        () => {
+          expect(transport).toHaveBeenCalledTimes(1);
+          expect(heartbeatSpy).toHaveBeenCalled();
+        },
+        { timeout: 4000 },
+      );
 
       // setResolvedApiKey is called exactly once: the synchronous dev-key set
       expect(setKeySpy).toHaveBeenCalledTimes(1);
@@ -643,7 +757,18 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       registerGlasstrace();
 
-      await waitForBackgroundWork(400);
+      // Predicate-driven wait on the full anonymous-then-claimed
+      // outcome — the fixed 400ms delay recorded in DISC evidence as
+      // observing only 1 of the required 2 key sets on a loaded runner.
+      await vi.waitFor(
+        () => {
+          const calls = setKeySpy.mock.calls.map((c) => c[0]);
+          expect(calls.length).toBeGreaterThanOrEqual(2);
+          expect(calls[calls.length - 1]).toBe(CLAIMED_DEV_KEY);
+          expect(notifySpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 4000 },
+      );
 
       // In anonymous mode, setResolvedApiKey is called:
       //   1. With the anonymous key (after getOrCreateAnonKey resolves)
@@ -671,20 +796,25 @@ describe("registerGlasstrace() Orchestrator", () => {
 
       registerGlasstrace();
 
-      await waitForBackgroundWork(400);
-
-      const handler = getDiscoveryHandler();
-      expect(handler).not.toBeNull();
-
-      const request = new Request("http://localhost:3000/__glasstrace/config", {
-        method: "GET",
-      });
-      const response = await handler!(request);
-      expect(response).not.toBeNull();
-      expect(response!.status).toBe(200);
-
-      const body = await response!.json();
-      expect(body.claimed).toBe(true);
+      // Predicate-driven wait on the observable outcome itself: the
+      // discovery endpoint reporting claimed=true once backgroundInit
+      // has propagated the claimResult.
+      await vi.waitFor(
+        async () => {
+          const handler = getDiscoveryHandler();
+          expect(handler).not.toBeNull();
+          const response = await handler!(
+            new Request("http://localhost:3000/__glasstrace/config", {
+              method: "GET",
+            }),
+          );
+          expect(response).not.toBeNull();
+          expect(response!.status).toBe(200);
+          const body = await response!.json();
+          expect(body.claimed).toBe(true);
+        },
+        { timeout: 4000 },
+      );
     });
   });
 
