@@ -1,8 +1,5 @@
 # Glasstrace SDK
 
-> **Pre-release** — This SDK is under active development and not yet
-> published to npm. APIs may change before the first stable release.
-
 Server-side debugging SDK for AI coding agents. Captures traces,
 errors, and runtime context from your Node.js application and delivers
 them to coding agents through an MCP server and live dashboard.

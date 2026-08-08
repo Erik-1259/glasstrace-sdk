@@ -23,11 +23,10 @@ timeline for a fix.
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.x     | Current pre-release |
+| 1.x     | Supported          |
 
-Once v1.0 ships, the latest minor release will receive security
-patches. Older minor releases will be supported for 90 days after
-the next minor release.
+The latest minor release receives security patches. Older minor
+releases are supported for 90 days after the next minor release.
 
 ## Security Practices
 
