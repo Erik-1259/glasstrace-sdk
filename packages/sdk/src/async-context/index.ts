@@ -30,8 +30,9 @@
  * -------------------
  * The wrapper is included in the SDK's edge bundle
  * (`packages/sdk/src/edge-entry.ts`). Its closure imports only the
- * OTel API, the protocol constants, and the
- * `./optional-lifecycle.js` bridge — none of which reach into
+ * OTel API, the protocol constants, the
+ * `./optional-lifecycle.js` bridge, and the `../wrapper-hardening.js`
+ * helpers — none of which reach into
  * `node:*` built-ins or the `process` global. The F003 closure scan
  * (`packages/sdk/scripts/check-edge-bundle.mjs`) enforces this on
  * every build.
@@ -59,6 +60,11 @@ import {
 } from "@opentelemetry/api";
 import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import { tryEmitLifecycleEvent } from "../optional-lifecycle.js";
+import {
+  sanitizeAttributes,
+  startSpanLeakGuard,
+  stripControlChars,
+} from "../wrapper-hardening.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -128,15 +134,19 @@ export interface WithAsyncCausalityOptions {
   name: string;
   /**
    * Optional attributes attached to the span before the wrapped
-   * callback runs. Forwarded to OTel as-is via `span.setAttributes()`.
-   * The SDK does not redact, sanitize, or scan values here — callers
-   * MUST avoid placing tokens, credentials, or other sensitive data
-   * in `attributes`.
+   * callback runs. Forwarded to OTel via `span.setAttributes()` after a
+   * transport-hygiene strip of ASCII control characters (code points
+   * below 0x20 — tabs, newlines, and carriage returns included) from
+   * string values and string array elements. That strip is NOT privacy
+   * redaction: the SDK does not otherwise redact, sanitize, or scan
+   * values here — callers MUST avoid placing tokens, credentials, or
+   * other sensitive data in `attributes`.
    *
    * This object is snapshotted (shallow) at wrapper-construction time;
    * adding, removing, or reassigning a top-level key afterward has no
    * effect on the emitted span (in-place mutation of an array-valued
-   * attribute is not isolated). The wrapper owns the `glasstrace.causal.*`
+   * attribute is not isolated, though its string elements are still
+   * stripped at write time). The wrapper owns the `glasstrace.causal.*`
    * attributes — do not set those keys here.
    */
   attributes?: Record<string, AttributeValue>;
@@ -185,7 +195,10 @@ export interface WithAsyncCausalityOptions {
  *      status with `recordException`; rethrows the original error
  *      verbatim.
  *   6. On a successful return: leaves status `UNSET`.
- *   7. Always ends the span.
+ *   7. Always ends the span. If `fn()`'s promise never settles, an
+ *      internal 10-minute watchdog ends the telemetry span
+ *      (truncating its recorded duration); `fn()` itself is never
+ *      affected.
  *
  * The continuation returns a Promise resolving to the callback's
  * return value (Promise-or-value semantics: a sync callback's value
@@ -319,12 +332,12 @@ export function withAsyncCausality<T>(
 
     try {
       if (attributesSnapshot) {
-        span.setAttributes(attributesSnapshot);
+        span.setAttributes(sanitizeAttributes(attributesSnapshot));
       }
       if (capturedContext !== undefined) {
         span.setAttribute(
           ATTR.CAUSAL_POST_RESPONSE_ASYNC,
-          capturedContext.traceId,
+          stripControlChars(capturedContext.traceId),
         );
         span.setAttribute(ATTR.CAUSAL_AFFECTS_HTTP_STATUS, false);
         span.setAttribute(ATTR.CAUSAL_AFFECTS_HTTP_DURATION, false);
@@ -333,6 +346,12 @@ export function withAsyncCausality<T>(
       // Attribute failures are advisory; do not block fn().
     }
 
+    // Route the span-end through a leak guard: a never-resolving fn()
+    // means the `finally` below never runs, which would leak the span
+    // forever. The watchdog force-ends the SPAN (never the user's
+    // work) after the internal interval; the guard makes the normal
+    // settle path and the watchdog mutually idempotent.
+    const guard = startSpanLeakGuard(span, endSpanSafely);
     try {
       // Activate the span as the current OTel context during fn()
       // execution so any nested spans (auto-instrumented OR manual)
@@ -349,10 +368,12 @@ export function withAsyncCausality<T>(
       );
       return value;
     } catch (error) {
-      recordSpanError(span, error);
+      // Skip span mutations when the watchdog already ended the span
+      // (a very late rejection).
+      if (!guard.ended()) recordSpanError(span, error);
       throw error;
     } finally {
-      endSpanSafely(span);
+      guard.settle();
     }
   };
 }
@@ -391,14 +412,24 @@ function recordSpanError(
   span: ReturnType<ReturnType<typeof trace.getTracer>["startSpan"]>,
   error: unknown,
 ): void {
-  const normalized: Error | string =
-    error instanceof Error
-      ? error
-      : typeof error === "string"
+  // Normalization can throw on a hostile throwable (throwing
+  // toString / message getter) — guard it; the user's original
+  // throwable must always be the one that propagates.
+  let normalized: Error | string;
+  let statusMessage: string;
+  try {
+    normalized =
+      error instanceof Error
         ? error
-        : new Error(String(error));
-  const statusMessage =
-    normalized instanceof Error ? normalized.message : normalized;
+        : typeof error === "string"
+          ? error
+          : new Error(String(error));
+    statusMessage =
+      normalized instanceof Error ? normalized.message : normalized;
+  } catch {
+    normalized = new Error("unserializable throwable");
+    statusMessage = normalized.message;
+  }
   try {
     span.recordException(normalized);
   } catch {
