@@ -419,13 +419,79 @@ export function initLifecycle(options: {
   // Register the lifecycle-emit bridge so edge-safe wrappers
   // (`./middleware/index.ts`, `./async-context/index.ts`) can emit
   // lifecycle events without a static import on this Node-only
-  // module. See `./optional-lifecycle.ts` for the contract.
+  // module. See `./optional-lifecycle.ts` for the contract. Unknown
+  // event names are rejected by the runtime guard BEFORE entering the
+  // typed emitter — the bridge wire is untyped by design, so the
+  // narrowing lives here rather than in a cast.
   _registerLifecycleEmitForBridge((event, payload) => {
+    if (!isKnownLifecycleEvent(event)) return;
     emitLifecycleEvent(
-      event as keyof SdkLifecycleEvents,
-      payload as SdkLifecycleEvents[keyof SdkLifecycleEvents],
+      event,
+      // The payload arrives untyped over the bridge wire; the event
+      // key is runtime-verified above, and payload correctness is
+      // owned by the (internal) emitting wrapper.
+      payload as SdkLifecycleEvents[typeof event],
     );
   });
+}
+
+/**
+ * The closed set of lifecycle event keys, kept in lockstep with
+ * {@link SdkLifecycleEvents} by the compile-time checks below: a key
+ * missing from this list or extraneous to the interface fails
+ * `npm run typecheck`.
+ */
+const KNOWN_LIFECYCLE_EVENT_KEYS = [
+  "core:state_changed",
+  "core:ready",
+  "core:shutdown_started",
+  "core:shutdown_completed",
+  "core:error_boundary_detected",
+  "core:decision",
+  "auth:key_resolved",
+  "auth:claim_started",
+  "auth:claim_completed",
+  "otel:configured",
+  "otel:injection_succeeded",
+  "otel:injection_failed",
+  "otel:failed",
+  "otel:circuit_opened",
+  "otel:circuit_half_open",
+  "otel:circuit_closed",
+  "otel:trpc_batch_member_mismatch",
+  "otel:shutdown_started",
+  "otel:shutdown_completed",
+  "health:init_succeeded",
+  "health:init_failed",
+  "health:heartbeat_tick",
+  "health:config_refreshed",
+  "middleware:skipped_uninstalled",
+  "async:no_originating_context",
+  "async:skipped_uninstalled",
+] as const satisfies readonly (keyof SdkLifecycleEvents)[];
+
+// Completeness check: if SdkLifecycleEvents gains a key that is not in
+// the list above, `_AllLifecycleKeysListed` resolves to `never` and the
+// assignment below fails typecheck.
+type _MissingLifecycleKeys = Exclude<
+  keyof SdkLifecycleEvents,
+  (typeof KNOWN_LIFECYCLE_EVENT_KEYS)[number]
+>;
+type _AllLifecycleKeysListed = [_MissingLifecycleKeys] extends [never]
+  ? true
+  : never;
+const _assertAllLifecycleKeysListed: _AllLifecycleKeysListed = true;
+void _assertAllLifecycleKeysListed;
+
+const KNOWN_LIFECYCLE_EVENT_KEY_SET: ReadonlySet<string> = new Set(
+  KNOWN_LIFECYCLE_EVENT_KEYS,
+);
+
+/** Runtime type predicate for bridge-supplied event names. */
+function isKnownLifecycleEvent(
+  event: string,
+): event is keyof SdkLifecycleEvents {
+  return KNOWN_LIFECYCLE_EVENT_KEY_SET.has(event);
 }
 
 // ---------------------------------------------------------------------------

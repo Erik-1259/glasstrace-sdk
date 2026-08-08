@@ -16,8 +16,9 @@
  * -------------------
  * The wrapper is included in the SDK's edge bundle
  * (`packages/sdk/src/edge-entry.ts`). Its closure imports only the
- * OTel API, the protocol constants, and the
- * `./optional-lifecycle.js` bridge — none of which reach into
+ * OTel API, the protocol constants, the
+ * `./optional-lifecycle.js` bridge, and the `../wrapper-hardening.js`
+ * helpers — none of which reach into
  * `node:*` built-ins or the `process` global. The F003 closure scan
  * (`packages/sdk/scripts/check-edge-bundle.mjs`) enforces this on
  * every build.
@@ -51,7 +52,9 @@
  *     `recordException`; rethrows. The exception is normalized to
  *     `Error | string` first so non-Error throwables (number, plain
  *     object) do not crash `recordException`.
- *   - Always ends the span (`finally`), even on `throw`.
+ *   - Always ends the span (`finally`), even on `throw`; a returned
+ *     promise that never settles has its span ended by an internal
+ *     10-minute watchdog (the handler is never affected).
  *
  * @module @glasstrace/sdk/middleware
  */
@@ -63,6 +66,11 @@ import {
 } from "@opentelemetry/api";
 import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import { tryEmitLifecycleEvent } from "../optional-lifecycle.js";
+import {
+  sanitizeAttributes,
+  startSpanLeakGuard,
+  stripControlChars,
+} from "../wrapper-hardening.js";
 
 const ATTR = GLASSTRACE_ATTRIBUTE_NAMES;
 
@@ -149,15 +157,19 @@ export interface TracedRequestMiddlewareOptions {
   name: string;
   /**
    * Optional attributes attached to the span before the wrapped
-   * handler runs. Forwarded to OTel as-is via `span.setAttributes()`.
-   * The SDK does not redact, sanitize, or scan values here — callers
-   * MUST avoid placing tokens, credentials, or other sensitive data
-   * in `attributes`.
+   * handler runs. Forwarded to OTel via `span.setAttributes()` after a
+   * transport-hygiene strip of ASCII control characters (code points
+   * below 0x20 — tabs, newlines, and carriage returns included) from
+   * string values and string array elements. That strip is NOT privacy
+   * redaction: the SDK does not otherwise redact, sanitize, or scan
+   * values here — callers MUST avoid placing tokens, credentials, or
+   * other sensitive data in `attributes`.
    *
    * This object is snapshotted (shallow) at wrapper-construction time;
    * adding, removing, or reassigning a top-level key afterward has no
    * effect on the emitted span (in-place mutation of an array-valued
-   * attribute is not isolated). The wrapper owns the `glasstrace.causal.*`
+   * attribute is not isolated, though its string elements are still
+   * stripped at write time). The wrapper owns the `glasstrace.causal.*`
    * attributes (e.g. `glasstrace.causal.middleware_for_request`) — do not
    * set those keys here; the wrapper's value takes precedence.
    *
@@ -288,9 +300,10 @@ function isNoopSpan(
  * `glasstrace.causal.middleware_for_request` is the raw URL
  * pathname (clamped to 2048 characters with a trailing ellipsis for
  * unusually long URLs). Pathnames can carry user-controlled data (IDs,
- * emails, opaque keys). Apart from that length clamp, the SDK does NOT
- * redact this attribute. Callers MUST NOT place secrets, tokens, or
- * other sensitive data in URL paths;
+ * emails, opaque keys). Apart from that length clamp and a
+ * transport-hygiene strip of ASCII control characters (below 0x20), the
+ * SDK does NOT redact this attribute. Callers MUST NOT place secrets,
+ * tokens, or other sensitive data in URL paths;
  * the same general HTTP best practice that keeps secrets out of
  * server logs keeps them out of Glasstrace trace evidence.
  *
@@ -317,7 +330,10 @@ function isNoopSpan(
  *   5. On a successful return: leaves the span status `UNSET` per OTel
  *      instrumentation-library guidance (explicit `OK` would shadow
  *      downstream consumers' error transitions).
- *   6. Always ends the span, even on `throw` or `return`.
+ *   6. Always ends the span, even on `throw` or `return`. If an async
+ *      handler's returned promise never settles, an internal
+ *      10-minute watchdog ends the telemetry span (truncating its
+ *      recorded duration); the handler itself is never affected.
  *
  * Type-inference: the returned function preserves the input function's
  * type `H`, so caller-narrowed signatures (e.g., `(req: NextRequest)
@@ -423,14 +439,17 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
       // span before any internal attribute we add below.
       try {
         if (attributesSnapshot) {
-          span.setAttributes(attributesSnapshot);
+          span.setAttributes(sanitizeAttributes(attributesSnapshot));
         }
         const path = extractRequestPath(req);
-        if (path !== undefined) {
-          span.setAttribute(
-            ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST,
-            clampPathAttribute(path),
-          );
+        const causalPath =
+          path !== undefined
+            ? stripControlChars(clampPathAttribute(path))
+            : undefined;
+        // A path consisting entirely of control characters strips to
+        // "": omit the attribute rather than emit an empty value.
+        if (causalPath !== undefined && causalPath.length > 0) {
+          span.setAttribute(ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST, causalPath);
         }
       } catch {
         // Attribute-setting failures are advisory; never block the
@@ -448,23 +467,157 @@ export function tracedRequestMiddleware<H extends RequestMiddlewareFunction>(
 
       // The handler may be sync or async. If async, attach the
       // span-end + error-recording on the promise chain; otherwise
-      // end the span synchronously and return the value.
-      if (
-        result !== null &&
-        typeof result === "object" &&
-        typeof (result as Promise<unknown>).then === "function"
-      ) {
-        return (result as Promise<unknown>).then(
-          (value) => {
-            endSpanSafely(span);
-            return value;
-          },
-          (error: unknown) => {
-            recordSpanError(span, error);
-            endSpanSafely(span);
-            throw error;
+      // end the span synchronously and return the value. The async
+      // branch routes its span-end through a leak guard: a thenable
+      // whose callbacks never fire would otherwise leak the span
+      // forever, so a watchdog force-ends the SPAN (never the user's
+      // work) after the internal interval, and the guard makes the
+      // settle path and the watchdog mutually idempotent. `then` is
+      // read exactly ONCE inside a guard (Promise-spec resolution
+      // style): a hostile accessor that throws on the read — or a
+      // registration call that throws — must end the span rather than
+      // leak it.
+      let thenFn: unknown;
+      try {
+        if (
+          result !== null &&
+          (typeof result === "object" || typeof result === "function")
+        ) {
+          thenFn = (result as { then?: unknown }).then;
+        }
+      } catch (error) {
+        recordSpanError(span, error);
+        endSpanSafely(span);
+        throw error;
+      }
+
+      // The brand check itself is guarded: `instanceof` walks the
+      // prototype chain, and a proxy-backed thenable with a throwing
+      // `getPrototypeOf` trap must fall to the fully-guarded exotic
+      // path rather than throw before any guard exists.
+      let isRealmLocalPromise = false;
+      try {
+        isRealmLocalPromise = result instanceof Promise;
+      } catch {
+        isRealmLocalPromise = false;
+      }
+
+      if (isRealmLocalPromise) {
+        // Real (same-realm) Promises — subclasses included — keep the
+        // species-preserving `.then` chain so the wrapper returns the
+        // handler's exact Promise subtype, as the `H`-typed signature
+        // documents. A CROSS-REALM Promise (vm context, iframe realm)
+        // fails this brand check by design and is normalized through
+        // the exotic-thenable path to a realm-local Promise — its
+        // subclass-specific methods do not survive; preserving them
+        // would require trusting foreign-realm methods that are
+        // indistinguishable from a hostile thenable's. Native promise
+        // semantics already provide what the exotic-thenable path
+        // below hardens against (single callback invocation, internal
+        // assimilation, no synchronous throw); the guard still bounds
+        // a hostile subclass `.then` override: the span ends exactly
+        // once and never mutates after ending.
+        const guard = startSpanLeakGuard(span, endSpanSafely);
+        try {
+          // Chain through the callable `then` when one was read
+          // (preserving a subclass override and its species); a real
+          // Promise whose OWN `then` property is a non-callable shadow
+          // is still awaitable through its internal slots, so fall
+          // back to `Promise.prototype.then` for it rather than
+          // calling the shadow (which would throw) or skipping
+          // tracing. The cast is backed by the runtime brand check.
+          const chainThen =
+            typeof thenFn === "function"
+              ? (thenFn as Promise<unknown>["then"])
+              : Promise.prototype.then;
+          return chainThen.call(
+            result as Promise<unknown>,
+            (value: unknown) => {
+              guard.settle();
+              return value;
+            },
+            (error: unknown) => {
+              if (!guard.ended()) recordSpanError(span, error);
+              guard.settle();
+              throw error;
+            },
+          );
+        } catch (error) {
+          if (!guard.ended()) recordSpanError(span, error);
+          guard.settle();
+          throw error;
+        }
+      }
+
+      if (typeof thenFn === "function") {
+        const guard = startSpanLeakGuard(span, endSpanSafely);
+        // Wrap the thenable in a real Promise so the wrapper's async
+        // branch uniformly returns a Promise regardless of what the
+        // thenable's own `then` returns (a primitive thenable often
+        // returns undefined), and so callback errors propagate through
+        // a real rejection. The executor forwards the RAW value to
+        // the native `resolve`: native resolution then owns nested-
+        // thenable assimilation AND every chaining-cycle detection —
+        // resolving the wrapper with itself, directly or through any
+        // depth of nested thenables, rejects with the spec TypeError
+        // instead of hanging.
+        const wrapperPromise: Promise<unknown> = new Promise(
+          (resolve, reject) => {
+            // Promise-spec first-call latch: a thenable that invokes
+            // its callbacks more than once (or throws after invoking
+            // one) commits to the FIRST call only. Native
+            // resolve/reject are already idempotent; the latch keeps
+            // the commitment explicit and covers the throw-after-
+            // callback case.
+            let callbackUsed = false;
+            try {
+              (
+                thenFn as (
+                  onResolve: (value: unknown) => void,
+                  onReject: (error: unknown) => void,
+                ) => unknown
+              ).call(
+                result,
+                (value: unknown) => {
+                  if (callbackUsed) return;
+                  callbackUsed = true;
+                  resolve(value);
+                },
+                (error: unknown) => {
+                  if (callbackUsed) return;
+                  callbackUsed = true;
+                  reject(error);
+                },
+              );
+            } catch (error) {
+              // Per Promise-spec resolution: a throw AFTER a callback
+              // was invoked is ignored.
+              if (callbackUsed) return;
+              callbackUsed = true;
+              reject(error);
+            }
           },
         );
+        // Span bookkeeping rides an OBSERVER of the wrapper itself —
+        // never an interposed resolution layer, which would defeat
+        // native cycle detection and delay assimilation. The span
+        // follows the wrapper's ACTUAL settlement (the watchdog stays
+        // armed until then), a rejection — including a native
+        // chaining-cycle TypeError — records ERROR unless the
+        // watchdog already ended the span, and the observer handles
+        // the rejection so it never surfaces as unhandled from this
+        // bookkeeping chain (the caller still observes the wrapper's
+        // own rejection normally).
+        wrapperPromise.then(
+          () => {
+            guard.settle();
+          },
+          (error: unknown) => {
+            if (!guard.ended()) recordSpanError(span, error);
+            guard.settle();
+          },
+        );
+        return wrapperPromise;
       }
 
       endSpanSafely(span);
@@ -498,14 +651,25 @@ function recordSpanError(
   span: ReturnType<ReturnType<typeof trace.getTracer>["startSpan"]>,
   error: unknown,
 ): void {
-  const normalized: Error | string =
-    error instanceof Error
-      ? error
-      : typeof error === "string"
+  // Normalization itself can throw on a hostile throwable (a throwing
+  // toString / Symbol.toPrimitive, an Error subclass with a throwing
+  // `message` getter) — guard it so the user's original throwable is
+  // always the one that propagates.
+  let normalized: Error | string;
+  let statusMessage: string;
+  try {
+    normalized =
+      error instanceof Error
         ? error
-        : new Error(String(error));
-  const statusMessage =
-    normalized instanceof Error ? normalized.message : normalized;
+        : typeof error === "string"
+          ? error
+          : new Error(String(error));
+    statusMessage =
+      normalized instanceof Error ? normalized.message : normalized;
+  } catch {
+    normalized = new Error("unserializable throwable");
+    statusMessage = normalized.message;
+  }
   try {
     span.recordException(normalized);
   } catch {

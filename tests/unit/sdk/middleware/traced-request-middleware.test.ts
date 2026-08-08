@@ -629,3 +629,413 @@ describe("tracedRequestMiddleware — handler types", () => {
     expect(typeof _check.then).toBe("function");
   });
 });
+
+describe("tracedRequestMiddleware — hardening (span-leak watchdog + control-char strip)", () => {
+  const WATCHDOG_MS = 600_000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("ends the span via the watchdog when a returned thenable never settles", async () => {
+    vi.useFakeTimers();
+    const neverSettles = { then: () => undefined };
+    const wrapped = tracedRequestMiddleware(
+      { name: "stuck-middleware" },
+      () => neverSettles as unknown as Promise<unknown>,
+    );
+
+    wrapped(makeNextRequest({ pathname: "/stuck" }));
+
+    vi.advanceTimersByTime(WATCHDOG_MS - 1);
+    expect(exporter.getFinishedSpans()).toHaveLength(0);
+    vi.advanceTimersByTime(1);
+    const span = getSpan(exporter.getFinishedSpans(), "stuck-middleware");
+    expect(span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST]).toBe("/stuck");
+  });
+
+  it("a late settle after the watchdog fired is a safe no-op (no double end)", async () => {
+    vi.useFakeTimers();
+    let capturedResolve: ((value: unknown) => unknown) | undefined;
+    const lateThenable = {
+      then: (onResolve: (value: unknown) => unknown) => {
+        capturedResolve = onResolve;
+        return undefined;
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "late-middleware" },
+      () => lateThenable as unknown as Promise<unknown>,
+    );
+
+    wrapped(makeNextRequest({ pathname: "/late" }));
+    vi.advanceTimersByTime(WATCHDOG_MS);
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+
+    expect(capturedResolve).toBeDefined();
+    expect(() => capturedResolve!({ status: 200 })).not.toThrow();
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+  });
+
+  it("a normally settling async handler never triggers the watchdog", async () => {
+    vi.useFakeTimers();
+    const wrapped = tracedRequestMiddleware(
+      { name: "prompt-middleware" },
+      async () => ({ status: 200 }),
+    );
+
+    const pending = wrapped(makeNextRequest({ pathname: "/ok" }));
+    await vi.advanceTimersByTimeAsync(0);
+    await pending;
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+
+    vi.advanceTimersByTime(WATCHDOG_MS * 2);
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+  });
+
+
+  it("traces a CALLABLE thenable (function with then) through the settle path", async () => {
+    const fnThenable = Object.assign(() => undefined, {
+      then: (onResolve: (value: unknown) => void) => {
+        onResolve("fn-done");
+      },
+    });
+    const wrapped = tracedRequestMiddleware(
+      { name: "callable-thenable-middleware" },
+      () => fnThenable as unknown as Promise<unknown>,
+    );
+
+    await expect(
+      wrapped(makeNextRequest({ pathname: "/callable" })),
+    ).resolves.toBe("fn-done");
+    expect(
+      exporter.getFinishedSpans().filter((s) => s.name === "callable-thenable-middleware"),
+    ).toHaveLength(1);
+  });
+
+  it("returns a real Promise for a primitive thenable whose then() returns void", async () => {
+    const primitiveThenable = {
+      then: (onResolve: (value: unknown) => void) => {
+        onResolve(42);
+        // returns undefined — the wrapper must still yield a Promise
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "primitive-thenable-middleware" },
+      () => primitiveThenable as unknown as Promise<unknown>,
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/primitive" }));
+    expect(out).toBeInstanceOf(Promise);
+    await expect(out as Promise<unknown>).resolves.toBe(42);
+    expect(
+      exporter.getFinishedSpans().filter((s) => s.name === "primitive-thenable-middleware"),
+    ).toHaveLength(1);
+  });
+
+  it("rejects (rather than throwing synchronously) when a thenable's registration throws", async () => {
+    const hostileRegistration = {
+      then: () => {
+        throw new Error("registration boom");
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "hostile-registration-middleware" },
+      () => hostileRegistration as unknown as Promise<unknown>,
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/hostile" }));
+    expect(out).toBeInstanceOf(Promise);
+    await expect(out as Promise<unknown>).rejects.toThrow("registration boom");
+    const span = getSpan(
+      exporter.getFinishedSpans(),
+      "hostile-registration-middleware",
+    );
+    expect(span.status.code).toBe(SpanStatusCode.ERROR);
+  });
+
+
+  it("assimilates a nested pending promise: the span ends only at ACTUAL fulfillment", async () => {
+    let resolveInner!: (value: string) => void;
+    const inner = new Promise<string>((resolve) => { resolveInner = resolve; });
+    const outerThenable = {
+      then: (onResolve: (value: unknown) => void) => {
+        onResolve(inner); // resolve with a still-pending promise
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "assimilating-middleware" },
+      () => outerThenable as unknown as Promise<unknown>,
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/nested" })) as Promise<unknown>;
+    // Outer thenable has resolved-with-pending: no span may end yet.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(exporter.getFinishedSpans()).toHaveLength(0);
+
+    resolveInner("finally-done");
+    await expect(out).resolves.toBe("finally-done");
+    expect(
+      exporter.getFinishedSpans().filter((s) => s.name === "assimilating-middleware"),
+    ).toHaveLength(1);
+  });
+
+  it("records a late rejection of a nested promise with ERROR status", async () => {
+    let rejectInner!: (error: unknown) => void;
+    const inner = new Promise<never>((_r, reject) => { rejectInner = reject; });
+    const outerThenable = {
+      then: (onResolve: (value: unknown) => void) => {
+        onResolve(inner);
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "nested-reject-middleware" },
+      () => outerThenable as unknown as Promise<unknown>,
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/nested-reject" })) as Promise<unknown>;
+    const swallowed = out.catch((e: unknown) => e);
+    rejectInner(new Error("inner-boom"));
+    const seen = await swallowed;
+    expect((seen as Error).message).toBe("inner-boom");
+    const span = getSpan(exporter.getFinishedSpans(), "nested-reject-middleware");
+    expect(span.status.code).toBe(SpanStatusCode.ERROR);
+    expect(span.status.message).toBe("inner-boom");
+  });
+
+
+  it("commits to the FIRST callback: resolve-then-reject keeps the span clean", async () => {
+    const doubleCaller = {
+      then: (
+        onResolve: (value: unknown) => void,
+        onReject: (error: unknown) => void,
+      ) => {
+        onResolve("first-wins");
+        onReject(new Error("spurious late rejection"));
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "first-wins-middleware" },
+      () => doubleCaller as unknown as Promise<unknown>,
+    );
+
+    await expect(
+      wrapped(makeNextRequest({ pathname: "/first" })) as Promise<unknown>,
+    ).resolves.toBe("first-wins");
+    const span = getSpan(exporter.getFinishedSpans(), "first-wins-middleware");
+    expect(span.status.code).toBe(SpanStatusCode.UNSET);
+    expect(span.events.map((e) => e.name)).not.toContain("exception");
+  });
+
+  it("commits to the FIRST callback: reject-then-resolve records exactly one ERROR", async () => {
+    const doubleCaller = {
+      then: (
+        onResolve: (value: unknown) => void,
+        onReject: (error: unknown) => void,
+      ) => {
+        onReject(new Error("real failure"));
+        onResolve("spurious late value");
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "reject-first-middleware" },
+      () => doubleCaller as unknown as Promise<unknown>,
+    );
+
+    await expect(
+      wrapped(makeNextRequest({ pathname: "/reject-first" })) as Promise<unknown>,
+    ).rejects.toThrow("real failure");
+    const span = getSpan(exporter.getFinishedSpans(), "reject-first-middleware");
+    expect(span.status.code).toBe(SpanStatusCode.ERROR);
+    expect(span.status.message).toBe("real failure");
+  });
+
+
+  it("preserves the handler's Promise subtype through the wrapper", async () => {
+    class TaggedPromise<T> extends Promise<T> {
+      tag(): string {
+        return "tagged";
+      }
+    }
+    const wrapped = tracedRequestMiddleware(
+      { name: "subtype-middleware" },
+      () => TaggedPromise.resolve({ status: 200 }),
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/subtype" }));
+    expect(out).toBeInstanceOf(TaggedPromise);
+    expect((out as InstanceType<typeof TaggedPromise>).tag()).toBe("tagged");
+    await out;
+    expect(
+      exporter.getFinishedSpans().filter((s) => s.name === "subtype-middleware"),
+    ).toHaveLength(1);
+  });
+
+
+  it("rejects with TypeError on self-resolution instead of hanging", async () => {
+    let storedResolve: ((value: unknown) => void) | undefined;
+    const selfResolver = {
+      then: (onResolve: (value: unknown) => void) => {
+        storedResolve = onResolve;
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "self-resolving-middleware" },
+      () => selfResolver as unknown as Promise<unknown>,
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/self" })) as Promise<unknown>;
+    expect(storedResolve).toBeDefined();
+    storedResolve!(out); // hand the wrapper its own promise
+
+    await expect(out).rejects.toThrow(TypeError);
+    await expect(out).rejects.toThrow("Chaining cycle detected");
+    const span = getSpan(
+      exporter.getFinishedSpans(),
+      "self-resolving-middleware",
+    );
+    expect(span.status.code).toBe(SpanStatusCode.ERROR);
+  });
+
+
+  it("survives a proxy thenable whose getPrototypeOf trap throws (falls to the guarded path)", async () => {
+    const hostileBrand = new Proxy(
+      {
+        then: (onResolve: (value: unknown) => void) => {
+          onResolve("proxied-done");
+        },
+      },
+      {
+        getPrototypeOf: () => {
+          throw new Error("hostile prototype trap");
+        },
+      },
+    );
+    const wrapped = tracedRequestMiddleware(
+      { name: "hostile-brand-middleware" },
+      () => hostileBrand as unknown as Promise<unknown>,
+    );
+
+    await expect(
+      wrapped(makeNextRequest({ pathname: "/hostile-brand" })) as Promise<unknown>,
+    ).resolves.toBe("proxied-done");
+    expect(
+      exporter.getFinishedSpans().filter((s) => s.name === "hostile-brand-middleware"),
+    ).toHaveLength(1);
+  });
+
+
+  it("rejects with TypeError when a NESTED thenable later fulfills with the wrapper", async () => {
+    let nestedResolve: ((value: unknown) => void) | undefined;
+    const nestedThenable = {
+      then: (onResolve: (value: unknown) => void) => {
+        nestedResolve = onResolve;
+      },
+    };
+    const outerThenable = {
+      then: (onResolve: (value: unknown) => void) => {
+        onResolve(nestedThenable); // fulfill outer with the nested thenable
+      },
+    };
+    const wrapped = tracedRequestMiddleware(
+      { name: "nested-cycle-middleware" },
+      () => outerThenable as unknown as Promise<unknown>,
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/nested-cycle" })) as Promise<unknown>;
+    // Let native assimilation register callbacks on the nested thenable.
+    await vi.waitFor(() => {
+      expect(nestedResolve).toBeDefined();
+    });
+    nestedResolve!(out); // the nested thenable hands back the wrapper
+
+    await expect(out).rejects.toThrow(TypeError);
+    await expect(out).rejects.toThrow("Chaining cycle detected");
+    const span = getSpan(
+      exporter.getFinishedSpans(),
+      "nested-cycle-middleware",
+    );
+    expect(span.status.code).toBe(SpanStatusCode.ERROR);
+  });
+
+
+  it("traces a real Promise whose own then property is a non-callable shadow", async () => {
+    const shadowed = Promise.resolve({ status: 200 });
+    Object.defineProperty(shadowed, "then", { value: 42 });
+    const wrapped = tracedRequestMiddleware(
+      { name: "shadowed-then-middleware" },
+      () => shadowed,
+    );
+
+    const out = wrapped(makeNextRequest({ pathname: "/shadowed" }));
+    await expect(out as Promise<unknown>).resolves.toEqual({ status: 200 });
+    expect(
+      exporter.getFinishedSpans().filter((s) => s.name === "shadowed-then-middleware"),
+    ).toHaveLength(1);
+  });
+
+  it("strips control characters from caller attributes (strings and array elements)", async () => {
+    const wrapped = tracedRequestMiddleware(
+      {
+        name: "strip-middleware",
+        attributes: {
+          note: "line1\r\nline2",
+          tags: ["a\tb", "clean"],
+          count: 3,
+        },
+      },
+      async () => ({ status: 200 }),
+    );
+
+    await wrapped(makeNextRequest({ pathname: "/strip" }));
+    const span = getSpan(exporter.getFinishedSpans(), "strip-middleware");
+    expect(span.attributes["note"]).toBe("line1line2");
+    expect(span.attributes["tags"]).toEqual(["ab", "clean"]);
+    expect(span.attributes["count"]).toBe(3);
+  });
+
+  it("strips a control character introduced by post-construction in-place array mutation", async () => {
+    const tags = ["clean"];
+    const wrapped = tracedRequestMiddleware(
+      { name: "mutated-array-middleware", attributes: { tags } },
+      async () => ({ status: 200 }),
+    );
+    // The snapshot is shallow: in-place element mutation IS observed
+    // (per the documented semantics), and the write-time strip must
+    // still sanitize the mutated element.
+    tags[0] = "dirty\tvalue";
+
+    await wrapped(makeNextRequest({ pathname: "/mutated" }));
+    const span = getSpan(
+      exporter.getFinishedSpans(),
+      "mutated-array-middleware",
+    );
+    expect(span.attributes["tags"]).toEqual(["dirtyvalue"]);
+  });
+
+  it("omits the causal path attribute when the path strips to empty", async () => {
+    const wrapped = tracedRequestMiddleware(
+      { name: "empty-path-middleware" },
+      async () => ({ status: 200 }),
+    );
+
+    await wrapped(makeNextRequest({ pathname: "\n\t" }));
+    const span = getSpan(exporter.getFinishedSpans(), "empty-path-middleware");
+    expect(
+      span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST],
+    ).toBeUndefined();
+  });
+
+  it("strips control characters from the causal path attribute", async () => {
+    const wrapped = tracedRequestMiddleware(
+      { name: "strip-path-middleware" },
+      async () => ({ status: 200 }),
+    );
+
+    await wrapped(makeNextRequest({ pathname: "/multi\nline\tpath" }));
+    const span = getSpan(exporter.getFinishedSpans(), "strip-path-middleware");
+    expect(span.attributes[ATTR.CAUSAL_MIDDLEWARE_FOR_REQUEST]).toBe(
+      "/multilinepath",
+    );
+  });
+});

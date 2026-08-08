@@ -25,6 +25,7 @@ import {
   pushDegradationSource,
   clearDegradationSource,
 } from "../../../packages/sdk/src/lifecycle.js";
+import { tryEmitLifecycleEvent } from "../../../packages/sdk/src/optional-lifecycle.js";
 
 const mockLogger = vi.fn();
 
@@ -794,5 +795,66 @@ describe("SDK Lifecycle State Machine", () => {
       clearDegradationSource("otel-coexistence-failed");
       expect(getCoreState()).toBe(CoreState.ACTIVE);
     });
+  });
+});
+
+describe("Lifecycle emit bridge (versioned slot + event-name guard)", () => {
+  beforeEach(() => {
+    resetLifecycleForTesting();
+    initLifecycle({ logger: mockLogger });
+  });
+
+  it("registers the bridge under the contract-versioned slot key", () => {
+    const slot = (
+      globalThis as unknown as Record<symbol, { emit?: unknown } | undefined>
+    )[Symbol.for("glasstrace.lifecycle.emit-bridge.v1")];
+    expect(slot).toBeDefined();
+    expect(typeof slot?.emit).toBe("function");
+  });
+
+  it("does not occupy the pre-versioning slot key", () => {
+    const legacy = (
+      globalThis as unknown as Record<symbol, unknown>
+    )[Symbol.for("glasstrace.lifecycle.emit-bridge")];
+    expect(legacy).toBeUndefined();
+  });
+
+  it("forwards known event names through the bridge to listeners", () => {
+    const events: unknown[] = [];
+    onLifecycleEvent("middleware:skipped_uninstalled", (payload) =>
+      events.push(payload),
+    );
+    tryEmitLifecycleEvent("middleware:skipped_uninstalled", {});
+    expect(events).toHaveLength(1);
+  });
+
+  it("silently rejects unknown event names at the bridge boundary", () => {
+    // Register a listener under the unknown key ITSELF (the runtime
+    // emitter accepts any string), so the test discriminates the
+    // bridge guard: without the guard the emit would reach this
+    // listener; with it, the bridge drops the event first.
+    const seen: unknown[] = [];
+    (
+      onLifecycleEvent as unknown as (
+        event: string,
+        listener: (payload: unknown) => void,
+      ) => void
+    )("bogus:not_an_event", (payload) => seen.push(payload));
+
+    expect(() =>
+      tryEmitLifecycleEvent("bogus:not_an_event", { anything: true }),
+    ).not.toThrow();
+    expect(seen).toHaveLength(0);
+
+    // Control: the same listener IS reachable when the guard is
+    // bypassed via a direct (cast) emit — proving the drop above
+    // happened at the bridge, not in listener plumbing.
+    (
+      emitLifecycleEvent as unknown as (
+        event: string,
+        payload: unknown,
+      ) => void
+    )("bogus:not_an_event", { anything: true });
+    expect(seen).toHaveLength(1);
   });
 });

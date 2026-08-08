@@ -29,6 +29,23 @@
  * semantics, which is the correct boundary for this contract (a Node
  * worker thread or `vm.Context` is logically a fresh process).
  *
+ * Bridge-contract versioning
+ * --------------------------
+ * The slot key carries a BRIDGE-CONTRACT version suffix (`.v1`).
+ * **Binding key-bump policy:** any incompatible change to the bridge's
+ * payload or callback contract (the {@link LifecycleEmitFn} shape or
+ * the meaning of its arguments) MUST bump the suffix in the same
+ * change. The versioned key scopes mixed-version behavior precisely:
+ * SDK releases sharing a bridge-contract version deliberately share
+ * the slot — their payloads are compatible by that contract — while a
+ * pre-versioning release and any release on a DIFFERENT contract
+ * version do not collide: each release reads and writes only its own
+ * key, finding either a slot registered under its own contract or
+ * nothing, and a missing slot is the safe no-op degradation
+ * documented on {@link tryEmitLifecycleEvent}. The suffix does NOT
+ * isolate every co-resident SDK version pair; releases on the same
+ * contract version still share one slot, latest registration winning.
+ *
  * **Why not pass the emitter through the public wrapper API?** The
  * emitter is an internal SDK signal, not a user-facing knob. Keeping
  * it on a global slot rather than as a wrapper option preserves the
@@ -37,19 +54,24 @@
  * emit-once / event-key invariants without exposing them.
  */
 
-/** Process-wide brand used to look up the registered emit function. */
-const EMIT_BRIDGE = Symbol.for("glasstrace.lifecycle.emit-bridge");
+/**
+ * Process-wide brand used to look up the registered emit function.
+ * The `.v1` suffix is the bridge-contract version — see the module
+ * doc's binding key-bump policy before changing the emit signature.
+ */
+const EMIT_BRIDGE = Symbol.for("glasstrace.lifecycle.emit-bridge.v1");
 
 /**
  * Type of the registered emit function. Mirrors the signature of
- * `emitLifecycleEvent` from `./lifecycle.ts` but typed as `unknown`
- * here to keep this module free of any cross-import that would couple
- * the edge bundle to `node:events`.
+ * `emitLifecycleEvent` from `./lifecycle.ts` but stringly-typed here
+ * to keep this module free of any cross-import that would couple the
+ * edge bundle to `node:events`.
  *
- * The lifecycle module casts to/from this type at the registration
- * site; consumers of {@link tryEmitLifecycleEvent} use the typed
- * overload that re-imposes the `SdkLifecycleEvents` constraint via a
- * second parameter alias.
+ * The bridge wire is deliberately untyped: the lifecycle module's
+ * registered callback runtime-verifies the event name against its own
+ * known-event set and drops unknown names, casting only the payload
+ * at that verified boundary. Callers of {@link tryEmitLifecycleEvent}
+ * pass plain strings.
  */
 export type LifecycleEmitFn = (
   event: string,
@@ -95,7 +117,8 @@ export function _clearLifecycleEmitForBridge(): void {
  *
  * - When the lifecycle module has registered the bridge (Node runtime
  *   with `registerGlasstrace()` having run): forwards to
- *   `emitLifecycleEvent(event, payload)`.
+ *   `emitLifecycleEvent(event, payload)` (the registered callback
+ *   drops event names outside its release's known set).
  * - When the bridge is unset (edge runtime — `lifecycle.ts` not in
  *   closure; or pre-`initLifecycle()` race): no-op.
  *

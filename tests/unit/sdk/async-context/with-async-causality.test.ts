@@ -25,6 +25,7 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import {
   trace,
+  context,
   SpanStatusCode,
   SpanKind,
   type AttributeValue,
@@ -414,5 +415,119 @@ describe("withAsyncCausality — span activation (regression)", () => {
     expect(child.spanContext().traceId).toBe(
       outer.spanContext().traceId,
     );
+  });
+});
+
+describe("withAsyncCausality — hardening (span-leak watchdog + control-char strip)", () => {
+  const WATCHDOG_MS = 600_000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("ends the span via the watchdog when fn() never resolves", async () => {
+    vi.useFakeTimers();
+    const cont = withAsyncCausality(
+      { name: "stuck-task" },
+      () => new Promise<never>(() => undefined),
+    );
+
+    void cont();
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS - 1);
+    expect(exporter.getFinishedSpans()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    getSpan(exporter.getFinishedSpans(), "stuck-task");
+  });
+
+  it("a normally resolving fn() never triggers the watchdog", async () => {
+    vi.useFakeTimers();
+    const cont = withAsyncCausality({ name: "prompt-task" }, async () => 42);
+
+    const pending = cont();
+    await vi.advanceTimersByTimeAsync(0);
+    await pending;
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS * 2);
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+  });
+
+
+  it("a late resolve after the watchdog fired is a safe no-op and still yields fn's value", async () => {
+    vi.useFakeTimers();
+    let resolveFn: ((value: string) => void) | undefined;
+    const cont = withAsyncCausality(
+      { name: "late-task" },
+      () => new Promise<string>((resolve) => { resolveFn = resolve; }),
+    );
+
+    const pending = cont();
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS);
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+
+    resolveFn!("late");
+    await expect(pending).resolves.toBe("late");
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+  });
+
+  it("a late rejection after the watchdog fired rethrows verbatim without double-ending", async () => {
+    vi.useFakeTimers();
+    let rejectFn: ((error: unknown) => void) | undefined;
+    const cont = withAsyncCausality(
+      { name: "late-reject-task" },
+      () => new Promise<never>((_resolve, reject) => { rejectFn = reject; }),
+    );
+
+    const pending = cont();
+    const swallowed = pending.catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS);
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+
+    const boom = new Error("late-boom");
+    rejectFn!(boom);
+    await expect(swallowed).resolves.toBe(boom);
+    expect(exporter.getFinishedSpans()).toHaveLength(1);
+  });
+
+  it("strips control characters from a nonconforming provider's traceId on the causal attribute", async () => {
+    const dirtyContext = {
+      traceId: "0af7651916cd43dd\t8448eb211c80\n319c",
+      spanId: "b7ad6b7169203331",
+      traceFlags: 1,
+    };
+    const fakeActiveSpan = {
+      spanContext: () => dirtyContext,
+    } as unknown as Parameters<typeof trace.setSpan>[1];
+
+    const cont = context.with(
+      trace.setSpan(context.active(), fakeActiveSpan),
+      () => withAsyncCausality({ name: "dirty-trace-task" }, async () => 1),
+    );
+
+    await cont();
+    const span = getSpan(exporter.getFinishedSpans(), "dirty-trace-task");
+    expect(span.attributes[ATTR.CAUSAL_POST_RESPONSE_ASYNC]).toBe(
+      "0af7651916cd43dd8448eb211c80319c",
+    );
+  });
+
+  it("strips control characters from caller attributes (strings and array elements)", async () => {
+    const cont = withAsyncCausality(
+      {
+        name: "strip-task",
+        attributes: {
+          note: "line1\r\nline2",
+          tags: ["a\tb", "clean"],
+          count: 3,
+        },
+      },
+      async () => undefined,
+    );
+
+    await cont();
+    const span = getSpan(exporter.getFinishedSpans(), "strip-task");
+    expect(span.attributes["note"]).toBe("line1line2");
+    expect(span.attributes["tags"]).toEqual(["ab", "clean"]);
+    expect(span.attributes["count"]).toBe(3);
   });
 });
