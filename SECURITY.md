@@ -21,13 +21,14 @@ timeline for a fix.
 
 ## Supported Versions
 
-| Version | Supported          |
+| Package | Supported versions |
 |---------|--------------------|
-| 0.x     | Current pre-release |
+| `@glasstrace/sdk` (1.x) | Latest minor; older minors for 90 days after the next minor |
+| `@glasstrace/protocol` (0.x) | Latest minor; older minors for 90 days after the next minor |
 
-Once v1.0 ships, the latest minor release will receive security
-patches. Older minor releases will be supported for 90 days after
-the next minor release.
+For both packages, the latest minor release receives security patches.
+Older minor releases are supported for 90 days after the next minor
+release.
 
 ## Security Practices
 
