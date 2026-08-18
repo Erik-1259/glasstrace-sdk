@@ -41,7 +41,7 @@ jobs:
       - run: npm ci
 
       - name: Create or update Version Packages PR
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
           title: "chore: version packages"
           commit: "chore: version packages"
