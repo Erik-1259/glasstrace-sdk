@@ -75,17 +75,18 @@ before you trigger a canary publish: **trigger the canary
 
 After your implementation PR merges to `main`, the `changesets/action`
 opens a Version Packages PR that bumps `package.json` versions and clears
-the `.changeset/*.md` files. The canary publish path requires at least
-one changeset in `.changeset/` so `changeset version --snapshot canary`
-produces a real snapshot version; if the Version Packages PR has already
-consumed the changesets, the canary workflow fails on the
-`Guard — require changesets for canary` step with:
+the pending release changesets. The canary publish path requires Changesets
+to calculate at least one pending package release so
+`changeset version --snapshot canary` produces a real snapshot version.
+Ignored guide files such as `.changeset/README.md`, empty changesets, and
+explicit `none` release entries do not qualify. The guard requires a real
+`patch`, `minor`, or `major` version change. If the Version Packages PR has
+already consumed the release entries, the canary workflow fails on the
+`Guard — require versionable changesets for canary` step with:
 
 ```
-::error::Canary mode requires at least one changeset in .changeset/.
-::error::Without one, 'changeset version --snapshot' is a no-op and
-'publish --tag canary' would publish the current stable semver under
-the canary tag.
+::error::Canary mode requires at least one versionable package release in .changeset/.
+::error::Without one, snapshot versioning is a no-op and canary publication would re-tag a stable version.
 ```
 
 The documented order:

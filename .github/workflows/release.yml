@@ -43,10 +43,9 @@ jobs:
       - name: Create or update Version Packages PR
         uses: changesets/action@v2
         with:
-          title: "chore: version packages"
-          commit: "chore: version packages"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          pr-title: "chore: version packages"
+          commit-message: "chore: version packages"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   # Manual dispatch: publish canary or stable to npm.
   publish:
@@ -59,26 +58,15 @@ jobs:
       id-token: write  # OIDC for npm trusted publishing
     steps:
       - uses: actions/checkout@v7
+        with:
+          # `changeset status` compares against .changeset/config.json's
+          # baseBranch. A manual canary may run from another branch, so the
+          # default single-commit checkout is not enough to resolve `main`.
+          fetch-depth: 0
 
-      # Fail fast on empty changesets in canary mode: without this, we'd
-      # spend ~1m on install/typecheck/test/build only to discover we
-      # have nothing to snapshot. Runs straight after checkout — needs
-      # only the .changeset/ directory, no Node or npm.
-      # Without a changeset, 'changeset version --snapshot' is a no-op
-      # and 'publish --tag canary' would mis-tag the current stable
-      # semver under "canary" (see 0.14.0 incident).
-      - name: Guard — require changesets for canary
-        if: ${{ inputs.mode == 'canary' }}
+      - name: Make Changesets base branch resolvable
         shell: bash
-        run: |
-          shopt -s nullglob
-          files=(.changeset/*.md)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::Canary mode requires at least one changeset in .changeset/."
-            echo "::error::Without one, 'changeset version --snapshot' is a no-op and 'publish --tag canary' would publish the current stable semver under the canary tag."
-            exit 1
-          fi
-          echo "Found ${#files[@]} changeset(s): ${files[*]}"
+        run: git show-ref --verify --quiet refs/heads/main || git branch --track main refs/remotes/origin/main
 
       - uses: actions/setup-node@v7
         with:
@@ -94,6 +82,44 @@ jobs:
         run: npm install -g npm@11.6.1
 
       - run: npm ci
+
+      # Ask Changesets itself whether the pending files produce a package
+      # release. Counting Markdown files is insufficient: Changesets ignores
+      # its README and agent-guide files, while empty and explicit `none`
+      # changesets do not produce a new version. In those cases, snapshot
+      # versioning is a no-op and publishing would re-tag the current stable
+      # semver as canary (see 0.14.0 incident).
+      - name: Guard — require versionable changesets for canary
+        if: ${{ inputs.mode == 'canary' }}
+        shell: bash
+        run: |
+          npx changeset status --output="$RUNNER_TEMP/changeset-status.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const status = JSON.parse(
+            readFileSync(`${process.env.RUNNER_TEMP}/changeset-status.json`, "utf8"),
+          );
+          const versionableTypes = new Set(["patch", "minor", "major"]);
+          const releases = Array.isArray(status?.releases) ? status.releases : [];
+          const versionableReleases = releases.filter((release) =>
+            release !== null &&
+            typeof release === "object" &&
+            typeof release.name === "string" &&
+            release.name.trim() !== "" &&
+            versionableTypes.has(release.type) &&
+            typeof release.oldVersion === "string" &&
+            release.oldVersion.trim() !== "" &&
+            typeof release.newVersion === "string" &&
+            release.newVersion.trim() !== "" &&
+            release.newVersion !== release.oldVersion
+          );
+          if (versionableReleases.length === 0) {
+            console.error("::error::Canary mode requires at least one versionable package release in .changeset/.");
+            console.error("::error::Without one, snapshot versioning is a no-op and canary publication would re-tag a stable version.");
+            process.exit(1);
+          }
+          console.log(`Found ${versionableReleases.length} versionable package release(s).`);
+          NODE
 
       # Snapshot version FIRST in canary mode so tsup's
       # `define: { __SDK_VERSION__: pkg.version }` substitution at build
