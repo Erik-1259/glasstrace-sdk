@@ -1,5 +1,12 @@
 # @glasstrace/sdk
 
+## 1.32.2
+
+### Patch Changes
+
+- b4e3777: Correct generated agent guidance so known trace IDs use direct analysis tools
+  and stop signals do not trigger unconditional trace drill-down.
+
 ## 1.32.1
 
 ### Patch Changes
