@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   generateMcpConfig,
@@ -5,6 +7,7 @@ import {
   generateInfoSectionForCursorMdc,
   generateInfoSectionForCursorrulesLegacy,
 } from "../../../../packages/sdk/src/agent-detection/configs.js";
+import { buildAgentInstructionBody } from "../../../../packages/sdk/src/agent-detection/agent-instruction-text.js";
 import type { DetectedAgent } from "../../../../packages/sdk/src/agent-detection/detect.js";
 
 const ENDPOINT = "https://mcp.glasstrace.dev/v1";
@@ -13,6 +16,10 @@ const ANON_KEY = "gt_anon_test123";
 // the version-stamped start marker. Pin a stable test value so snapshot
 // assertions don't drift when package.json's version bumps.
 const SDK_VERSION = "1.4.0";
+const SDK_PACKAGE_README = readFileSync(
+  new URL("../../../../packages/sdk/README.md", import.meta.url),
+  "utf8",
+);
 
 function makeAgent(
   name: DetectedAgent["name"],
@@ -97,6 +104,725 @@ function expectSafeDiscoveryWindowGuidance(info: string): void {
   expect(info).not.toContain("rough time window");
   expect(info).not.toContain("tight time window");
   expect(info).not.toContain("open window");
+}
+
+function sectionBetween(
+  text: string,
+  startMarker: string,
+  endMarker: string,
+): string {
+  const start = text.indexOf(startMarker);
+  if (start < 0) {
+    throw new Error(`Missing section start: ${startMarker}`);
+  }
+
+  const end = text.indexOf(endMarker, start + startMarker.length);
+  if (end < 0) {
+    throw new Error(`Missing section end after ${startMarker}: ${endMarker}`);
+  }
+
+  return text.slice(start, end);
+}
+
+function standaloneLineStartingWith(text: string, prefix: string): number {
+  const matches = text.split(/\r?\n/).flatMap((line, index) =>
+    line.startsWith(prefix) ? [index] : [],
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected one standalone line starting with ${JSON.stringify(prefix)}, found ${matches.length}`,
+    );
+  }
+  return matches[0];
+}
+
+function standaloneLineEqualTo(text: string, expected: string): number {
+  const matches = text.split(/\r?\n/).flatMap((line, index) =>
+    line === expected ? [index] : [],
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected one standalone line equal to ${JSON.stringify(expected)}, found ${matches.length}`,
+    );
+  }
+  return matches[0];
+}
+
+function markdownParagraphStartingWith(text: string, prefix: string): string {
+  const blocks = text.replace(/\r\n?/g, "\n").split(/\n[ \t]*\n/);
+  const matches = blocks.filter((block) => block.startsWith(prefix));
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected one Markdown paragraph starting with ${JSON.stringify(prefix)}, found ${matches.length}`,
+    );
+  }
+  return matches[0];
+}
+
+function labeledBullet(section: string, label: string): string {
+  const marker = `   - **${label}**`;
+  const lines = section.split(/\r?\n/);
+  const matches = lines.flatMap((line, index) =>
+    line.startsWith(marker) ? [index] : [],
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected one standalone routing bullet for ${label}, found ${matches.length}`,
+    );
+  }
+
+  const start = matches[0];
+  const next = lines.findIndex(
+    (line, index) => index > start && line.startsWith("   - **"),
+  );
+  return lines.slice(start, next < 0 ? lines.length : next).join("\n");
+}
+
+function toolBullet(toolsSection: string, toolName: string): string {
+  const marker = `- \`${toolName}\` — `;
+  const matches = toolsSection
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(marker));
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected one standalone Tools bullet for ${toolName}, found ${matches.length}`,
+    );
+  }
+  return matches[0];
+}
+
+function normalizeContractText(text: string): string {
+  return text
+    .replace(/`/g, "")
+    .replace(/traceId/gi, "trace id")
+    .replace(/tracing[-_ ]*identifier/gi, "trace id")
+    .replace(/trace[-_ ]*identifier/gi, "trace id")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function mentionsKnownTraceId(text: string): boolean {
+  const normalized = normalizeContractText(text);
+  return (
+    /\b(?:already (?:have|has)|known|precise|provided|available|suppl(?:y|ies|ied))\b.{0,80}\btrace id\b/.test(
+      normalized,
+    ) ||
+    /\btrace id\b.{0,80}\b(?:already (?:known|provided|available)|known|precise|provided|available|suppl(?:y|ies|ied))\b/.test(
+      normalized,
+    )
+  );
+}
+
+function hasSupportedStepOneContract(stepOne: string): boolean {
+  try {
+    const exactId = labeledBullet(stepOne, "Precise trace ID already known");
+    const activeFailure = labeledBullet(
+      stepOne,
+      "Active failure without an independently known precise trace ID",
+    );
+    const normalized = normalizeContractText(stepOne);
+    const exactIdNormalized = normalizeContractText(exactId);
+    const exactIdLine = standaloneLineStartingWith(
+      stepOne,
+      "   - **Precise trace ID already known**",
+    );
+    const activeFailureLine = standaloneLineStartingWith(
+      stepOne,
+      "   - **Active failure without an independently known precise trace ID**",
+    );
+
+    return (
+      normalized.includes(
+        "an independently known precise trace id takes precedence over every other symptom branch",
+      ) &&
+      !/active failure.{0,100}takes precedence over.{0,100}(?:known|precise).{0,40}trace id/.test(
+        normalized,
+      ) &&
+      exactIdLine < activeFailureLine &&
+      exactIdNormalized.includes("call get_root_cause directly") &&
+      exactIdNormalized.includes("do not send a trace id to get_trace") &&
+      !/(?:call|use) get_trace.{0,80}(?:with|using|by|for|\().{0,40}trace id/.test(
+        exactIdNormalized,
+      ) &&
+      normalizeContractText(activeFailure).includes("get_latest_error first")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasSupportedGetTraceToolsContract(toolsSection: string): boolean {
+  try {
+    const bullet = toolBullet(toolsSection, "get_trace");
+    const normalized = normalizeContractText(bullet);
+    return (
+      normalized.includes(
+        "filtered trace search by url, method, status code, time window, or correlation id",
+      ) &&
+      normalized.includes(
+        "candidate-directed trace read after find_trace_candidates",
+      ) &&
+      !/traceId/i.test(bullet) &&
+      !/get_trace\s*\([^)]*trace id/.test(normalized) &&
+      !/\bexact(?:-id)? (?:trace )?(?:lookup|search|retrieval)\b/.test(
+        normalized,
+      ) &&
+      !/\b(?:accepts?|takes?|receives?|pass(?:es)?)\b.{0,80}\b(?:user supplied )?trace id\b/.test(
+        normalized,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function lineStructuredSha256(text: string): string {
+  const normalized = text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim();
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+function rawSha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function expectSupportedDiagnosticRouting(info: string): void {
+  const infoLines = info.split(/\r?\n/);
+  const standaloneStartMarkers = infoLines.filter((line) =>
+    /^(?:<!--|#) glasstrace:mcp:start v=[^\s>]+(?: -->)?$/.test(line),
+  );
+  const standaloneEndMarkers = infoLines.filter((line) =>
+    /^(?:<!-- glasstrace:mcp:end -->|# glasstrace:mcp:end)$/.test(line),
+  );
+  expect(standaloneStartMarkers).toHaveLength(1);
+  expect(standaloneEndMarkers).toHaveLength(1);
+
+  const exactHeadings = [
+    "### Call Glasstrace FIRST when:",
+    "### SKIP Glasstrace when:",
+    "### Workflow",
+    "### Tools",
+  ];
+  for (const heading of exactHeadings) {
+    standaloneLineEqualTo(info, heading);
+    const merged = info.replace(`\n${heading}`, ` ${heading}`);
+    expect(merged).not.toBe(info);
+    expect(() => standaloneLineEqualTo(merged, heading)).toThrow();
+  }
+
+  const structuralBoundaries = [
+    "- You already have a precise `traceId` and need to inspect that trace directly.",
+    "1. Pick the first call by symptom",
+    "   **Explicit-window guard:**",
+    "2. After `find_trace_candidates`",
+    "3. Side-effect evidence",
+    "4. If a tool returns empty, READ the response's empty-result envelope",
+    "5. Follow-up tools refine evidence; they do not invalidate it:",
+    "6. After a relevant trace is found, pause before editing:",
+    "   - If a plausible candidate lacks semantic evidence,",
+    "7. Stateful bugs often span more than one request",
+    "8. If a route-based search is sparse, ambiguous, or returns a weak response,",
+  ];
+  const structuralBoundaryLines = structuralBoundaries.map((prefix) =>
+    standaloneLineStartingWith(info, prefix),
+  );
+  expect(structuralBoundaryLines).toEqual(
+    [...structuralBoundaryLines].sort((left, right) => left - right),
+  );
+  for (const prefix of structuralBoundaries) {
+    const boundary = `\n${prefix}`;
+    const merged = info.replace(boundary, ` ${prefix}`);
+    expect(merged).not.toBe(info);
+    expect(() => standaloneLineStartingWith(merged, prefix)).toThrow();
+  }
+
+  const allChangedBoundaryLines = [
+    standaloneLineEqualTo(info, "### Call Glasstrace FIRST when:"),
+    standaloneLineStartingWith(info, structuralBoundaries[0]),
+    standaloneLineEqualTo(info, "### SKIP Glasstrace when:"),
+    standaloneLineEqualTo(info, "### Workflow"),
+    ...structuralBoundaryLines.slice(1),
+    standaloneLineEqualTo(info, "### Tools"),
+  ];
+  expect(allChangedBoundaryLines).toEqual(
+    [...allChangedBoundaryLines].sort((left, right) => left - right),
+  );
+
+  const callWhen = sectionBetween(
+    info,
+    "### Call Glasstrace FIRST when:",
+    "### SKIP Glasstrace when:",
+  );
+  const skipWhen = sectionBetween(
+    info,
+    "### SKIP Glasstrace when:",
+    "### Workflow",
+  );
+  const expectedCallWhenHash =
+    "ee0ba3e9d7188feee61b5c18265ead514dc7c8803d391c7a7982ac8185a0328b";
+  expect(lineStructuredSha256(callWhen)).toBe(expectedCallWhenHash);
+  const contradictoryCallRule = callWhen.replace(
+    "and need to inspect that trace directly.",
+    "and need to inspect that trace directly. Even so, skip Glasstrace when the user supplied that identifier.",
+  );
+  expect(contradictoryCallRule).not.toBe(callWhen);
+  expect(lineStructuredSha256(contradictoryCallRule)).not.toBe(
+    expectedCallWhenHash,
+  );
+  const expectedSkipWhenHash =
+    "75f591b9c8a8a064f192b5aa93a8f71c8169741386b9522d7b1154b128312b3e";
+  expect(lineStructuredSha256(skipWhen)).toBe(expectedSkipWhenHash);
+  const knownIdCallLine = callWhen
+    .split(/\r?\n/)
+    .find((line) =>
+      line.startsWith(
+        "- You already have a precise `traceId` and need to inspect that trace directly.",
+      ),
+    );
+  expect(knownIdCallLine).toBeDefined();
+  expect(mentionsKnownTraceId(knownIdCallLine ?? "")).toBe(true);
+  expect(mentionsKnownTraceId(skipWhen)).toBe(false);
+  for (const forbiddenSkipRule of [
+    "- You already have a precise traceId from another source.",
+    "- You already have a precise `traceId` from another source.",
+    "- A precise trace ID is already known from prior context.",
+    "- If the user supplies a trace identifier, skip Glasstrace.",
+  ]) {
+    const mutatedSkip = `${skipWhen.trimEnd()}\n${forbiddenSkipRule}\n`;
+    expect(mentionsKnownTraceId(mutatedSkip)).toBe(true);
+    expect(lineStructuredSha256(mutatedSkip)).not.toBe(expectedSkipWhenHash);
+  }
+
+  // Known IDs use the direct-ID tools; get_trace remains a filtered search.
+  const firstCallRouting = sectionBetween(
+    info,
+    "1. Pick the first call by symptom",
+    "   **Explicit-window guard:**",
+  );
+  const expectedFirstCallHash =
+    "5ae34d78a3e9a4d8d85610df72ad3ae6360c3e19e37b4c320576ad179a04ad3d";
+  expect(hasSupportedStepOneContract(firstCallRouting)).toBe(true);
+  expect(lineStructuredSha256(firstCallRouting)).toBe(expectedFirstCallHash);
+
+  const oppositePrecedence = firstCallRouting.replace(
+    "An independently known precise trace ID takes precedence over every other symptom branch;",
+    "An independently known precise trace ID takes precedence over every other symptom branch; an active failure takes precedence over an independently known precise trace ID;",
+  );
+  expect(oppositePrecedence).not.toBe(firstCallRouting);
+  expect(hasSupportedStepOneContract(oppositePrecedence)).toBe(false);
+  expect(lineStructuredSha256(oppositePrecedence)).not.toBe(
+    expectedFirstCallHash,
+  );
+
+  for (const forbiddenExactLookup of [
+    "call `get_trace(traceId)` directly",
+    "call `get_trace({ traceId })` directly",
+  ]) {
+    const exactLookupMutation = firstCallRouting.replace(
+      "call `get_root_cause` directly",
+      forbiddenExactLookup,
+    );
+    expect(exactLookupMutation).not.toBe(firstCallRouting);
+    expect(hasSupportedStepOneContract(exactLookupMutation)).toBe(false);
+    expect(lineStructuredSha256(exactLookupMutation)).not.toBe(
+      expectedFirstCallHash,
+    );
+  }
+
+  const exactIdBranch = labeledBullet(
+    firstCallRouting,
+    "Precise trace ID already known",
+  );
+  expect(exactIdBranch).toContain("call `get_root_cause` directly");
+  expect(exactIdBranch).toContain(
+    "with no active candidate-directed sequence",
+  );
+  expect(exactIdBranch).toContain(
+    "If `find_trace_candidates` just returned the ID inside a candidate, follow that candidate's bounded sequence",
+  );
+  expect(exactIdBranch).toContain("Do not send a `traceId` to `get_trace`");
+  expect(exactIdBranch).toContain(
+    "it searches by URL, method, status code, time window, or correlation ID",
+  );
+  expect(exactIdBranch).toContain(
+    "use `get_span_attributes` with the independently known `traceId`",
+  );
+  expect(exactIdBranch).toContain(
+    "include a relevant `spanId` to narrow the result",
+  );
+  expect(exactIdBranch).toContain(
+    "even when the request just failed or a stack trace is present",
+  );
+
+  const activeFailureBranch = labeledBullet(
+    firstCallRouting,
+    "Active failure without an independently known precise trace ID",
+  );
+  expect(activeFailureBranch).toContain("`get_latest_error` first");
+  const firstCallLabels = [
+    "Precise trace ID already known",
+    "Active failure without an independently known precise trace ID",
+    "Known route or procedure with suspected misbehavior",
+    "Historical exploration",
+  ];
+  for (const label of firstCallLabels) {
+    expect(labeledBullet(firstCallRouting, label)).toContain(`**${label}**`);
+  }
+  for (const label of firstCallLabels.slice(1)) {
+    const boundary = `\n   - **${label}**`;
+    const merged = firstCallRouting.replace(boundary, `   - **${label}**`);
+    expect(merged).not.toBe(firstCallRouting);
+    expect(() => labeledBullet(merged, label)).toThrow();
+  }
+
+  const routing = sectionBetween(
+    info,
+    "2. After `find_trace_candidates`",
+    "3. Side-effect evidence",
+  );
+  // Complete line-structured snapshot: scoped assertions below explain the
+  // contract, while this digest rejects any unreviewed negation, reorder, or
+  // reassociation elsewhere in the public routing section.
+  const expectedRoutingHash =
+    "0ffaa76255ca74569bd8854e8a45142fc0df94af474a695cd1d63a41e356e59f";
+  expect(lineStructuredSha256(routing)).toBe(expectedRoutingHash);
+
+  const routingLabels = [
+    "Decisive / supporting response",
+    "Present application evidence",
+    "Pure stop",
+    "Weak result",
+    "Authentication short circuit",
+    "Orphaned partial evidence",
+    "Structured fields omitted / pagination",
+  ];
+  for (const label of routingLabels.slice(1)) {
+    const boundary = `\n   - **${label}**`;
+    const merged = routing.replace(boundary, `   - **${label}**`);
+    expect(merged).not.toBe(routing);
+    expect(lineStructuredSha256(merged)).not.toBe(expectedRoutingHash);
+    expect(() => labeledBullet(merged, label)).toThrow();
+  }
+
+  // Pin each response class inside its own bullet so unrelated vocabulary
+  // elsewhere in the managed body cannot make a broken association pass.
+  const diagnosticResponse = labeledBullet(
+    routing,
+    "Decisive / supporting response",
+  );
+  expect(normalizeWhitespace(routing.split("\n", 1)[0])).toContain(
+    "distinguish the response-level `diagnosticValue`, `recommendedNextStep`, and `maxUsefulFollowups` rollup from each candidate row's `diagnosticValue`, `sideEffectEvidence`, and `suggestedFollowups`",
+  );
+  expect(routing.split("\n", 1)[0]).toContain(
+    "Candidate array order is rank order",
+  );
+  expect(routing.split("\n", 1)[0]).toContain("On a mixed page");
+  expect(normalizeWhitespace(diagnosticResponse)).toContain(
+    "Response-level `diagnosticValue: decisive` pairs with `recommendedNextStep: get_trace` and `maxUsefulFollowups: 1`; response-level `diagnosticValue: supporting` pairs with `recommendedNextStep: get_trace` and `maxUsefulFollowups: 2`.",
+  );
+  expect(diagnosticResponse).toContain(
+    "These are one response budget, not per-candidate budgets",
+  );
+  expect(normalizeWhitespace(diagnosticResponse)).toContain(
+    "Use the first candidate (the highest-ranked row) and its `suggestedFollowups.getTrace` first.",
+  );
+  expect(diagnosticResponse).toContain("Every candidate includes a `traceId`");
+  expect(diagnosticResponse).toContain(
+    "this active candidate-directed sequence takes precedence over the independently-known-ID shortcut",
+  );
+  expect(normalizeWhitespace(diagnosticResponse)).toContain(
+    "For a supporting response, use that same first candidate's `suggestedFollowups.getRootCause` as the second step only when root-cause analysis is still useful.",
+  );
+  expect(diagnosticResponse).not.toContain("`inspect_source`");
+
+  const presentEvidence = labeledBullet(routing, "Present application evidence");
+  expect(presentEvidence).toContain("zero-budget response-level stop rollup");
+  expect(presentEvidence).toContain(
+    "`sideEffectEvidence.status` equal to `present`",
+  );
+  expect(presentEvidence).toContain(
+    "choose the first such candidate in array order (the highest-ranked evidence-bearing row)",
+  );
+  expect(presentEvidence).toContain("that candidate's");
+  expect(presentEvidence).toContain("`suggestedFollowups.getTrace`");
+  expect(presentEvidence).toContain(
+    "This per-candidate evidence override applies",
+  );
+  expect(presentEvidence).toContain(
+    "response-level `diagnosticValue` is `route_only`, `weak`, or `auth_short_circuit`",
+  );
+  expect(presentEvidence).toContain("`route_only`");
+  expect(presentEvidence).toContain("`weak`");
+  expect(presentEvidence).toContain("`auth_short_circuit`");
+  expect(presentEvidence).toContain("`maxUsefulFollowups: 0`");
+  expect(presentEvidence).toContain("`recommendedNextStep: inspect_source`");
+  expect(presentEvidence).toContain("read the full trace before editing");
+  expect(presentEvidence).toContain(
+    "When the response rollup is already decisive or supporting, use the first candidate",
+  );
+  expect(presentEvidence).toContain(
+    "comes before the response-level `recommendedNextStep: inspect_source` or `recommendedNextStep: retry_with_authenticated_credential`",
+  );
+
+  const pureStop = labeledBullet(routing, "Pure stop");
+  expect(pureStop).toContain("response-level");
+  expect(pureStop).toContain("`route_only`");
+  expect(pureStop).toContain("`maxUsefulFollowups: 0`");
+  expect(pureStop).toContain("`recommendedNextStep: inspect_source`");
+  expect(pureStop).toContain("no candidate carrying present application evidence");
+  expect(pureStop).toContain("inspect source first");
+  expect(pureStop).toContain("Do not issue an unconditional trace drill-down");
+  expect(pureStop).toContain(
+    "The first candidate's `suggestedFollowups` stay valid if source review still needs the exact trace.",
+  );
+
+  const weakResult = labeledBullet(routing, "Weak result");
+  expect(weakResult).toContain("response-level");
+  expect(weakResult).toContain("`diagnosticValue: weak`");
+  expect(weakResult).toContain("`maxUsefulFollowups: 0`");
+  expect(weakResult).toContain("`recommendedNextStep: inspect_source`");
+  expect(weakResult).toContain("no candidate carrying present application evidence");
+  expect(weakResult).toContain("inspect source first");
+  expect(weakResult).toContain(
+    "Do not turn a low-information match into a default trace drill-down.",
+  );
+  expect(weakResult).toContain(
+    "follow the evidence-bearing-candidate override above",
+  );
+  expect(weakResult).not.toContain("`suggestedFollowups`");
+
+  const authShortCircuit = labeledBullet(routing, "Authentication short circuit");
+  expect(authShortCircuit).toContain("response-level");
+  expect(authShortCircuit).toContain("`diagnosticValue: auth_short_circuit`");
+  expect(authShortCircuit).toContain("`maxUsefulFollowups: 0`");
+  expect(authShortCircuit).toContain(
+    "`recommendedNextStep: retry_with_authenticated_credential`",
+  );
+  expect(authShortCircuit).toContain(
+    "no candidate carrying present application evidence",
+  );
+  expect(authShortCircuit).toContain("retry with an authenticated credential");
+  expect(authShortCircuit).toContain("Do not substitute candidate drill-down");
+  expect(authShortCircuit).toContain(
+    "read the highest-ranked evidence-bearing trace under the override above before retrying",
+  );
+
+  const presentIndex = routing.indexOf("   - **Present application evidence**");
+  const pureStopIndex = routing.indexOf("   - **Pure stop**");
+  const weakIndex = routing.indexOf("   - **Weak result**");
+  const authIndex = routing.indexOf("   - **Authentication short circuit**");
+  expect(presentIndex).toBeLessThan(pureStopIndex);
+  expect(pureStopIndex).toBeLessThan(weakIndex);
+  expect(weakIndex).toBeLessThan(authIndex);
+
+  const orphanedPartial = labeledBullet(routing, "Orphaned partial evidence");
+  expect(orphanedPartial).toContain(
+    "`diagnostic.reason: orphaned_partial_evidence`",
+  );
+  expect(orphanedPartial).toContain("`recommendedNextStep: get_root_cause`");
+  expect(orphanedPartial).toContain("`maxUsefulFollowups: 1`");
+  expect(orphanedPartial).toContain("`candidates.length === 0`");
+  expect(orphanedPartial).toContain("no candidate `suggestedFollowups`");
+  expect(orphanedPartial).toContain("`diagnostic.recoveryActions[]`");
+  expect(orphanedPartial).toContain("`tool` is `get_root_cause`");
+  expect(orphanedPartial).toContain("`suggestedParams`");
+  expect(orphanedPartial).toContain("exactly one own `traceId` key");
+  expect(orphanedPartial).toContain("no other keys");
+  expect(orphanedPartial).not.toContain("candidate's `suggestedFollowups`");
+
+  const omittedFields = labeledBullet(
+    routing,
+    "Structured fields omitted / pagination",
+  );
+  expect(omittedFields).toContain("three rollup fields are absent");
+  expect(omittedFields).toContain("`candidates.length === 0`");
+  expect(omittedFields).toContain("`hasMore: true`");
+  expect(omittedFields).toContain("response's `cursor` and diagnostic guidance");
+  expect(omittedFields).toContain("Continue the identical query before widening");
+  expect(omittedFields).toContain("do not invent a stop or continue signal");
+
+  // Missing, withheld, and unsupported are preserved rather than converted
+  // into affirmative absence, and stateful investigations remain multi-trace.
+  const evidenceState = sectionBetween(
+    info,
+    "**A candidate with absent compact summaries is still evidence.**",
+    "4. If a tool returns empty",
+  );
+  const sideEffectRouting = sectionBetween(
+    info,
+    "3. Side-effect evidence",
+    "4. If a tool returns empty",
+  );
+  const expectedSideEffectRoutingHash =
+    "c325ca9b6bf711499c63203855477d1b95904c697bac792ed67e0ce2d813c3ad";
+  expect(lineStructuredSha256(sideEffectRouting)).toBe(
+    expectedSideEffectRoutingHash,
+  );
+  expect(sideEffectRouting).toContain(
+    "a decisive/supporting response still uses the first candidate and the response-level follow-up budget",
+  );
+  expect(sideEffectRouting).toContain(
+    "only a zero-budget `route_only`/`weak`/`auth_short_circuit` response uses the highest-ranked evidence-bearing candidate override",
+  );
+  expect(sideEffectRouting).toContain(
+    "Presence does not create a separate follow-up budget for each candidate",
+  );
+  const perCandidateBudgetMutation = `${sideEffectRouting.trimEnd()} Every candidate with present evidence gets its own trace pull.`;
+  expect(lineStructuredSha256(perCandidateBudgetMutation)).not.toBe(
+    expectedSideEffectRoutingHash,
+  );
+  expect(evidenceState).toContain(
+    "A present `sideEffectEvidence` object with `status` `missing` / `withheld` / `unsupported` carries `notAbsenceProof`",
+  );
+  expect(evidenceState).toContain(
+    "If the entire `sideEffectEvidence` field is absent",
+  );
+  expect(evidenceState).toContain("there is no object or flag to read");
+  expect(evidenceState).toContain(
+    "never rewrite missing, withheld, unsupported, or omitted evidence as affirmative absence",
+  );
+  expect(evidenceState).not.toContain(
+    "is absent or has `status` `missing` / `withheld` / `unsupported` is likewise not proof there was no side effect (it carries `notAbsenceProof`)",
+  );
+
+  const editBoundaryAndStatefulRouting = sectionBetween(
+    info,
+    "6. After a relevant trace is found",
+    "8. If a route-based search",
+  );
+  const expectedEditBoundaryAndStatefulHash =
+    "14295d38c811dfec0a0c99e3f28439d6a26fb28190b659fb716ed4ce2d53329e";
+  expect(lineStructuredSha256(editBoundaryAndStatefulRouting)).toBe(
+    expectedEditBoundaryAndStatefulHash,
+  );
+  const noMultiTraceComparison = editBoundaryAndStatefulRouting.replace(
+    "compare the relevant traces in sequence",
+    "do not compare the relevant traces in sequence",
+  );
+  expect(noMultiTraceComparison).not.toBe(editBoundaryAndStatefulRouting);
+  expect(lineStructuredSha256(noMultiTraceComparison)).not.toBe(
+    expectedEditBoundaryAndStatefulHash,
+  );
+  const ambiguousEditBoundaryException =
+    `${editBoundaryAndStatefulRouting.trimEnd()} Except when a candidate is ambiguous, ignore the matching response-level row.`;
+  expect(lineStructuredSha256(ambiguousEditBoundaryException)).not.toBe(
+    expectedEditBoundaryAndStatefulHash,
+  );
+
+  const weakRecovery = sectionBetween(
+    info,
+    "8. If a route-based search",
+    "### Tools",
+  );
+  const expectedWeakRecoveryHash =
+    "0f9ab5424c15dff1e70ced9dc08604321f09007ffc63060349a6e7dbe95cb20a";
+  expect(lineStructuredSha256(weakRecovery)).toBe(expectedWeakRecoveryHash);
+  expect(weakRecovery).toContain(
+    "When no candidate carries present application evidence, first honor the matching response-level row in step 2",
+  );
+  expect(weakRecovery).toContain(
+    "a decisive/supporting response uses the first candidate's bounded drill-down sequence",
+  );
+  expect(weakRecovery).toContain(
+    "a `route_only`/`weak` response inspects source",
+  );
+  expect(weakRecovery).toContain(
+    "an `auth_short_circuit` response retries with an authenticated credential",
+  );
+  expect(weakRecovery).toContain(
+    "Present application evidence still follows the applicable step 2 row",
+  );
+  expect(weakRecovery).toContain(
+    "a decisive/supporting response continues through the first candidate",
+  );
+  expect(weakRecovery).toContain(
+    "only a zero-budget `route_only`/`weak`/`auth_short_circuit` response uses the highest-ranked evidence-bearing candidate override",
+  );
+  const ambiguousResponseException = weakRecovery.replace(
+    "a decisive/supporting response continues through the first candidate",
+    "a decisive/supporting response continues through the first candidate except when the response is ambiguous",
+  );
+  expect(ambiguousResponseException).not.toBe(weakRecovery);
+  expect(lineStructuredSha256(ambiguousResponseException)).not.toBe(
+    expectedWeakRecoveryHash,
+  );
+  expect(weakRecovery).toContain(
+    "only when the response provides a valid structured route",
+  );
+  expect(info).toContain("compare the relevant traces in sequence");
+
+  const tools = sectionBetween(info, "### Tools", "\n\n");
+  const expectedToolsHash =
+    "b0d407bcce5c58b4c466c84ed2ca346bb4fe19579b42f737075307ab02dcc8a0";
+  expect(lineStructuredSha256(tools)).toBe(expectedToolsHash);
+  expect(hasSupportedGetTraceToolsContract(tools)).toBe(true);
+  const getTraceTool = toolBullet(tools, "get_trace");
+  expect(getTraceTool).toContain(
+    "filtered trace search by URL, method, status code, time window, or correlation ID",
+  );
+  expect(getTraceTool).toContain(
+    "also the candidate-directed trace read after `find_trace_candidates`",
+  );
+  expect(getTraceTool).not.toContain("`traceId`");
+
+  const exactGetTraceTool = tools.replace(
+    getTraceTool,
+    "- `get_trace` — exact trace lookup by `traceId`",
+  );
+  expect(exactGetTraceTool).not.toBe(tools);
+  expect(hasSupportedGetTraceToolsContract(exactGetTraceTool)).toBe(false);
+
+  const traceIdInputTool = tools.replace(
+    getTraceTool,
+    `${getTraceTool}; call \`get_trace({ traceId })\` for an exact lookup`,
+  );
+  expect(traceIdInputTool).not.toBe(tools);
+  expect(hasSupportedGetTraceToolsContract(traceIdInputTool)).toBe(false);
+
+  const proseTraceIdInputTool = tools.replace(
+    getTraceTool,
+    `${getTraceTool}; accepts traceId input`,
+  );
+  expect(proseTraceIdInputTool).not.toBe(tools);
+  expect(hasSupportedGetTraceToolsContract(proseTraceIdInputTool)).toBe(false);
+
+  const tracingIdentifierInputTool = tools.replace(
+    getTraceTool,
+    `${getTraceTool}; it accepts a user-supplied tracing identifier`,
+  );
+  expect(tracingIdentifierInputTool).not.toBe(tools);
+  expect(hasSupportedGetTraceToolsContract(tracingIdentifierInputTool)).toBe(
+    false,
+  );
+  expect(lineStructuredSha256(tracingIdentifierInputTool)).not.toBe(
+    expectedToolsHash,
+  );
+
+  expect(tools).toContain(
+    "for an independently known `traceId` when no active candidate sequence applies",
+  );
+
+  expect(info).not.toContain("You already have a precise traceId from another source");
+  expect(info).not.toContain("`get_trace` — exact trace by `traceId`");
+  expect(info).not.toContain(
+    "inspect the highest-confidence candidate with `get_trace` or `get_root_cause` before deciding",
+  );
+  expect(info).not.toContain("In every case, pull the trace");
+  expect(info).not.toContain(
+    "If a plausible candidate lacks semantic evidence, pull the trace if possible",
+  );
+  expect(info).not.toContain(
+    "For a non-stop result, use the useful drill-down arguments",
+  );
 }
 
 describe("generateMcpConfig", () => {
@@ -367,6 +1093,19 @@ describe("generateMcpConfig", () => {
 });
 
 describe("generateInfoSection", () => {
+  it("freezes the complete shared instruction body", () => {
+    const body = buildAgentInstructionBody();
+    const expectedBodyHash =
+      "62c8afa78dc1615539b2b80cac5c207d0adc3e9fcc749efcbed08d40d7c6ad33";
+    const expectedRawBodyHash =
+      "af3bc9f851768c51273e12479c3551556c24d2fe49f1a977d11e52e584eafb96";
+    expect(body).toContain("## Glasstrace MCP — Runtime Debugging Evidence");
+    expect(body.startsWith("\n")).toBe(true);
+    expect(body.endsWith("\n")).toBe(true);
+    expect(lineStructuredSha256(body)).toBe(expectedBodyHash);
+    expect(rawSha256(body)).toBe(expectedRawBodyHash);
+  });
+
   describe("input validation", () => {
     it("throws when endpoint is empty", () => {
       expect(() => generateInfoSection(makeAgent("claude"), "", SDK_VERSION)).toThrow(
@@ -525,6 +1264,256 @@ describe("generateInfoSection", () => {
     });
   });
 
+  describe("supported diagnostic routing across every rendered target family", () => {
+    const renderedTargets: Array<{
+      label: string;
+      render: () => string;
+    }> = [
+      {
+        label: "Claude",
+        render: () => generateInfoSection(makeAgent("claude"), ENDPOINT, SDK_VERSION),
+      },
+      {
+        label: "Codex",
+        render: () => generateInfoSection(makeAgent("codex"), ENDPOINT, SDK_VERSION),
+      },
+      {
+        label: "Gemini",
+        render: () => generateInfoSection(makeAgent("gemini"), ENDPOINT, SDK_VERSION),
+      },
+      {
+        label: "Windsurf",
+        render: () =>
+          generateInfoSection(makeAgent("windsurf"), ENDPOINT, SDK_VERSION),
+      },
+      {
+        label: "generic AGENTS.md",
+        render: () =>
+          generateInfoSection(makeAgent("generic"), ENDPOINT, SDK_VERSION),
+      },
+      {
+        label: "Cursor .mdc",
+        render: () => generateInfoSectionForCursorMdc(ENDPOINT, SDK_VERSION),
+      },
+      {
+        label: "legacy Cursor fallback",
+        render: () =>
+          generateInfoSectionForCursorrulesLegacy(ENDPOINT, SDK_VERSION),
+      },
+    ];
+
+    for (const target of renderedTargets) {
+      it(`renders the complete positive and negative routing matrix for ${target.label}`, () => {
+        expectSupportedDiagnosticRouting(target.render());
+      });
+    }
+  });
+
+  it("keeps the published package README aligned with every diagnostic routing row", () => {
+    const readmeRoutingStart = "The section opens with explicit";
+    const readmeRoutingEnd =
+      "For a first `find_trace_candidates` search by route or procedure";
+    const readmeRoutingSection = sectionBetween(
+      SDK_PACKAGE_README,
+      readmeRoutingStart,
+      readmeRoutingEnd,
+    );
+    const readmeRouting = normalizeWhitespace(readmeRoutingSection);
+    const readmeRoutingIntro =
+      "After `find_trace_candidates`, the agent reads the response-level";
+    const readmeParagraphAfterRouting = "The section also teaches the agent";
+    const readmeParagraphAfterChangedGuidance = readmeRoutingEnd;
+    const openingParagraph = markdownParagraphStartingWith(
+      SDK_PACKAGE_README,
+      readmeRoutingStart,
+    );
+    const routingIntroParagraph = markdownParagraphStartingWith(
+      SDK_PACKAGE_README,
+      readmeRoutingIntro,
+    );
+    const paragraphAfterRouting = markdownParagraphStartingWith(
+      SDK_PACKAGE_README,
+      readmeParagraphAfterRouting,
+    );
+    const paragraphAfterChangedGuidance = markdownParagraphStartingWith(
+      SDK_PACKAGE_README,
+      readmeParagraphAfterChangedGuidance,
+    );
+    expect(openingParagraph).toContain(
+      "not as an exact-ID lookup.",
+    );
+    expect(routingIntroParagraph).toContain(
+      "Candidate array order is rank order.",
+    );
+    expect(normalizeWhitespace(paragraphAfterRouting)).toContain(
+      "side-effect evidence as first-class runtime facts",
+    );
+    const readmeParagraphPositions = [
+      SDK_PACKAGE_README.indexOf(openingParagraph),
+      SDK_PACKAGE_README.indexOf(routingIntroParagraph),
+      SDK_PACKAGE_README.indexOf(paragraphAfterRouting),
+      SDK_PACKAGE_README.indexOf(paragraphAfterChangedGuidance),
+    ];
+    expect(readmeParagraphPositions).toEqual(
+      [...readmeParagraphPositions].sort((left, right) => left - right),
+    );
+    for (const paragraphPrefix of [
+      readmeRoutingStart,
+      readmeRoutingIntro,
+      readmeParagraphAfterRouting,
+      readmeParagraphAfterChangedGuidance,
+    ]) {
+      const boundary = `\n\n${paragraphPrefix}`;
+      const merged = SDK_PACKAGE_README.replace(
+        boundary,
+        `\n${paragraphPrefix}`,
+      );
+      expect(merged).not.toBe(SDK_PACKAGE_README);
+      expect(() =>
+        markdownParagraphStartingWith(merged, paragraphPrefix),
+      ).toThrow();
+    }
+    const expectedReadmeRoutingHash =
+      "46c7324d0ccc6b1f22af53932d38898fc80527571b75184f5d4cac1118107b36";
+
+    // Keep the digest boundaries explicit: this starts at the complete
+    // decision-routing paragraph (including the independent trace-ID action)
+    // and ends after every paragraph changed by this PR, before the unchanged
+    // explicit-window section. The normalized length helps distinguish prose
+    // drift from a reviewed wording update, while the digest preserves line
+    // boundaries.
+    expect(readmeRouting.startsWith(readmeRoutingStart)).toBe(true);
+    expect(readmeRouting.endsWith("path never ran.")).toBe(true);
+    expect(readmeRouting).toHaveLength(5286);
+    expect(lineStructuredSha256(readmeRoutingSection)).toBe(
+      expectedReadmeRoutingHash,
+    );
+
+    expect(readmeRouting).toContain(
+      "When a precise `traceId` is independently known and no candidate-directed sequence is active, that branch takes precedence even when the request just failed or a stack trace is present.",
+    );
+    expect(readmeRouting).toContain(
+      "The guidance routes directly to `get_root_cause`, with `get_span_attributes` available for value-level span detail.",
+    );
+    expect(readmeRouting).toContain(
+      "A trace ID returned by `find_trace_candidates` follows the candidate sequence below instead.",
+    );
+    expect(readmeRouting).toContain(
+      "The guidance describes `get_trace` as a filtered search by URL, method, status code, time window, or correlation ID, not as an exact-ID lookup.",
+    );
+
+    // Regression proof for the partial-range false green: changing the direct
+    // known-ID action to get_trace must alter the frozen section digest.
+    const wrongDirectTool = readmeRoutingSection.replace(
+      "directly to `get_root_cause`",
+      "directly to `get_trace`",
+    );
+    expect(wrongDirectTool).not.toBe(readmeRoutingSection);
+    expect(lineStructuredSha256(wrongDirectTool)).not.toBe(
+      expectedReadmeRoutingHash,
+    );
+
+    const wrongAbsenceMeaning = readmeRoutingSection.replace(
+      "candidate is not absence evidence",
+      "candidate is absence evidence",
+    );
+    expect(wrongAbsenceMeaning).not.toBe(readmeRoutingSection);
+    expect(lineStructuredSha256(wrongAbsenceMeaning)).not.toBe(
+      expectedReadmeRoutingHash,
+    );
+
+    const readmeBulletPrefixes = [
+      "- A response-level `decisive` rollup",
+      "- On a zero-budget response-level stop rollup",
+      "- A pure response-level `route_only` stop result",
+      "- A response-level `weak` / `0` / `inspect_source` result",
+      "- An empty `orphaned_partial_evidence` result",
+      "- Missing, withheld, unsupported, or omitted evidence",
+    ];
+    const readmeBulletLines = readmeBulletPrefixes.map((prefix) =>
+      standaloneLineStartingWith(readmeRoutingSection, prefix),
+    );
+    expect(readmeBulletLines).toEqual(
+      [...readmeBulletLines].sort((left, right) => left - right),
+    );
+    for (const prefix of readmeBulletPrefixes) {
+      const boundary = `\n${prefix}`;
+      const merged = readmeRoutingSection.replace(boundary, ` ${prefix}`);
+      expect(merged).not.toBe(readmeRoutingSection);
+      expect(lineStructuredSha256(merged)).not.toBe(expectedReadmeRoutingHash);
+      expect(() => standaloneLineStartingWith(merged, prefix)).toThrow();
+    }
+
+    expect(readmeRouting).toContain(
+      "the response-level `diagnosticValue`, `recommendedNextStep`, and `maxUsefulFollowups` rollup separately from each candidate's `diagnosticValue`, `sideEffectEvidence`, and `suggestedFollowups`.",
+    );
+    expect(readmeRouting).toContain(
+      "Candidate array order is rank order. On a mixed page, the response rollup chooses the branch and that branch identifies which ranked candidate supplies the follow-up arguments:",
+    );
+    expect(readmeRouting).toContain(
+      "A response-level `decisive` rollup uses the first candidate (the highest-ranked row) and its `suggestedFollowups.getTrace` for the response's one useful follow-up.",
+    );
+    expect(readmeRouting).toContain(
+      "A response-level `supporting` rollup uses that same candidate's trace read first and may then use its `suggestedFollowups.getRootCause` as the response's second useful follow-up.",
+    );
+    expect(readmeRouting).toContain(
+      "The budget is response-level, not one budget per candidate.",
+    );
+    expect(readmeRouting).toContain(
+      "This candidate-directed sequence takes precedence over the independently-known-ID shortcut even though every candidate includes a `traceId`.",
+    );
+    expect(readmeRouting).toContain(
+      'On a zero-budget response-level stop rollup, explicit `sideEffectEvidence.status: "present"` on one or more candidate rows still justifies a trace read.',
+    );
+    expect(readmeRouting).toContain(
+      "The agent selects the first such candidate in array order (the highest-ranked evidence-bearing row) and uses that candidate's `suggestedFollowups.getTrace`.",
+    );
+    expect(readmeRouting).toContain(
+      "This per-candidate evidence override takes precedence over the independently-known-ID shortcut and applies to response-level `route_only`, `weak`, and `auth_short_circuit` stop rows.",
+    );
+    expect(readmeRouting).toContain(
+      "A pure response-level `route_only` stop result with no candidate carrying present application evidence sends the agent to source first.",
+    );
+    expect(readmeRouting).toContain(
+      "It does not issue an unconditional trace drill-down; the first candidate's suggested arguments remain valid if source review still needs the exact trace.",
+    );
+    expect(readmeRouting).toContain(
+      "A response-level `weak` / `0` / `inspect_source` result with no candidate carrying present application evidence also sends the agent to source first; present evidence follows the highest-ranked-evidence-bearing-candidate override above.",
+    );
+    expect(readmeRouting).toContain(
+      "A response-level `auth_short_circuit` / `0` / `retry_with_authenticated_credential` result with no present evidence retries with an authenticated credential instead of substituting trace drill-down. With present evidence, the agent reads the highest-ranked evidence-bearing trace first, then retries with an authenticated credential if that remains useful.",
+    );
+    expect(readmeRouting).toContain(
+      "An empty `orphaned_partial_evidence` result is presence-affirming. It has no candidate `suggestedFollowups`; the agent uses only a validated `get_root_cause` entry from `diagnostic.recoveryActions[]` and its `suggestedParams`.",
+    );
+    expect(readmeRouting).toContain(
+      "If the structured rollup fields are omitted on a paginated empty page, the agent follows the response's cursor and diagnostic guidance for the identical query instead of inventing a signal or widening first.",
+    );
+    expect(readmeRouting).toContain(
+      "Missing, withheld, unsupported, or omitted evidence retains that state and is never rewritten as affirmative absence.",
+    );
+    expect(readmeRouting).not.toContain(
+      "highest-confidence `find_trace_candidates` result with `get_trace` or `get_root_cause` before deciding",
+    );
+
+    const candidateIndex = readmeRoutingSection.indexOf(
+      "- A response-level `decisive` rollup",
+    );
+    const presentIndex = readmeRoutingSection.indexOf(
+      "- On a zero-budget response-level stop rollup",
+    );
+    const routeOnlyIndex = readmeRoutingSection.indexOf(
+      "- A pure response-level `route_only` stop result",
+    );
+    const weakAuthIndex = readmeRoutingSection.indexOf(
+      "- A response-level `weak` / `0` / `inspect_source` result",
+    );
+    expect(candidateIndex).toBeGreaterThanOrEqual(0);
+    expect(candidateIndex).toBeLessThan(presentIndex);
+    expect(presentIndex).toBeLessThan(routeOnlyIndex);
+    expect(routeOnlyIndex).toBeLessThan(weakAuthIndex);
+  });
+
   // Wave 17 (2026-05-09): snapshot-style assertions on the rendered info
   // section for every target that emits content today (claude / codex /
   // cursor). The body is sourced from the new sibling
@@ -583,10 +1572,10 @@ describe("generateInfoSection", () => {
           expect(info).toContain("### Workflow");
           const workflowIdx = info.indexOf("### Workflow");
           // Step 1 is now a decision-tree header that routes to one of
-          // three first calls by symptom (active failure /
-          // known-route / historical exploration).
+          // four first calls by symptom (independently known trace ID /
+          // active failure / known route / historical exploration).
           const stepOneIdx = info.indexOf(
-            "1. Pick the first call by symptom:",
+            "1. Pick the first call by symptom, using the first matching branch.",
             workflowIdx,
           );
           expect(stepOneIdx).toBeGreaterThan(-1);
@@ -595,11 +1584,32 @@ describe("generateInfoSection", () => {
             stepOneIdx,
           );
           expect(stepTwoIdx).toBeGreaterThan(stepOneIdx);
-          // All three first-call branches and their safe-window contract
+          // All four first-call branches and their safe-window contract
           // are present before the drill-down step begins.
           const stepOneSlice = info.slice(stepOneIdx, stepTwoIdx);
           expect(stepOneSlice).toContain("Active failure");
           expect(stepOneSlice).toContain("`get_latest_error`");
+          expect(stepOneSlice).toContain("Precise trace ID already known");
+          expect(stepOneSlice).toContain("`get_root_cause` directly");
+          expect(stepOneSlice).toContain(
+            "An independently known precise trace ID takes precedence over every other symptom branch",
+          );
+          const exactIdIndex = stepOneSlice.indexOf(
+            "Precise trace ID already known",
+          );
+          const activeFailureIndex = stepOneSlice.indexOf("Active failure");
+          const knownRouteIndex = stepOneSlice.indexOf(
+            "Known route or procedure",
+          );
+          const historicalIndex = stepOneSlice.indexOf(
+            "Historical exploration",
+          );
+          expect(exactIdIndex).toBeLessThan(activeFailureIndex);
+          expect(activeFailureIndex).toBeLessThan(knownRouteIndex);
+          expect(knownRouteIndex).toBeLessThan(historicalIndex);
+          expect(stepOneSlice).toContain(
+            "Do not send a `traceId` to `get_trace`",
+          );
           expect(stepOneSlice).toContain("Known route or procedure");
           expect(stepOneSlice).toContain("`find_trace_candidates`");
           expect(stepOneSlice).toContain("omit `timeWindow` on the first search");
@@ -733,22 +1743,29 @@ describe("generateInfoSection", () => {
           // prevents the redundant-second-call behavior (an active-failure
           // agent enters via get_latest_error and already holds the values).
           expect(info).toContain("`get_latest_error`");
-          // Presence on candidates is a signal to pull the trace, not a dead end.
-          expect(info).toMatch(/signal to pull the trace/);
+          // Presence follows the response row and never creates one budget per
+          // candidate on a decisive/supporting page.
+          expect(info).toContain(
+            "Presence does not create a separate follow-up budget for each candidate",
+          );
         });
 
-        it("requires drill-down from `find_trace_candidates` before deciding because candidate rows can be semantically thin", () => {
+        it("conditions candidate drill-down on the structured result and present evidence", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
             ENDPOINT,
             SDK_VERSION,
           );
           expect(info).toContain("After `find_trace_candidates`");
-          expect(info).toContain("inspect the highest-confidence candidate");
-          expect(info).toContain("with `get_trace` or `get_root_cause` before deciding");
+          expect(info).toContain(
+            "distinguish the response-level `diagnosticValue`, `recommendedNextStep`, and `maxUsefulFollowups` rollup from each candidate row's `diagnosticValue`, `sideEffectEvidence`, and `suggestedFollowups`",
+          );
+          expect(info).toContain("Candidate array order is rank order");
           expect(info).toContain("Candidate rows can locate the right trace without including every decisive semantic field");
           expect(info).toContain("`suggestedFollowups`");
-          expect(info).toContain("drill-down tool");
+          expect(info).toContain("**Present application evidence**");
+          expect(info).toContain("**Pure stop**");
+          expect(info).toContain("inspect source first");
         });
 
         it("teaches that categorical fields identify the operation and its state", () => {
@@ -801,7 +1818,11 @@ describe("generateInfoSection", () => {
             followupsAnchor,
             "Workflow §5 'Follow-up tools' header must be present to anchor this guard",
           ).toBeGreaterThan(-1);
-          const followups = info.slice(followupsAnchor);
+          const followups = sectionBetween(
+            info,
+            "5. Follow-up tools",
+            "6. After a relevant trace is found",
+          );
           expect(followups).not.toContain("recommendedNextStep");
         });
 
@@ -867,21 +1888,35 @@ describe("generateInfoSection", () => {
           // sideEffectEvidence status is per-candidate (not the gated projection set).
           expect(info).toMatch(/`missing` \/ `withheld` \/ `unsupported`/);
           expect(info).toContain("`notAbsenceProof`");
-          // Anchor the operative remediation clause so dropping it fails loudly.
-          expect(info).toContain("pull the trace with");
-          expect(info).toContain("before concluding nothing happened");
+          // Preserve the taxonomy instead of turning unavailable evidence into
+          // either absence or an unconditional trace-drill-down instruction.
+          expect(info).toContain("Preserve that reported state");
+          expect(info).toContain(
+            "never rewrite missing, withheld, unsupported, or omitted evidence as affirmative absence",
+          );
+          expect(info).toContain("On a pure stop result, inspect source first");
+          expect(info).not.toContain("In every case, pull the trace");
         });
 
-        it("retries or broadens when a plausible candidate lacks semantic evidence", () => {
+        it("routes a plausible candidate without semantic evidence through the stop/continue result", () => {
           const info = generateInfoSection(
             makeAgent(target.name),
             ENDPOINT,
             SDK_VERSION,
           );
           expect(info).toContain("If a plausible candidate lacks semantic evidence");
-          expect(info).toContain("pull the trace if possible");
-          expect(info).toContain("retry or broaden the query");
-          expect(info).toContain("before concluding MCP has no useful evidence");
+          expect(info).toContain("follow the matching response-level row above");
+          expect(info).toContain(
+            "a decisive/supporting response uses the first candidate's bounded drill-down sequence",
+          );
+          expect(info).toContain(
+            "weak and pure route-only responses with no candidate carrying present application evidence inspect source first",
+          );
+          expect(info).toContain(
+            "an authentication-short-circuit response retries with an authenticated credential",
+          );
+          expect(info).toContain("Broaden or retry only when the response provides a valid route");
+          expect(info).not.toContain("pull the trace if possible");
         });
 
         it("teaches retry-by-procedure (the `{ procedure }` param form) and route-vs-URL comparison for a sparse search", () => {
