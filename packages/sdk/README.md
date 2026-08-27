@@ -157,30 +157,80 @@ the Linux Foundation (`agents.md`), the SDK writes:
 The section opens with explicit "Call Glasstrace FIRST when" / "SKIP
 Glasstrace when" decision rules telling your AI agent **when**
 Glasstrace MCP is worth calling and **which** tool is the cheapest
-first call for each symptom class. It then teaches the agent how to
-**use** what the tools return — treating side-effect evidence as
-first-class runtime facts, reading boolean (`*Holds`) and categorical
-trace fields directly, drilling into the highest-confidence
-`find_trace_candidates` result with `get_trace` or `get_root_cause`
-before deciding because candidate rows can locate the right trace
-without including every decisive semantic field, continuing from the trace
-summary when a follow-up tool comes back thin, and pausing before edits
-to connect the runtime fact to the source decision point and intended
-edit boundary.
-It tells the agent to prefer the smallest source path that owns the
-runtime decision instead of rewriting routing, batching, request
-transport, middleware, or sibling propagation unless the trace
-implicates that layer. For stale, cross-request, or cross-batch state
-bugs, it points the agent at the durable state source and the decision
-function that consumed stale state, instead of simply forwarding the
-observed request or batch value, and treats Glasstrace observations as
-evidence of the failing path rather than a patch recipe. It also treats
-categorical side-effect fields as branch/location evidence rather than patch
-instructions, tells the agent not to read a sparse candidate (one whose
-compact summaries are absent) as absence of evidence, and to retry a sparse
-search with a structured close-match locator or procedure. Locator changes
-start without a stale cursor and preserve the exact valid effective bounds that
-produced the match. The bare
+first call for each symptom class. When a precise `traceId` is independently
+known and no candidate-directed sequence is active, that branch takes
+precedence even when the request just failed or a stack trace is present. The
+guidance routes directly to `get_root_cause`, with `get_span_attributes`
+available for value-level span detail. A trace ID returned by
+`find_trace_candidates` follows the candidate sequence below instead. The
+guidance describes
+`get_trace` as a filtered search by URL, method, status code, time window,
+or correlation ID, not as an exact-ID lookup.
+
+After `find_trace_candidates`, the agent reads the response-level
+`diagnosticValue`, `recommendedNextStep`, and `maxUsefulFollowups` rollup
+separately from each candidate's `diagnosticValue`, `sideEffectEvidence`, and
+`suggestedFollowups`. Candidate array order is rank order. On a mixed page, the
+response rollup chooses the branch and that branch identifies which ranked
+candidate supplies the follow-up arguments:
+
+- A response-level `decisive` rollup uses the first candidate (the
+  highest-ranked row) and its `suggestedFollowups.getTrace` for the response's
+  one useful follow-up. A response-level `supporting` rollup uses that same
+  candidate's trace read first and may then use its
+  `suggestedFollowups.getRootCause` as the response's second useful follow-up.
+  The budget is response-level, not one budget per candidate. This
+  candidate-directed sequence takes precedence over the independently-known-ID
+  shortcut even though every candidate includes a `traceId`.
+- On a zero-budget response-level stop rollup, explicit
+  `sideEffectEvidence.status: "present"` on one or more candidate rows still
+  justifies a trace read. The agent selects the first such candidate in array
+  order (the highest-ranked evidence-bearing row) and uses that candidate's
+  `suggestedFollowups.getTrace`. This per-candidate evidence override takes
+  precedence over the independently-known-ID shortcut and applies to
+  response-level `route_only`, `weak`, and `auth_short_circuit` stop rows. The
+  trace read comes before otherwise recommended source inspection or
+  authenticated retry.
+- A pure response-level `route_only` stop result with no candidate carrying
+  present application evidence sends the agent to source first. It does not
+  issue an unconditional trace drill-down; the first candidate's suggested
+  arguments remain valid if source review still needs the exact trace.
+- A response-level `weak` / `0` / `inspect_source` result with no candidate
+  carrying present application evidence also sends the agent to source first;
+  present evidence follows the highest-ranked-evidence-bearing-candidate
+  override above. A response-level `auth_short_circuit` / `0` /
+  `retry_with_authenticated_credential` result with no present evidence
+  retries with an authenticated credential instead of substituting trace
+  drill-down. With present evidence, the agent reads the highest-ranked
+  evidence-bearing trace first, then retries with an authenticated credential
+  if that remains useful.
+- An empty `orphaned_partial_evidence` result is presence-affirming. It has no
+  candidate `suggestedFollowups`; the agent uses only a validated
+  `get_root_cause` entry from `diagnostic.recoveryActions[]` and its
+  `suggestedParams`.
+- Missing, withheld, unsupported, or omitted evidence retains that state and
+  is never rewritten as affirmative absence. If the structured rollup fields
+  are omitted on a paginated empty page, the agent follows the response's
+  cursor and diagnostic guidance for the identical query instead of inventing
+  a signal or widening first.
+
+The section also teaches the agent to treat side-effect evidence as
+first-class runtime facts, read boolean (`*Holds`) and categorical trace fields
+directly, continue from a trace summary when a follow-up tool comes back thin,
+and pause before edits to connect the runtime fact to the source decision point
+and intended edit boundary. It prefers the smallest source path that owns the
+runtime decision instead of rewriting routing, batching, request transport,
+middleware, or sibling propagation unless the trace implicates that layer.
+For stale, cross-request, or cross-batch state bugs, it compares the relevant
+traces in sequence and points the agent at the durable state source and the
+decision function that consumed stale state, instead of simply forwarding the
+observed request or batch value. It treats Glasstrace observations as evidence
+of the failing path rather than a patch recipe and categorical side-effect
+fields as branch/location evidence rather than patch instructions. A sparse
+candidate is not absence evidence; the agent can retry with a structured
+close-match locator or procedure when the response provides that route.
+Locator changes start without a stale cursor and preserve the exact valid
+effective bounds that produced the match. The bare
 `find_trace_candidates({ procedure: "<name>" })` form is only for a new current
 server-defaulted search, not a locator retry or historical continuation. The
 agent compares the matched route against the URL searched before concluding a
