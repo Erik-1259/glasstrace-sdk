@@ -26,7 +26,7 @@ function randomHex(byteCount: number): string {
 /**
  * Developer API key: `gt_dev_` + 48 hex chars.
  *
- * @drift-check ../glasstrace-product/docs/component-designs/sdk-architecture.md §1.2 Lens B — SDK-Facing Security Primitives (row `Dev API key gt_dev_[a-f0-9]{48}`)
+ * @drift-check Glasstrace SDK architecture §1.2 Lens B — SDK-Facing Security Primitives (row `Dev API key gt_dev_[a-f0-9]{48}`)
  */
 export const DevApiKeySchema = z
   .string()
@@ -37,7 +37,7 @@ export type DevApiKey = z.infer<typeof DevApiKeySchema>;
 /**
  * Anonymous API key: `gt_anon_` + 48 hex chars.
  *
- * @drift-check ../glasstrace-product/docs/component-designs/sdk-architecture.md §1.2 Lens B — SDK-Facing Security Primitives (row `Anon API key gt_anon_[a-f0-9]{48}`)
+ * @drift-check Glasstrace SDK architecture §1.2 Lens B — SDK-Facing Security Primitives (row `Anon API key gt_anon_[a-f0-9]{48}`)
  */
 export const AnonApiKeySchema = z
   .string()
@@ -48,7 +48,7 @@ export type AnonApiKey = z.infer<typeof AnonApiKeySchema>;
 /**
  * Session ID: 16 hex chars (deterministic, derived from API key + time window).
  *
- * @drift-check ../glasstrace-product/docs/product-spec.md §4.5 Session Lifecycle
+ * @drift-check Glasstrace product specification §4.5 Session Lifecycle
  */
 export const SessionIdSchema = z
   .string()

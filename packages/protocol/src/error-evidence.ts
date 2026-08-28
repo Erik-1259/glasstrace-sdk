@@ -8,13 +8,13 @@
  * without a separate string-literal-union declaration that could
  * silently drift from the runtime allowlist.
  *
- * These tuples align with the Agent Evidence Engine SDK Attribute
- * Contract §5.5 in `glasstrace-product/docs/component-designs/agent-evidence-sdk-attribute-contract.md`.
+ * These tuples align with the Glasstrace Agent Evidence SDK Attribute
+ * Contract §5.5.
  * Members must remain in sync across both repos; product-side
  * validators enforce these allowlists at ingestion as a second
  * defense, not the primary boundary.
  *
- * @drift-check ../../glasstrace-product/docs/component-designs/agent-evidence-sdk-attribute-contract.md §5.5
+ * @drift-check Glasstrace Agent Evidence SDK Attribute Contract §5.5
  */
 
 /**

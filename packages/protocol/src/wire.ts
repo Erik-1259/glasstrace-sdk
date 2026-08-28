@@ -103,7 +103,7 @@ export type SdkInitResponse = z.infer<typeof SdkInitResponseSchema>;
 /**
  * SDK discovery endpoint response (SDK → browser extension).
  *
- * @drift-check ../glasstrace-product/docs/component-designs/sdk-discovery-endpoint.md §5.1 Schema
+ * @drift-check Glasstrace SDK discovery endpoint design §5.2 Fields Explicitly Excluded
  */
 export const DiscoveryResponseSchema = z.object({
   key: AnonApiKeySchema,

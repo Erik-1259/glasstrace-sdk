@@ -7,14 +7,13 @@
  * separate string-literal-union declaration that could silently drift
  * from the runtime allowlist.
  *
- * These tuples align verbatim with the product-side wire schema in
- * `glasstrace-product/shared/types/agent-evidence.ts`. Members must
- * remain in sync across both repos; the SDK enforces these allowlists
- * client-side as defense-in-depth before any attribute reaches the
- * wire (the product's storage filter is a second defense, not the
- * primary boundary).
+ * These tuples align with the backend's side-effect evidence wire
+ * schemas. Members must remain in sync across both implementations;
+ * the SDK enforces these allowlists client-side as defense-in-depth
+ * before any attribute reaches the wire (the backend's storage filter
+ * is a second defense, not the primary boundary).
  *
- * @drift-check ../../glasstrace-product/docs/component-designs/side-effect-evidence-summaries.md
+ * @drift-check Glasstrace Side-Effect Evidence Summaries design
  */
 
 /**
@@ -234,8 +233,8 @@ export type SideEffectOmissionReason =
  * (`…field.*` vs `…scalar.*`), never by key suffix — the same key may
  * legitimately exist on both channels.
  *
- * Mirrors the product `SideEffectScalarSchema` key regex verbatim
- * (`shared/types/agent-evidence.ts`); see @drift-check above.
+ * Mirrors the backend `SideEffectScalarSchema` key regex verbatim; see
+ * @drift-check above.
  */
 export const SIDE_EFFECT_SCALAR_KEY_PATTERN =
   /^[a-z][A-Za-z0-9]*(Ms|Amount|Bytes|Ratio|Id|Value|Flag)$/;

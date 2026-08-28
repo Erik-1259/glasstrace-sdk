@@ -2,15 +2,18 @@
 
 This file lists every Tier-1 contract surface shipped by
 `@glasstrace/sdk` and `@glasstrace/protocol` alongside the
-authoritative source of truth (a product-spec section, a component
-design section, or an IETF RFC) that the surface must stay consistent
+authoritative source of truth (a named Glasstrace contract or design
+section, or a public standard) that the surface must stay consistent
 with.
 
 It is **not** a CI gate. The Glasstrace maintenance agent re-verifies
 each row on demand during quality cycles by reading the `@drift-check`
 JSDoc tag on each surface's declaration site and confirming the cited
-anchor still resolves. The convention itself is defined in
-`../glasstrace-product/docs/component-designs/sdk-architecture.md` §8.2.
+anchor still resolves. Tags that reach published declarations use a
+path-free document or contract label so private repository layout does
+not appear in consumer tooltips. The maintenance agent resolves that
+label by document title and section or schema name. The convention
+itself is defined in Glasstrace SDK architecture §8.2.
 
 When a maintenance pass verifies a row, the `Last Verified` column is
 updated with the date of the pass (UTC, `YYYY-MM-DD`). Blank entries
@@ -19,12 +22,12 @@ maintenance cycle.
 
 | Surface | Location | Anchor | Last Verified |
 |---|---|---|---|
-| `deriveSessionId` | `packages/protocol/src/session.ts:48` | `../glasstrace-product/docs/product-spec.md` §4.5 Session Lifecycle | |
-| `SessionIdSchema` regex | `packages/protocol/src/ids.ts:53` | `../glasstrace-product/docs/product-spec.md` §4.5 Session Lifecycle | |
-| `DevApiKeySchema` regex | `packages/protocol/src/ids.ts:31` | `../glasstrace-product/docs/component-designs/sdk-architecture.md` §1.2 Lens B — SDK-Facing Security Primitives (row `Dev API key gt_dev_[a-f0-9]{48}`) | |
-| `AnonApiKeySchema` regex | `packages/protocol/src/ids.ts:42` | `../glasstrace-product/docs/component-designs/sdk-architecture.md` §1.2 Lens B — SDK-Facing Security Primitives (row `Anon API key gt_anon_[a-f0-9]{48}`) | |
-| `DiscoveryResponseSchema` | `packages/protocol/src/wire.ts:88` | `../glasstrace-product/docs/component-designs/sdk-discovery-endpoint.md` §5.1 Schema | |
-| `GLASSTRACE_ATTRIBUTE_NAMES` | `packages/protocol/src/constants.ts:12` | OpenTelemetry Semantic Conventions (https://opentelemetry.io/docs/specs/semconv/) + `../glasstrace-product/docs/component-designs/sdk-architecture.md` §7.5 Span attributes (Tier 1) | |
+| `deriveSessionId` | `packages/protocol/src/session.ts:48` | Glasstrace product specification §4.5 Session Lifecycle | |
+| `SessionIdSchema` regex | `packages/protocol/src/ids.ts:53` | Glasstrace product specification §4.5 Session Lifecycle | |
+| `DevApiKeySchema` regex | `packages/protocol/src/ids.ts:31` | Glasstrace SDK architecture §1.2 Lens B — SDK-Facing Security Primitives (row `Dev API key gt_dev_[a-f0-9]{48}`) | |
+| `AnonApiKeySchema` regex | `packages/protocol/src/ids.ts:42` | Glasstrace SDK architecture §1.2 Lens B — SDK-Facing Security Primitives (row `Anon API key gt_anon_[a-f0-9]{48}`) | |
+| `DiscoveryResponseSchema` | `packages/protocol/src/wire.ts:108` | Glasstrace SDK discovery endpoint design §5.2 Fields Explicitly Excluded | |
+| `GLASSTRACE_ATTRIBUTE_NAMES` | `packages/protocol/src/constants.ts:12` | OpenTelemetry Semantic Conventions (https://opentelemetry.io/docs/specs/semconv/) + Glasstrace SDK architecture §7.5 Span attributes (Tier 1) | |
 | `VALID_CORE_TRANSITIONS` | `packages/sdk/src/lifecycle.ts:66` | `../glasstrace-product/docs/component-designs/sdk-lifecycle.md` §4.2 Transition Rules | |
 | `VALID_AUTH_TRANSITIONS` | `packages/sdk/src/lifecycle.ts:103` | `../glasstrace-product/docs/component-designs/sdk-lifecycle.md` §5.2 Transitions | |
 | `VALID_OTEL_TRANSITIONS` | `packages/sdk/src/lifecycle.ts:115` | `../glasstrace-product/docs/component-designs/sdk-lifecycle.md` §6 Layer 3: OTel Coexistence Lifecycle | |
@@ -38,9 +41,10 @@ When a new Tier-1 surface ships:
 
 1. Add a row to the table above with the declaration's file and line.
 2. Add a `@drift-check <anchor>` JSDoc block tag on the declaration
-   site. The anchor string must match the `Anchor` column exactly so
-   a maintenance agent can cross-reference both locations by text
-   search.
+   site. If the tag reaches a published declaration, use a path-free
+   canonical document, section, or schema label. The anchor string must
+   match the `Anchor` column exactly so a maintenance agent can
+   cross-reference both locations by text search.
 3. Leave `Last Verified` blank until the next maintenance pass fills
    it in.
 
