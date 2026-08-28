@@ -1,5 +1,13 @@
 # @glasstrace/protocol
 
+## 0.32.1
+
+### Patch Changes
+
+- 7092da2: Remove private Product file references from affected TypeScript declaration
+  comments and prevent repository-name paths from returning in package READMEs
+  or declarations.
+
 ## 0.32.0
 
 ### Minor Changes
