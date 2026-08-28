@@ -58,18 +58,14 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   # Manual dispatch preflight. The workflow-level queue serializes publication
-  # without pending-run replacement. Stable additionally proves that the exact
-  # merged Version Packages PR has current CI and review evidence.
+  # without pending-run replacement and stable publication remains main-only.
   preflight:
     name: Publish preflight (${{ inputs.mode }})
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      checks: read
       contents: read
-      issues: read
-      pull-requests: read
     steps:
       - name: Guard — require supported release mode
         shell: bash
@@ -91,20 +87,6 @@ jobs:
           echo "::error::Stable releases must be dispatched from the current main branch."
           exit 1
 
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-
-      - name: Verify stable release readiness
-        if: ${{ inputs.mode == 'stable' }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/check-stable-release-readiness.mjs
-
   # Manual dispatch: build and publish canary or stable to npm after preflight.
   publish:
     name: Publish (${{ inputs.mode }})
@@ -113,11 +95,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      checks: read
       contents: read
-      issues: read
       id-token: write  # OIDC for npm trusted publishing
-      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -210,15 +189,32 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Recheck the evidence and begin the irreversible stable publish in one
-      # shell step. This removes an avoidable Actions scheduling boundary; the
-      # remote state check and npm publication are not an atomic transaction.
-      - name: Reverify readiness and publish stable
+      - name: Publish stable
         if: ${{ inputs.mode == 'stable' }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          node scripts/check-stable-release-readiness.mjs
+          set -euo pipefail
+          release_commit="$(git log --first-parent --format='%H%x09%s' HEAD | awk -F '\t' '$2 ~ /^chore: version packages( \(#[0-9]+\))?$/ && release_commit == "" { release_commit = $1 } END { if (release_commit != "") print release_commit }')"
+          if [[ -z "$release_commit" ]]; then
+            echo "::error::Stable publication requires a Version Packages commit in main history."
+            exit 1
+          fi
+          if ! git show --format= --unified=0 "$release_commit" -- packages/sdk/package.json packages/protocol/package.json | grep -Eq '^[+-][[:space:]]*"version":'; then
+            echo "::error::The latest Version Packages commit does not change a package version."
+            exit 1
+          fi
+          if ! git diff --quiet "$release_commit" HEAD -- .changeset .npmrc packages package.json package-lock.json npm-shrinkwrap.json tsconfig.json tsconfig.base.json turbo.json; then
+            echo "::error::Package-affecting files changed after the latest Version Packages commit. Merge an updated Version Packages PR before stable publication."
+            git diff --name-only "$release_commit" HEAD -- .changeset .npmrc packages package.json package-lock.json npm-shrinkwrap.json tsconfig.json tsconfig.base.json turbo.json
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          candidate_sha="$(git rev-parse HEAD)"
+          live_main_sha="$(git rev-parse FETCH_HEAD)"
+          if [[ "$candidate_sha" != "$live_main_sha" ]]; then
+            echo "::error::Stable candidate ${candidate_sha} is stale; live main is ${live_main_sha}. Dispatch stable again from the current main tip."
+            exit 1
+          fi
           npx changeset publish
 
       - name: Publish canary

@@ -125,10 +125,7 @@ const EXPECTED_CONTRACT_LINES = [
   "    runs-on: ubuntu-latest",
   "    timeout-minutes: 10",
   "    permissions:",
-  "      checks: read",
   "      contents: read",
-  "      issues: read",
-  "      pull-requests: read",
   "    steps:",
   "      - name: Guard — require supported release mode",
   "        shell: bash",
@@ -148,17 +145,6 @@ const EXPECTED_CONTRACT_LINES = [
   "        run: |",
   '          echo "::error::Stable releases must be dispatched from the current main branch."',
   "          exit 1",
-  "      - uses: actions/checkout@v7",
-  "        with:",
-  "          persist-credentials: false",
-  "      - uses: actions/setup-node@v7",
-  "        with:",
-  "          node-version: 22",
-  "      - name: Verify stable release readiness",
-  "        if: ${{ inputs.mode == 'stable' }}",
-  "        env:",
-  "          GITHUB_TOKEN: ${{ github.token }}",
-  "        run: node scripts/check-stable-release-readiness.mjs",
   "  publish:",
   "    name: Publish (${{ inputs.mode }})",
   "    if: ${{ github.event_name == 'workflow_dispatch' }}",
@@ -166,11 +152,8 @@ const EXPECTED_CONTRACT_LINES = [
   "    runs-on: ubuntu-latest",
   "    timeout-minutes: 20",
   "    permissions:",
-  "      checks: read",
   "      contents: read",
-  "      issues: read",
   "      id-token: write",
-  "      pull-requests: read",
   "    steps:",
   "      - uses: actions/checkout@v7",
   "        with:",
@@ -226,12 +209,32 @@ const EXPECTED_CONTRACT_LINES = [
   "        run: npm run test",
   "      - name: Build",
   "        run: npm run build",
-  "      - name: Reverify readiness and publish stable",
+  "      - name: Publish stable",
   "        if: ${{ inputs.mode == 'stable' }}",
-  "        env:",
-  "          GITHUB_TOKEN: ${{ github.token }}",
+  "        shell: bash",
   "        run: |",
-  "          node scripts/check-stable-release-readiness.mjs",
+  "          set -euo pipefail",
+  "          release_commit=\"$(git log --first-parent --format='%H%x09%s' HEAD | awk -F '\\t' '$2 ~ /^chore: version packages( \\(#[0-9]+\\))?$/ && release_commit == \"\" { release_commit = $1 } END { if (release_commit != \"\") print release_commit }')\"",
+  '          if [[ -z "$release_commit" ]]; then',
+  '            echo "::error::Stable publication requires a Version Packages commit in main history."',
+  "            exit 1",
+  "          fi",
+  "          if ! git show --format= --unified=0 \"$release_commit\" -- packages/sdk/package.json packages/protocol/package.json | grep -Eq '^[+-][[:space:]]*\"version\":'; then",
+  '            echo "::error::The latest Version Packages commit does not change a package version."',
+  "            exit 1",
+  "          fi",
+  "          if ! git diff --quiet \"$release_commit\" HEAD -- .changeset .npmrc packages package.json package-lock.json npm-shrinkwrap.json tsconfig.json tsconfig.base.json turbo.json; then",
+  '            echo "::error::Package-affecting files changed after the latest Version Packages commit. Merge an updated Version Packages PR before stable publication."',
+  "            git diff --name-only \"$release_commit\" HEAD -- .changeset .npmrc packages package.json package-lock.json npm-shrinkwrap.json tsconfig.json tsconfig.base.json turbo.json",
+  "            exit 1",
+  "          fi",
+  "          git fetch --no-tags origin main",
+  '          candidate_sha="$(git rev-parse HEAD)"',
+  '          live_main_sha="$(git rev-parse FETCH_HEAD)"',
+  '          if [[ "$candidate_sha" != "$live_main_sha" ]]; then',
+  '            echo "::error::Stable candidate ${candidate_sha} is stale; live main is ${live_main_sha}. Dispatch stable again from the current main tip."',
+  "            exit 1",
+  "          fi",
   "          npx changeset publish",
   "      - name: Publish canary",
   "        if: ${{ inputs.mode == 'canary' }}",
@@ -528,7 +531,7 @@ describe("release workflow contract", () => {
         /^ {6}- uses: actions\/checkout@v7\n {8}with:\n((?: {10}.*\n)+)/gm,
       ),
     ];
-    expect(checkoutSteps).toHaveLength(3);
+    expect(checkoutSteps).toHaveLength(2);
     for (const step of checkoutSteps) {
       expect(step[1]).toContain("          persist-credentials: false\n");
     }
@@ -558,44 +561,58 @@ describe("release workflow contract", () => {
     expect(modeStep).toContain("              exit 1");
   });
 
-  it("fails off-main stable dispatch and gates both ends of stable publication", () => {
+  it("fails off-main stable dispatch before publishing", () => {
     const guard = workflow.indexOf(
       "      - name: Guard — stable releases require main",
     );
-    const preflightCheckout = workflow.indexOf(
-      "      - uses: actions/checkout@v7",
-      guard,
-    );
-    const install = workflow.indexOf("      - run: npm ci", preflightCheckout);
-    const firstReadiness = workflow.indexOf(
-      "      - name: Verify stable release readiness",
-    );
-    const finalReadinessAndPublish = workflow.indexOf(
-      "      - name: Reverify readiness and publish stable",
-    );
-    const finalStepEnd = workflow.indexOf(
-      "      - name: Publish canary",
-      finalReadinessAndPublish,
-    );
-    const finalStep = workflow.slice(finalReadinessAndPublish, finalStepEnd);
+    const publishJob = workflow.indexOf("  publish:", guard);
+    const stablePublish = workflow.indexOf("      - name: Publish stable");
+    const canaryPublish = workflow.indexOf("      - name: Publish canary");
 
     expect(guard).toBeGreaterThan(0);
-    expect(guard).toBeLessThan(preflightCheckout);
-    expect(preflightCheckout).toBeLessThan(install);
-    expect(workflow.slice(guard, preflightCheckout)).toContain("exit 1");
-    expect(firstReadiness).toBeGreaterThan(preflightCheckout);
-    expect(finalReadinessAndPublish).toBeGreaterThan(firstReadiness);
-    expect(finalStep.indexOf("node scripts/check-stable-release-readiness.mjs"))
-      .toBeGreaterThan(0);
-    expect(finalStep.indexOf("npx changeset publish")).toBeGreaterThan(
-      finalStep.indexOf("node scripts/check-stable-release-readiness.mjs"),
+    expect(guard).toBeLessThan(publishJob);
+    expect(workflow.slice(guard, publishJob)).toContain("exit 1");
+    expect(stablePublish).toBeGreaterThan(publishJob);
+    expect(stablePublish).toBeLessThan(canaryPublish);
+    expect(workflow.slice(stablePublish, canaryPublish)).toContain(
+      "        if: ${{ inputs.mode == 'stable' }}",
     );
-    expect(
-      workflow.match(/node scripts\/check-stable-release-readiness\.mjs/g),
-    ).toHaveLength(2);
-    expect(workflow).not.toContain("      - name: Publish stable");
-    expect(workflow).not.toContain(
-      "inputs.mode == 'stable' && github.ref == 'refs/heads/main'",
+    expect(workflow.slice(stablePublish, canaryPublish)).toContain(
+      "          git fetch --no-tags origin main",
+    );
+    expect(workflow.slice(stablePublish, canaryPublish)).toContain(
+      '          if [[ "$candidate_sha" != "$live_main_sha" ]]; then',
+    );
+    expect(workflow.slice(stablePublish, canaryPublish)).toContain(
+      "          npx changeset publish",
+    );
+    expect(workflow).not.toContain("check-stable-release-readiness.mjs");
+  });
+
+  it("rejects package-affecting changes after the Version Packages commit", () => {
+    const stablePublish = workflow.indexOf("      - name: Publish stable");
+    const canaryPublish = workflow.indexOf(
+      "      - name: Publish canary",
+      stablePublish,
+    );
+    const stableStep = workflow.slice(stablePublish, canaryPublish);
+    const releaseCommit = stableStep.indexOf(
+      "          release_commit=\"$(git log --first-parent",
+    );
+    const releaseTree = stableStep.indexOf(
+      "          if ! git diff --quiet \"$release_commit\" HEAD -- .changeset .npmrc packages package.json package-lock.json npm-shrinkwrap.json tsconfig.json tsconfig.base.json turbo.json; then",
+    );
+    const liveMain = stableStep.indexOf(
+      "          git fetch --no-tags origin main",
+    );
+    const publish = stableStep.indexOf("          npx changeset publish");
+
+    expect(releaseCommit).toBeGreaterThan(0);
+    expect(releaseCommit).toBeLessThan(releaseTree);
+    expect(releaseTree).toBeLessThan(liveMain);
+    expect(liveMain).toBeLessThan(publish);
+    expect(contributing).toContain(
+      "Stable publication also fails if changesets,\n   package files, or shared package-build metadata changed after the latest\n   Version Packages commit.",
     );
   });
 
@@ -617,7 +634,7 @@ describe("release workflow contract", () => {
     );
   });
 
-  it("documents feature-branch canaries and exact-head stable evidence", () => {
+  it("documents feature-branch canaries and main-only stable publication", () => {
     expect(contributing).toContain(
       "Canary dispatches publish the selected ref, not implicitly `main`.",
     );
@@ -625,14 +642,10 @@ describe("release workflow contract", () => {
       "A feature\nbranch can therefore be selected for pre-merge canary validation",
     );
     expect(contributing).toContain(
-      "at least one trusted human's latest decisive review must be\n`APPROVED`",
+      "Immediately before publication, the workflow fetches the live `main` tip and\n   fails if the selected commit has become stale",
     );
-    expect(contributing).toContain(
-      "The publish job then\nperforms the final readiness evaluation and starts stable publication in the\nsame shell step.",
-    );
-    expect(contributing).toContain(
-      "the GitHub API evaluation and npm publication are not an atomic transaction",
-    );
+    expect(contributing).not.toContain("source-enforced readiness gate");
+    expect(contributing).not.toContain("exact-head stable evidence");
   });
 
   it("rejects status plans that cannot produce a new snapshot version", () => {

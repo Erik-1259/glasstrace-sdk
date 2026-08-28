@@ -114,49 +114,23 @@ The recommended `main`-based order:
    `package-lock.json`.
 6. Trigger `release.yml` `workflow_dispatch` with `mode: stable`. The
    stable publishes from the bumped state. Stable dispatch from any ref other
-   than `main` fails explicitly.
+   than `main` fails explicitly. Stable publication also fails if changesets,
+   package files, or shared package-build metadata changed after the latest
+   Version Packages commit. Release-automation, tests, and repository-only
+   documentation may be repaired without altering the versioned package tree.
+   Immediately before publication, the workflow fetches the live `main` tip and
+   fails if the selected commit has become stale; dispatch stable again from the
+   current `main` tip in that case.
 
-Before confirming the Version Packages squash merge, inspect the final commit
-message and remove any GitHub-added `Co-authored-by` trailer; this repository
-does not accept those trailers. Also update the PR's public readiness record so
-it truthfully reflects the completed 500-pass public-repo review. A Version
-Packages PR must not merge while its description still says the review is a
-draft or `0/500`. The stable source gate verifies approvals, Codex evidence,
-checks, and threads, but it deliberately does not replace or infer that counted
-review process.
+Before merging the Version Packages PR, inspect its generated package versions,
+changelog entries, lockfile metadata, consumed changesets, and final commit
+message. Remove any GitHub-added `Co-authored-by` trailer; this repository does
+not accept those trailers.
 
 Manual publication dispatches are globally serialized by the workflow's
 `queue: max` concurrency group; an arriving dispatch cannot replace an already
 waiting publication. Push-driven Version PR generation uses a separate event
 group and cannot cancel or replace a canary or stable publication.
-
-Stable publication also has a source-enforced readiness gate. The selected
-commit must still be the live `main` tip and must be the exact tree produced by
-one merged, non-draft `changeset-release/main` Version Packages PR. On that
-PR's exact head commit, every required CI and CodeQL check must be completed
-successfully, and at least one trusted human's latest decisive review must be
-`APPROVED` on that exact head. A trusted reviewer must have an `OWNER`,
-`MEMBER`, or `COLLABORATOR` author association and current live `write` or
-`admin` repository permission. The same trust rule applies to an outstanding
-`CHANGES_REQUESTED` review. The latest Codex review artifact bound to either
-the checked PR head or its proven tree-identical squash-merge candidate must
-also be clean.
-
-Every unresolved review thread whose root comment was created before or at
-the PR merge blocks release, preserving all pre-merge feedback. For a thread
-opened after merge, only the exact Codex bot or a human with the trusted
-association and live permission described above can block release. This keeps
-post-merge comments from an untrusted public account from denying publication.
-Malformed review evidence fails closed.
-
-Stale approvals, stale Codex feedback, skipped or in-progress checks, and an
-advanced `main` all fail closed. The readiness script reads the live `main`
-tip again after evaluating checks and review evidence. The publish job then
-performs the final readiness evaluation and starts stable publication in the
-same shell step. That removes an avoidable Actions scheduling boundary, but
-the GitHub API evaluation and npm publication are not an atomic transaction.
-This gate is enforced by repository source and does not depend on a GitHub
-ruleset setting.
 
 Stable-direct (skipping canary) is supported by the workflow but loses evidence
 from an npm-published canary. It does not remove pre-stable verification: pack
