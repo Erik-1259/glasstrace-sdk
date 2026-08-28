@@ -43,7 +43,7 @@ import { sha256Hex } from "./sha256.js";
  *   within the day.
  * @returns A 16-character hex {@link SessionId}.
  *
- * @drift-check ../glasstrace-product/docs/product-spec.md §4.5 Session Lifecycle
+ * @drift-check Glasstrace product specification §4.5 Session Lifecycle
  */
 export function deriveSessionId(
   apiKey: string,

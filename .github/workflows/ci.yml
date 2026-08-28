@@ -4,33 +4,35 @@ on:
   push:
     branches: [main]
     # Skip CI on pure documentation / metadata changes. Source and
-    # package-lock changes always trigger. The check runs at workflow
-    # level — if ALL paths in the diff match one of the ignored
-    # patterns, the workflow is skipped entirely.
+    # package-lock changes always trigger. The ordered path filter starts
+    # inclusive, then removes documentation and metadata-only changes.
     #
     # IMPORTANT: the published per-package READMEs
     # (`packages/*/README.md`) are deliberately NOT ignored. They ship to
-    # npm consumers, and the "Check published surfaces for internal IDs"
-    # step is the guard against leaking internal tracking identifiers onto
-    # those pages. Ignoring all `*.md` would let a README-only change skip
-    # CI entirely and bypass that guard. The negated patterns below carve
-    # the published READMEs back out of the markdown ignore.
-    paths-ignore:
-      - "**/*.md"
-      - "!packages/*/README.md"
-      - "LICENSE"
-      - ".gitignore"
-      - ".github/ISSUE_TEMPLATE/**"
-      - ".github/PULL_REQUEST_TEMPLATE.md"
+    # npm consumers, and the "Check published surfaces for internal
+    # references" step guards against leaking internal tracking identifiers
+    # or paths exposing the private Product repository name onto those pages.
+    # Excluding all `*.md` would let a README-only change skip CI entirely and
+    # bypass that guard. The final positive pattern re-includes published
+    # package READMEs after the Markdown exclusion.
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "!LICENSE"
+      - "!.gitignore"
+      - "!.github/ISSUE_TEMPLATE/**"
+      - "!.github/PULL_REQUEST_TEMPLATE.md"
+      - "packages/*/README.md"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "!packages/*/README.md"
-      - "LICENSE"
-      - ".gitignore"
-      - ".github/ISSUE_TEMPLATE/**"
-      - ".github/PULL_REQUEST_TEMPLATE.md"
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "!LICENSE"
+      - "!.gitignore"
+      - "!.github/ISSUE_TEMPLATE/**"
+      - "!.github/PULL_REQUEST_TEMPLATE.md"
+      - "packages/*/README.md"
 
 # Cancel in-progress runs when a new commit is pushed to the same ref
 # (PR branch or main). Previously, a PR with N rapid pushes produced N
@@ -99,13 +101,14 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Public-surface guard: no internal tracking identifier may appear
-      # in README.md or in the generated `.d.ts` / `.d.cts` files that
-      # ship to consumers (exported JSDoc propagates into declarations and
-      # surfaces in editor tooltips). Runs after Build so the declaration
-      # files exist. The same scanner is mirrored by a unit test in the
-      # Test step below, so the rule is enforced in the local gate too.
-      - name: Check published surfaces for internal IDs
+      # Public-surface guard: no internal tracking identifier or path exposing
+      # the private Product repository name may appear in README.md or in the
+      # generated `.d.ts` / `.d.cts` files that ship to consumers (exported
+      # JSDoc propagates into declarations and surfaces in editor tooltips).
+      # Runs after Build so the declaration files exist. The same scanner is
+      # mirrored by a unit test in the Test step below, so the rule is enforced
+      # in the local gate too.
+      - name: Check published surfaces for internal references
         run: npm run check:no-internal-ids
 
       - name: Test

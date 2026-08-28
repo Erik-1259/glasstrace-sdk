@@ -36,19 +36,21 @@ This public repository uses a **strict commit quality bar**:
   public API, update README.md in the same PR.
 - **CHANGELOG.md is maintained via changesets.** Run `npx changeset` for
   any change that affects the public API of either package.
-- **No internal tracking IDs on public surfaces.** Internal tracking
+- **No internal references on public surfaces.** Internal tracking
   identifiers (`SDK-*`, `DISC-*`, `SCHEMA-*`, `ING-*`, `ACCT-*`, `MCP-*`,
-  `TEST-*`, `VAL-*`, `WAVE-*`) must never appear in a **published**
-  `README` — the per-package files each workspace lists in its
-  `package.json#files` (`packages/sdk/README.md`,
-  `packages/protocol/README.md`); the repo-root `README.md` is not part
-  of any tarball — in exported JSDoc (it propagates into the published
-  `.d.ts` / `.d.cts` and shows in consumers' editor tooltips), or in
-  changesets / CHANGELOG entries. Describe the thing in plain language
-  instead. Non-JSDoc source comments (`//` lines) are acceptable — they
-  ship only inside source maps, not in the declaration files.
-  `scripts/check-no-internal-ids.mjs` enforces this in CI for the
-  published READMEs and the built declaration files.
+  `TEST-*`, `VAL-*`, `WAVE-*`) and private repository paths such as
+  `glasstrace-product/` must never appear in a **published** `README` — the
+  per-package files each workspace lists in its `package.json#files`
+  (`packages/sdk/README.md`, `packages/protocol/README.md`); the repo-root
+  `README.md` is not part of any tarball — in exported JSDoc (it propagates
+  into the published `.d.ts` / `.d.cts` and shows in consumers' editor
+  tooltips), or in changesets / CHANGELOG entries. Describe the thing in
+  plain language instead. Non-JSDoc source comments (`//` lines) are
+  acceptable — they ship only inside source maps, not in the declaration
+  files. `scripts/check-no-internal-ids.mjs` enforces the internal-ID and
+  Product-repository-name path classes on published READMEs and built
+  declarations in CI; plain-language review still owns path forms that do
+  not carry that repository name.
 
 ## Your Role
 
