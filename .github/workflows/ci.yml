@@ -66,6 +66,11 @@ jobs:
       # need for npm ci to also audit during install.
       - run: npm ci --no-audit
 
+      # `npm ci` verifies dependency resolution but does not prove that a
+      # workspace package's own version matches its package-lock metadata.
+      # Version Packages PRs must keep those fields synchronized.
+      - run: npm run check:workspace-lock
+
       # Guard against `package-lock.json` drift (DISC-1317). `npm ci`
       # does not mutate the lockfile, so this diff must always be
       # empty. A non-empty diff means either (a) a prior commit landed

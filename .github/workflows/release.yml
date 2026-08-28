@@ -14,8 +14,12 @@ on:
           - stable
         default: canary
 
+# Keep push-driven version work and manual publication in different groups.
+# `queue: max` serializes every canary/stable dispatch across refs without the
+# default behavior that replaces an already-pending run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.event_name }}
+  queue: max
 
 jobs:
   # On push to main: only create/update the Version Packages PR.
@@ -30,32 +34,90 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
 
-      - run: corepack enable
+      - name: Use the declared npm version
+        run: npm install -g npm@11.6.1
 
-      - run: npm ci
+      - run: npm ci --no-audit
+
+      - run: npm run check:workspace-lock
 
       - name: Create or update Version Packages PR
         uses: changesets/action@v2
         with:
           pr-title: "chore: version packages"
           commit-message: "chore: version packages"
+          version-script: npm run version-packages
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Manual dispatch: publish canary or stable to npm.
+  # Manual dispatch preflight. The workflow-level queue serializes publication
+  # without pending-run replacement. Stable additionally proves that the exact
+  # merged Version Packages PR has current CI and review evidence.
+  preflight:
+    name: Publish preflight (${{ inputs.mode }})
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Guard — require supported release mode
+        shell: bash
+        env:
+          RELEASE_MODE: ${{ inputs.mode }}
+        run: |
+          case "$RELEASE_MODE" in
+            canary|stable) ;;
+            *)
+              echo "::error::Release mode must be exactly canary or stable."
+              exit 1
+              ;;
+          esac
+
+      - name: Guard — stable releases require main
+        if: ${{ inputs.mode == 'stable' && github.ref != 'refs/heads/main' }}
+        shell: bash
+        run: |
+          echo "::error::Stable releases must be dispatched from the current main branch."
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Verify stable release readiness
+        if: ${{ inputs.mode == 'stable' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/check-stable-release-readiness.mjs
+
+  # Manual dispatch: build and publish canary or stable to npm after preflight.
   publish:
     name: Publish (${{ inputs.mode }})
     if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
+      checks: read
       contents: read
+      issues: read
       id-token: write  # OIDC for npm trusted publishing
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,6 +125,7 @@ jobs:
           # baseBranch. A manual canary may run from another branch, so the
           # default single-commit checkout is not enough to resolve `main`.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Make Changesets base branch resolvable
         shell: bash
@@ -136,7 +199,7 @@ jobs:
       # through the build correctly.
       - name: Snapshot version
         if: ${{ inputs.mode == 'canary' }}
-        run: npx changeset version --snapshot canary
+        run: npm run version-packages -- --snapshot canary
 
       - name: Typecheck
         run: npm run typecheck
@@ -147,12 +210,17 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Recheck the evidence and begin the irreversible stable publish in one
+      # shell step. This removes an avoidable Actions scheduling boundary; the
+      # remote state check and npm publication are not an atomic transaction.
+      - name: Reverify readiness and publish stable
+        if: ${{ inputs.mode == 'stable' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/check-stable-release-readiness.mjs
+          npx changeset publish
+
       - name: Publish canary
         if: ${{ inputs.mode == 'canary' }}
         run: npx changeset publish --tag canary
-
-      # Stable: publish current versions (after Version Packages PR was merged)
-      # Only allowed from main branch to prevent accidental releases
-      - name: Publish stable
-        if: ${{ inputs.mode == 'stable' && github.ref == 'refs/heads/main' }}
-        run: npx changeset publish
