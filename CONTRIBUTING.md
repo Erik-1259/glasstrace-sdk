@@ -6,7 +6,7 @@ the development setup and workflow for the glasstrace-sdk monorepo.
 ## Prerequisites
 
 - Node.js >= 20 (22 recommended)
-- npm 10+
+- npm 11.6.1 (the version declared in `packageManager`)
 
 ## Getting Started
 
@@ -77,7 +77,8 @@ After your implementation PR merges to `main`, the `changesets/action`
 opens a Version Packages PR that bumps `package.json` versions and clears
 the pending release changesets. The canary publish path requires Changesets
 to calculate at least one pending package release so
-`changeset version --snapshot canary` produces a real snapshot version.
+`npm run version-packages -- --snapshot canary` produces a real snapshot
+version and refreshes the npm workspace lock metadata before verification.
 Ignored guide files such as `.changeset/README.md`, empty changesets, and
 explicit `none` release entries do not qualify. The guard requires a real
 `patch`, `minor`, or `major` version change. If the Version Packages PR has
@@ -89,20 +90,73 @@ already consumed the release entries, the canary workflow fails on the
 ::error::Without one, snapshot versioning is a no-op and canary publication would re-tag a stable version.
 ```
 
-The documented order:
+Canary dispatches publish the selected ref, not implicitly `main`. A feature
+branch can therefore be selected for pre-merge canary validation when that
+branch contains a real versionable changeset. The workflow checks out the
+selected ref with full history and makes `main` resolvable for Changesets.
+This supported feature-branch path does not replace PR review or CI, and a
+feature-branch canary must never be treated as a stable release candidate.
+
+The recommended `main`-based order:
 
 1. Implementation PR merges to `main`.
 2. `changesets/action` auto-opens the Version Packages PR. **Do NOT merge
    it yet.**
 3. Trigger `release.yml` `workflow_dispatch` with `mode: canary`. The
-   canary publishes from the current `main` state (changesets still
-   present in `.changeset/`).
+   canary publishes from the selected ref (changesets still present
+   in `.changeset/`). A feature branch with a versionable changeset can be
+   selected instead when pre-merge canary evidence is useful.
 4. Validate the canary build against any downstream consumer that needs
    pre-stable verification.
-5. Merge the Version Packages PR. This consumes the changesets, bumps
-   `package.json` versions, and updates `CHANGELOG.md` files.
+5. Review and merge the Version Packages PR. Its configured version command
+   consumes the changesets, bumps `package.json` versions, updates
+   `CHANGELOG.md` files, and refreshes npm workspace metadata in
+   `package-lock.json`.
 6. Trigger `release.yml` `workflow_dispatch` with `mode: stable`. The
-   stable publishes from the bumped state.
+   stable publishes from the bumped state. Stable dispatch from any ref other
+   than `main` fails explicitly.
+
+Before confirming the Version Packages squash merge, inspect the final commit
+message and remove any GitHub-added `Co-authored-by` trailer; this repository
+does not accept those trailers. Also update the PR's public readiness record so
+it truthfully reflects the completed 500-pass public-repo review. A Version
+Packages PR must not merge while its description still says the review is a
+draft or `0/500`. The stable source gate verifies approvals, Codex evidence,
+checks, and threads, but it deliberately does not replace or infer that counted
+review process.
+
+Manual publication dispatches are globally serialized by the workflow's
+`queue: max` concurrency group; an arriving dispatch cannot replace an already
+waiting publication. Push-driven Version PR generation uses a separate event
+group and cannot cancel or replace a canary or stable publication.
+
+Stable publication also has a source-enforced readiness gate. The selected
+commit must still be the live `main` tip and must be the exact tree produced by
+one merged, non-draft `changeset-release/main` Version Packages PR. On that
+PR's exact head commit, every required CI and CodeQL check must be completed
+successfully, and at least one trusted human's latest decisive review must be
+`APPROVED` on that exact head. A trusted reviewer must have an `OWNER`,
+`MEMBER`, or `COLLABORATOR` author association and current live `write` or
+`admin` repository permission. The same trust rule applies to an outstanding
+`CHANGES_REQUESTED` review. The latest Codex review artifact bound to either
+the checked PR head or its proven tree-identical squash-merge candidate must
+also be clean.
+
+Every unresolved review thread whose root comment was created before or at
+the PR merge blocks release, preserving all pre-merge feedback. For a thread
+opened after merge, only the exact Codex bot or a human with the trusted
+association and live permission described above can block release. This keeps
+post-merge comments from an untrusted public account from denying publication.
+Malformed review evidence fails closed.
+
+Stale approvals, stale Codex feedback, skipped or in-progress checks, and an
+advanced `main` all fail closed. The readiness script reads the live `main`
+tip again after evaluating checks and review evidence. The publish job then
+performs the final readiness evaluation and starts stable publication in the
+same shell step. That removes an avoidable Actions scheduling boundary, but
+the GitHub API evaluation and npm publication are not an atomic transaction.
+This gate is enforced by repository source and does not depend on a GitHub
+ruleset setting.
 
 Stable-direct (skipping canary) is supported by the workflow but loses evidence
 from an npm-published canary. It does not remove pre-stable verification: pack
@@ -150,14 +204,16 @@ Two rules to avoid lockfile drift:
 
 2. **Use the npm version declared in `packageManager`.** Different
    npm versions can rewrite optional transitive dependency entries
-   in incompatible ways. Enable [corepack](https://nodejs.org/api/corepack.html)
-   once (`corepack enable`) and npm will match the declared version
-   automatically.
+   in incompatible ways. Install or otherwise select that exact npm
+   version before changing the lockfile; release automation explicitly
+   installs the declared version rather than relying on the npm bundled
+   with Node.
 
 Commit the resulting `package-lock.json` change in the same PR as
-the `package.json` change. CI runs a lockfile-drift guard
-(`git diff --exit-code package-lock.json` after `npm ci`) that
-catches any commit whose lockfile disagrees with a clean install.
+the `package.json` change. CI runs both `npm run check:workspace-lock`
+to compare every workspace manifest version/link with its lock metadata
+and a lockfile-drift guard (`git diff --exit-code package-lock.json`
+after `npm ci`).
 
 ## Code Style
 

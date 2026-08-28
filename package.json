@@ -21,7 +21,9 @@
     "test": "vitest run",
     "typecheck": "tsc -b",
     "lint": "eslint .",
-    "check:no-internal-ids": "node scripts/check-no-internal-ids.mjs"
+    "check:no-internal-ids": "node scripts/check-no-internal-ids.mjs",
+    "check:workspace-lock": "node scripts/check-workspace-lockfile.mjs",
+    "version-packages": "node scripts/version-packages.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.1",

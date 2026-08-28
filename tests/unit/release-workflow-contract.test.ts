@@ -11,8 +11,12 @@ const workflowPath = resolve(
   "../../.github/workflows/release.yml",
 );
 const contributingPath = resolve(testDirectory, "../../CONTRIBUTING.md");
+const ciPath = resolve(testDirectory, "../../.github/workflows/ci.yml");
+const packageJsonPath = resolve(testDirectory, "../../package.json");
 const workflow = readFileSync(workflowPath, "utf8");
 const contributing = readFileSync(contributingPath, "utf8");
+const ci = readFileSync(ciPath, "utf8");
+const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 
 function embeddedCanaryGuardProgram(source: string): string {
   const opener = "          node --input-type=module <<'NODE'\n";
@@ -85,7 +89,8 @@ const EXPECTED_CONTRACT_LINES = [
   "          - stable",
   "        default: canary",
   "concurrency:",
-  "  group: ${{ github.workflow }}-${{ github.ref }}",
+  "  group: release-${{ github.event_name }}",
+  "  queue: max",
   "jobs:",
   "  version:",
   "    name: Version Packages PR",
@@ -97,30 +102,80 @@ const EXPECTED_CONTRACT_LINES = [
   "      pull-requests: write",
   "    steps:",
   "      - uses: actions/checkout@v7",
+  "        with:",
+  "          persist-credentials: false",
   "      - uses: actions/setup-node@v7",
   "        with:",
   "          node-version: 22",
   "          cache: npm",
-  "      - run: corepack enable",
-  "      - run: npm ci",
+  "      - name: Use the declared npm version",
+  "        run: npm install -g npm@11.6.1",
+  "      - run: npm ci --no-audit",
+  "      - run: npm run check:workspace-lock",
   "      - name: Create or update Version Packages PR",
   "        uses: changesets/action@v2",
   "        with:",
   '          pr-title: "chore: version packages"',
   '          commit-message: "chore: version packages"',
+  "          version-script: npm run version-packages",
   "          github-token: ${{ secrets.GITHUB_TOKEN }}",
+  "  preflight:",
+  "    name: Publish preflight (${{ inputs.mode }})",
+  "    if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "    runs-on: ubuntu-latest",
+  "    timeout-minutes: 10",
+  "    permissions:",
+  "      checks: read",
+  "      contents: read",
+  "      issues: read",
+  "      pull-requests: read",
+  "    steps:",
+  "      - name: Guard — require supported release mode",
+  "        shell: bash",
+  "        env:",
+  "          RELEASE_MODE: ${{ inputs.mode }}",
+  "        run: |",
+  '          case "$RELEASE_MODE" in',
+  "            canary|stable) ;;",
+  "            *)",
+  '              echo "::error::Release mode must be exactly canary or stable."',
+  "              exit 1",
+  "              ;;",
+  "          esac",
+  "      - name: Guard — stable releases require main",
+  "        if: ${{ inputs.mode == 'stable' && github.ref != 'refs/heads/main' }}",
+  "        shell: bash",
+  "        run: |",
+  '          echo "::error::Stable releases must be dispatched from the current main branch."',
+  "          exit 1",
+  "      - uses: actions/checkout@v7",
+  "        with:",
+  "          persist-credentials: false",
+  "      - uses: actions/setup-node@v7",
+  "        with:",
+  "          node-version: 22",
+  "      - name: Verify stable release readiness",
+  "        if: ${{ inputs.mode == 'stable' }}",
+  "        env:",
+  "          GITHUB_TOKEN: ${{ github.token }}",
+  "        run: node scripts/check-stable-release-readiness.mjs",
   "  publish:",
   "    name: Publish (${{ inputs.mode }})",
   "    if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "    needs: preflight",
   "    runs-on: ubuntu-latest",
-  "    timeout-minutes: 15",
+  "    timeout-minutes: 20",
   "    permissions:",
+  "      checks: read",
   "      contents: read",
+  "      issues: read",
   "      id-token: write",
+  "      pull-requests: read",
   "    steps:",
   "      - uses: actions/checkout@v7",
   "        with:",
   "          fetch-depth: 0",
+  "          persist-credentials: false",
   "      - name: Make Changesets base branch resolvable",
   "        shell: bash",
   "        run: git show-ref --verify --quiet refs/heads/main || git branch --track main refs/remotes/origin/main",
@@ -164,24 +219,36 @@ const EXPECTED_CONTRACT_LINES = [
   "          NODE",
   "      - name: Snapshot version",
   "        if: ${{ inputs.mode == 'canary' }}",
-  "        run: npx changeset version --snapshot canary",
+  "        run: npm run version-packages -- --snapshot canary",
   "      - name: Typecheck",
   "        run: npm run typecheck",
   "      - name: Test",
   "        run: npm run test",
   "      - name: Build",
   "        run: npm run build",
+  "      - name: Reverify readiness and publish stable",
+  "        if: ${{ inputs.mode == 'stable' }}",
+  "        env:",
+  "          GITHUB_TOKEN: ${{ github.token }}",
+  "        run: |",
+  "          node scripts/check-stable-release-readiness.mjs",
+  "          npx changeset publish",
   "      - name: Publish canary",
   "        if: ${{ inputs.mode == 'canary' }}",
   "        run: npx changeset publish --tag canary",
-  "      - name: Publish stable",
-  "        if: ${{ inputs.mode == 'stable' && github.ref == 'refs/heads/main' }}",
-  "        run: npx changeset publish",
 ];
 
 function contractLines(source: string): string[] {
-  const sourceEndsWithLineBreak = /\r?\n$/.test(source);
-  const lines = source.split(/\r?\n/);
+  // CRLF is a canonical line ending. A remaining bare carriage return is
+  // also a YAML line break, but `split(/\r?\n/)` would leave it embedded in
+  // a comment line and let executable YAML disappear from the projection.
+  // Reject that representation before applying any comment filtering.
+  const normalizedSource = source.replace(/\r\n/g, "\n");
+  if (normalizedSource.includes("\r")) {
+    throw new Error("Release workflow contains a bare carriage return.");
+  }
+  const sourceEndsWithLineBreak = /\n$/.test(normalizedSource);
+  const lines = normalizedSource.split("\n");
   if (lines.at(-1) === "" && sourceEndsWithLineBreak) {
     // `split` materializes the ordinary terminating line break as an empty
     // element. It is not an additional blank line for `+` chomping.
@@ -369,7 +436,33 @@ describe("release workflow contract", () => {
     assertReleaseWorkflowContract(workflow);
   });
 
+  it("rejects a bare-CR line break before comments are projected away", () => {
+    const malicious = workflow.replace(
+      "    permissions:\n      contents: write",
+      "    permissions:\n      # benign\r      actions: write\n      contents: write",
+    );
+
+    expect(malicious.split(/\r\n?|\n/)).toContain("      actions: write");
+    expect(() => contractLines(malicious)).toThrow(
+      "Release workflow contains a bare carriage return.",
+    );
+  });
+
+  it("accepts canonical CRLF without weakening the exact contract", () => {
+    expect(contractLines(workflow.replace(/\n/g, "\r\n"))).toEqual(
+      EXPECTED_CONTRACT_LINES,
+    );
+  });
+
   it("uses only supported Changesets v2 inputs and token wiring", () => {
+    const actionStart = workflow.indexOf(
+      "      - name: Create or update Version Packages PR",
+    );
+    const actionEnd = workflow.indexOf("\n\n  # Manual dispatch preflight", actionStart);
+    expect(actionStart).toBeGreaterThan(0);
+    expect(actionEnd).toBeGreaterThan(actionStart);
+    const actionStep = workflow.slice(actionStart, actionEnd);
+
     expect(
       workflow.match(/^\s*uses:\s*changesets\/action@[^\s#]+/gm) ?? [],
     ).toEqual(["        uses: changesets/action@v2"]);
@@ -378,9 +471,168 @@ describe("release workflow contract", () => {
       '          commit-message: "chore: version packages"',
     );
     expect(workflow).toContain(
+      "          version-script: npm run version-packages",
+    );
+    expect(workflow).toContain(
       "          github-token: ${{ secrets.GITHUB_TOKEN }}",
     );
-    expect(workflow).not.toMatch(/^ {8}env:/m);
+    expect(actionStep).not.toMatch(/^ {8}env:/m);
+    expect(actionStep).not.toContain("push-with-git-cli");
+  });
+
+  it("installs the exact npm version declared by packageManager", () => {
+    const declaredNpm = /^npm@(.+)$/.exec(packageJson.packageManager)?.[1];
+    expect(declaredNpm).toBeTruthy();
+    expect(
+      workflow.match(/^ {8}run: npm install -g npm@.+$/gm) ?? [],
+    ).toEqual([
+      `        run: npm install -g npm@${declaredNpm}`,
+      `        run: npm install -g npm@${declaredNpm}`,
+    ]);
+    expect(contributing).toContain(
+      `- npm ${declaredNpm} (the version declared in \`packageManager\`)`,
+    );
+  });
+
+  it("checks workspace lock metadata explicitly after clean install", () => {
+    const install = ci.indexOf("      - run: npm ci --no-audit");
+    const workspaceInvariant = ci.indexOf(
+      "      - run: npm run check:workspace-lock",
+      install,
+    );
+    const unchangedDiff = ci.indexOf(
+      "        run: git diff --exit-code -- package-lock.json",
+      workspaceInvariant,
+    );
+    expect(install).toBeGreaterThan(0);
+    expect(workspaceInvariant).toBeGreaterThan(install);
+    expect(unchangedDiff).toBeGreaterThan(workspaceInvariant);
+  });
+
+  it("queues publication separately from push-driven version generation", () => {
+    expect(workflow).toContain(
+      "concurrency:\n  group: release-${{ github.event_name }}\n  queue: max",
+    );
+    expect(workflow).not.toContain("cancel-in-progress:");
+    expect(contributing).toContain(
+      "`queue: max` concurrency group; an arriving dispatch cannot replace an already\nwaiting publication",
+    );
+    expect(contributing).toContain(
+      "Push-driven Version PR generation uses a separate event\ngroup",
+    );
+  });
+
+  it("does not persist checkout credentials into any release install path", () => {
+    const checkoutSteps = [
+      ...workflow.matchAll(
+        /^ {6}- uses: actions\/checkout@v7\n {8}with:\n((?: {10}.*\n)+)/gm,
+      ),
+    ];
+    expect(checkoutSteps).toHaveLength(3);
+    for (const step of checkoutSteps) {
+      expect(step[1]).toContain("          persist-credentials: false\n");
+    }
+    expect(workflow).toContain(
+      "          github-token: ${{ secrets.GITHUB_TOKEN }}",
+    );
+  });
+
+  it("rejects unsupported modes before every other preflight step", () => {
+    const modeGuard = workflow.indexOf(
+      "      - name: Guard — require supported release mode",
+    );
+    const stableGuard = workflow.indexOf(
+      "      - name: Guard — stable releases require main",
+    );
+    const modeStep = workflow.slice(modeGuard, stableGuard);
+
+    expect(modeGuard).toBeGreaterThan(0);
+    expect(modeGuard).toBeLessThan(stableGuard);
+    expect(modeStep).not.toContain("        if:");
+    expect(modeStep).toContain('          RELEASE_MODE: ${{ inputs.mode }}');
+    expect(modeStep).toContain('          case "$RELEASE_MODE" in');
+    expect(modeStep).toContain("            canary|stable) ;;");
+    expect(modeStep).toContain(
+      '              echo "::error::Release mode must be exactly canary or stable."',
+    );
+    expect(modeStep).toContain("              exit 1");
+  });
+
+  it("fails off-main stable dispatch and gates both ends of stable publication", () => {
+    const guard = workflow.indexOf(
+      "      - name: Guard — stable releases require main",
+    );
+    const preflightCheckout = workflow.indexOf(
+      "      - uses: actions/checkout@v7",
+      guard,
+    );
+    const install = workflow.indexOf("      - run: npm ci", preflightCheckout);
+    const firstReadiness = workflow.indexOf(
+      "      - name: Verify stable release readiness",
+    );
+    const finalReadinessAndPublish = workflow.indexOf(
+      "      - name: Reverify readiness and publish stable",
+    );
+    const finalStepEnd = workflow.indexOf(
+      "      - name: Publish canary",
+      finalReadinessAndPublish,
+    );
+    const finalStep = workflow.slice(finalReadinessAndPublish, finalStepEnd);
+
+    expect(guard).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(preflightCheckout);
+    expect(preflightCheckout).toBeLessThan(install);
+    expect(workflow.slice(guard, preflightCheckout)).toContain("exit 1");
+    expect(firstReadiness).toBeGreaterThan(preflightCheckout);
+    expect(finalReadinessAndPublish).toBeGreaterThan(firstReadiness);
+    expect(finalStep.indexOf("node scripts/check-stable-release-readiness.mjs"))
+      .toBeGreaterThan(0);
+    expect(finalStep.indexOf("npx changeset publish")).toBeGreaterThan(
+      finalStep.indexOf("node scripts/check-stable-release-readiness.mjs"),
+    );
+    expect(
+      workflow.match(/node scripts\/check-stable-release-readiness\.mjs/g),
+    ).toHaveLength(2);
+    expect(workflow).not.toContain("      - name: Publish stable");
+    expect(workflow).not.toContain(
+      "inputs.mode == 'stable' && github.ref == 'refs/heads/main'",
+    );
+  });
+
+  it("routes snapshot versioning through the lock-refreshing wrapper before verification", () => {
+    const snapshot = workflow.indexOf(
+      "        run: npm run version-packages -- --snapshot canary",
+    );
+    const typecheck = workflow.indexOf("      - name: Typecheck", snapshot);
+    const test = workflow.indexOf("      - name: Test", snapshot);
+    const build = workflow.indexOf("      - name: Build", snapshot);
+
+    expect(snapshot).toBeGreaterThan(0);
+    expect(snapshot).toBeLessThan(typecheck);
+    expect(typecheck).toBeLessThan(test);
+    expect(test).toBeLessThan(build);
+    expect(workflow).not.toContain("npx changeset version --snapshot canary");
+    expect(contributing).toContain(
+      "`npm run version-packages -- --snapshot canary` produces a real snapshot\nversion and refreshes the npm workspace lock metadata before verification.",
+    );
+  });
+
+  it("documents feature-branch canaries and exact-head stable evidence", () => {
+    expect(contributing).toContain(
+      "Canary dispatches publish the selected ref, not implicitly `main`.",
+    );
+    expect(contributing).toContain(
+      "A feature\nbranch can therefore be selected for pre-merge canary validation",
+    );
+    expect(contributing).toContain(
+      "at least one trusted human's latest decisive review must be\n`APPROVED`",
+    );
+    expect(contributing).toContain(
+      "The publish job then\nperforms the final readiness evaluation and starts stable publication in the\nsame shell step.",
+    );
+    expect(contributing).toContain(
+      "the GitHub API evaluation and npm publication are not an atomic transaction",
+    );
   });
 
   it("rejects status plans that cannot produce a new snapshot version", () => {
