@@ -1,5 +1,15 @@
 # @glasstrace/sdk
 
+## 1.32.4
+
+### Patch Changes
+
+- b30c3d1: Prefer complete trace-discovery requests when the server supplies an unambiguous
+  match for the agent's selected action. Keep existing scope, evidence, permission,
+  and stop rules, with guarded legacy recovery when complete requests are absent
+  or unusable. Refresh existing project guidance with the app-local
+  `glasstrace upgrade-instructions` command after updating the SDK.
+
 ## 1.32.3
 
 ### Patch Changes
