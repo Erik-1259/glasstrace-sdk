@@ -36,6 +36,33 @@ function makeAgent(
 }
 
 function expectSafeDiscoveryWindowGuidance(info: string): void {
+  const completeRequest = sectionBetween(
+    info,
+    "   **Complete-request preference:**",
+    "   **Explicit-window guard:**",
+  );
+  expect(completeRequest).toContain("Choose the next action under the existing routing");
+  expect(completeRequest).toContain("before considering `nextRequests`");
+  expect(completeRequest).toContain("a single unambiguous matching entry");
+  expect(completeRequest).toContain("`tool` is exactly `find_trace_candidates`");
+  for (const intent of [
+    "continue", "replace_locator", "widen_window", "drop_locator",
+    "include_framework_internal",
+  ]) {
+    expect(completeRequest).toContain(`\`${intent}\``);
+  }
+  expect(completeRequest).toContain("complete destination-valid `args`");
+  expect(completeRequest).toContain("explicit valid `timeWindow` and `limit`");
+  expect(completeRequest).toContain("preserve the search scope except for the selected change");
+  expect(completeRequest).toContain("obey the window/cursor and retention guards below");
+  expect(completeRequest).toContain("Copy its `tool` and `args` exactly");
+  expect(completeRequest).toContain("do not merge legacy fields or reconstruct arguments");
+  expect(completeRequest).toContain("absent, malformed, ambiguous, or does not match the chosen action");
+  expect(completeRequest).toContain("use the guarded legacy options below");
+  expect(completeRequest).toContain("if those are not valid, stop rather than guess");
+  expect(completeRequest).toContain("manual argument reconstruction is only the legacy fallback");
+  expect(completeRequest).toContain("does not choose an action, increase a budget, authorize a credential or permission change");
+  expect(completeRequest).toContain("turn source-inspection advice into an executable call");
   expect(info).toContain("omit `timeWindow` on the first search");
   expect(info).toContain("bounded current window from its own clock");
   expect(info).toContain("Do not invent epoch milliseconds");
@@ -322,6 +349,7 @@ function expectSupportedDiagnosticRouting(info: string): void {
   const structuralBoundaries = [
     "- You already have a precise `traceId` and need to inspect that trace directly.",
     "1. Pick the first call by symptom",
+    "   **Complete-request preference:**",
     "   **Explicit-window guard:**",
     "2. After `find_trace_candidates`",
     "3. Side-effect evidence",
@@ -406,7 +434,7 @@ function expectSupportedDiagnosticRouting(info: string): void {
   const firstCallRouting = sectionBetween(
     info,
     "1. Pick the first call by symptom",
-    "   **Explicit-window guard:**",
+    "   **Complete-request preference:**",
   );
   const expectedFirstCallHash =
     "5ae34d78a3e9a4d8d85610df72ad3ae6360c3e19e37b4c320576ad179a04ad3d";
@@ -1096,9 +1124,9 @@ describe("generateInfoSection", () => {
   it("freezes the complete shared instruction body", () => {
     const body = buildAgentInstructionBody();
     const expectedBodyHash =
-      "62c8afa78dc1615539b2b80cac5c207d0adc3e9fcc749efcbed08d40d7c6ad33";
+      "6c5df587f3143ed82173673d2e6fcdda11326b521f9576d35185bc7fbd12b540";
     const expectedRawBodyHash =
-      "af3bc9f851768c51273e12479c3551556c24d2fe49f1a977d11e52e584eafb96";
+      "7b40090e3f81c262949a05b65453af1288fe6819c80382f4de73e1f27e873249";
     expect(body).toContain("## Glasstrace MCP — Runtime Debugging Evidence");
     expect(body.startsWith("\n")).toBe(true);
     expect(body.endsWith("\n")).toBe(true);
