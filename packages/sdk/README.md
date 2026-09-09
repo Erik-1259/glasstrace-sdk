@@ -254,6 +254,20 @@ a server limit and stops widening, but does not determine coverage by itself.
 Inverted or zero-duration intervals remain interval failures and are never
 reclassified as partial coverage.
 
+When a `find_trace_candidates` response includes `nextRequests`, the managed
+guidance first selects an action using the existing routing, evidence, stop,
+authorization, and follow-up-budget rules. It then prefers one unambiguous
+matching entry with destination-valid complete arguments, including an explicit
+valid `timeWindow` and `limit`, and copies its `tool` and `args` exactly. Supported
+intents are `continue`, `replace_locator`, `widen_window`, `drop_locator`, and
+`include_framework_internal`, all targeting `find_trace_candidates`. The entry
+must preserve scope except for the selected change and respect the window,
+cursor, and retention guards. Missing, malformed, ambiguous, or nonmatching
+entries fall back to the guarded legacy options; unusable legacy options still
+mean stop rather than guess. Complete requests do not grant permission, change
+budgets, or turn source-inspection advice into executable calls. The manual
+argument reconstruction below applies to that legacy fallback.
+
 A discovery cursor belongs to one exact query. Continuation passes only
 `timeWindow: { start: effectiveTimeWindow.start, end:
 effectiveTimeWindow.end }`; making an omitted default explicit with those same
