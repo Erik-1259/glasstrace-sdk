@@ -6,7 +6,9 @@ import {
   rm,
   chmod,
   stat,
+  readdir,
 } from "node:fs/promises";
+import * as atomicWrite from "../../../../packages/sdk/src/atomic-write.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -169,6 +171,95 @@ describe("writeMcpConfig", () => {
       // Restore permissions for cleanup
       await chmod(readOnlyDir, 0o755);
     }
+  });
+});
+
+describe("Windsurf MCP configuration preservation", () => {
+  let testDir: string;
+  let configPath: string;
+  const existing = {
+    preferences: { theme: "dark", tools: ["existing"] },
+    mcpServers: {
+      first: { command: "first-server", args: ["--keep"] },
+      second: { url: "https://second.example/mcp", headers: { token: "test-only-token" } },
+      glasstrace: { url: "https://old.example/mcp" },
+    },
+  };
+  const replacement = { mcpServers: { glasstrace: { type: "http", url: "https://api.glasstrace.dev/mcp", headers: { Authorization: "Bearer test-only-key" } } } };
+  const agent = () => makeAgent({ name: "windsurf", mcpConfigPath: configPath });
+
+  beforeEach(async () => {
+    testDir = tmpDir();
+    await mkdir(testDir, { recursive: true });
+    configPath = join(testDir, "mcp_config.json");
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  it("replaces only its own entry and retains an exact private backup", async () => {
+    const original = `${JSON.stringify(existing, null, 4)}\n`;
+    await writeFile(configPath, original, { mode: 0o644 });
+    await writeMcpConfig(agent(), JSON.stringify(replacement), testDir);
+
+    const result = JSON.parse(await readFile(configPath, "utf-8"));
+    expect(result).toEqual({ ...existing, mcpServers: { ...existing.mcpServers, glasstrace: replacement.mcpServers.glasstrace } });
+    expect((await stat(configPath)).mode & 0o777).toBe(0o600);
+    const backups = (await readdir(testDir)).filter((name) => name.startsWith("mcp_config.json.glasstrace-backup-"));
+    expect(backups).toHaveLength(1);
+    expect(await readFile(join(testDir, backups[0]!), "utf-8")).toBe(original);
+    expect((await stat(join(testDir, backups[0]!))).mode & 0o777).toBe(0o600);
+    expect(backups[0]).not.toContain("test-only");
+
+    const firstWrite = await readFile(configPath, "utf-8");
+    await writeMcpConfig(agent(), JSON.stringify(replacement), testDir);
+    expect(await readFile(configPath, "utf-8")).toBe(firstWrite);
+    expect((await readdir(testDir)).filter((name) => name.includes("glasstrace-backup"))).toEqual(backups);
+  });
+
+  it.each(["malformed {", "[]", "null", '{"mcpServers":[]}', '{"mcpServers":"unsupported"}'])("leaves unsupported JSON byte-identical: %s", async (original) => {
+    await writeFile(configPath, original);
+    await expect(writeMcpConfig(agent(), JSON.stringify(replacement), testDir)).rejects.toThrow(/Windsurf.*configuration/i);
+    expect(await readFile(configPath, "utf-8")).toBe(original);
+    expect(await readdir(testDir)).toEqual(["mcp_config.json"]);
+  });
+
+  it("preserves the old file when publishing the replacement fails", async () => {
+    const original = JSON.stringify(existing);
+    await writeFile(configPath, original);
+    const actualWrite = atomicWrite.atomicWriteFileWithTmp;
+    vi.spyOn(atomicWrite, "atomicWriteFileWithTmp").mockImplementationOnce(async (target, temporary, content, options) => {
+      // Block the actual temporary write with a directory: the real atomic
+      // helper must reject, clean up, and never truncate the original.
+      await mkdir(temporary);
+      await actualWrite(target, temporary, content, options);
+    });
+    await expect(writeMcpConfig(agent(), JSON.stringify(replacement), testDir)).rejects.toThrow(/Windsurf.*configuration/i);
+    expect(await readFile(configPath, "utf-8")).toBe(original);
+    const backups = (await readdir(testDir)).filter((name) => name.includes("glasstrace-backup"));
+    expect(backups).toHaveLength(1);
+    expect(await readFile(join(testDir, backups[0]!), "utf-8")).toBe(original);
+    expect((await readdir(testDir)).some((name) => name.includes("glasstrace-tmp"))).toBe(false);
+  });
+
+  it("creates a private configuration when no user file exists", async () => {
+    await writeMcpConfig(agent(), JSON.stringify(replacement), testDir);
+    expect(JSON.parse(await readFile(configPath, "utf-8"))).toEqual(replacement);
+    expect((await stat(configPath)).mode & 0o777).toBe(0o600);
+    expect(await readdir(testDir)).toEqual(["mcp_config.json"]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("rejects unreadable configuration without overwriting it", async () => {
+    const original = JSON.stringify(existing);
+    await writeFile(configPath, original);
+    await chmod(configPath, 0o000);
+    try {
+      await expect(writeMcpConfig(agent(), JSON.stringify(replacement), testDir)).rejects.toThrow(/Windsurf.*configuration/i);
+    } finally {
+      await chmod(configPath, 0o600);
+    }
+    expect(await readFile(configPath, "utf-8")).toBe(original);
   });
 });
 

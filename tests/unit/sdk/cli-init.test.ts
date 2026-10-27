@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -11,7 +11,8 @@ import {
   scaffoldMcpMarker,
   addCoverageMapEnv,
 } from "../../../packages/sdk/src/cli/scaffolder.js";
-import { runInit, meetsNodeVersion, rollbackSteps } from "../../../packages/sdk/src/cli/init.js";
+import { runInit, meetsNodeVersion, rollbackSteps, decideMcpConfigAction } from "../../../packages/sdk/src/cli/init.js";
+import * as atomicWrite from "../../../packages/sdk/src/atomic-write.js";
 
 let tmpDir: string;
 
@@ -1189,6 +1190,168 @@ describe("runInit — MCP auto-configuration", () => {
     } finally {
       restoreCI();
     }
+  });
+
+  describe("Windsurf shared user configuration", () => {
+    let temporaryHome: string;
+    let previousHome: string | undefined;
+    let configPath: string;
+    const originalConfig = {
+      preferences: { theme: "dark", nested: [false, null, { enabled: true }] },
+      mcpServers: {
+        first: { command: "first-server", args: ["--local"] },
+        second: { url: "https://second.example/mcp", headers: { Authorization: "test-only-other-token" } },
+        glasstrace: { url: "https://old.example/mcp", headers: {} },
+      },
+    };
+
+    beforeEach(() => {
+      temporaryHome = fs.mkdtempSync(path.join(os.tmpdir(), "glasstrace-windsurf-home-"));
+      previousHome = process.env["HOME"];
+      process.env["HOME"] = temporaryHome;
+      configPath = path.join(temporaryHome, ".codeium", "windsurf", "mcp_config.json");
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, ".windsurf"));
+      provisionAnonKey(tmpDir);
+      enterNonCI();
+    });
+
+    afterEach(() => {
+      restoreCI();
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      vi.restoreAllMocks();
+      fs.rmSync(temporaryHome, { recursive: true, force: true });
+    });
+
+    function configuredWindsurf(summary: string[]): boolean {
+      return summary.some((line) => line.startsWith("Configured MCP for:") && line.includes("Windsurf"));
+    }
+
+    function hasWindsurfInstructions(): boolean {
+      return fs.existsSync(path.join(tmpDir, ".windsurf", "rules", "glasstrace.md"));
+    }
+
+    it("--yes preserves unrelated servers and settings, with a private backup and idempotent repeat", async () => {
+      const original = `${JSON.stringify(originalConfig, null, 4)}\n`;
+      fs.writeFileSync(configPath, original, { mode: 0o644 });
+      const result = await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
+
+      const written = fs.readFileSync(configPath, "utf-8");
+      const parsed = JSON.parse(written);
+      expect(parsed.preferences).toEqual(originalConfig.preferences);
+      expect(parsed.mcpServers.first).toEqual(originalConfig.mcpServers.first);
+      expect(parsed.mcpServers.second).toEqual(originalConfig.mcpServers.second);
+      expect(parsed.mcpServers.glasstrace.url).toBe("https://api.glasstrace.dev/mcp");
+      expect(parsed.mcpServers.glasstrace.headers.Authorization).toBe(`Bearer ${TEST_ANON_KEY}`);
+      expect(configuredWindsurf(result.summary)).toBe(true);
+      expect(hasWindsurfInstructions()).toBe(true);
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      const backups = fs.readdirSync(path.dirname(configPath)).filter((name) => name.includes("glasstrace-backup"));
+      expect(backups).toHaveLength(1);
+      expect(fs.readFileSync(path.join(path.dirname(configPath), backups[0]!), "utf-8")).toBe(original);
+      expect(fs.statSync(path.join(path.dirname(configPath), backups[0]!)).mode & 0o777).toBe(0o600);
+      expect(JSON.stringify(result)).not.toContain(TEST_ANON_KEY);
+      expect(JSON.stringify(result)).not.toContain("test-only-other-token");
+
+      const repeated = await runInit({ projectRoot: tmpDir, yes: false, coverageMap: false });
+      expect(configuredWindsurf(repeated.summary)).toBe(true);
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(written);
+      expect(fs.readdirSync(path.dirname(configPath)).filter((name) => name.includes("glasstrace-backup"))).toEqual(backups);
+    });
+
+    it("adds a missing Glasstrace entry without prompting to replace unrelated data", async () => {
+      const otherServers = { first: originalConfig.mcpServers.first, second: originalConfig.mcpServers.second };
+      fs.writeFileSync(configPath, JSON.stringify({ ...originalConfig, mcpServers: otherServers }));
+      const result = await runInit({ projectRoot: tmpDir, yes: false, coverageMap: false });
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      expect(parsed.mcpServers.first).toEqual(otherServers.first);
+      expect(parsed.mcpServers.second).toEqual(otherServers.second);
+      expect(parsed.preferences).toEqual(originalConfig.preferences);
+      expect(parsed.mcpServers.glasstrace.headers.Authorization).toBe(`Bearer ${TEST_ANON_KEY}`);
+      expect(configuredWindsurf(result.summary)).toBe(true);
+    });
+
+    it("leaves malformed JSON untouched and does not report or instruct a successful Windsurf setup", async () => {
+      const original = '{"private":"test-only-other-token", malformed';
+      fs.writeFileSync(configPath, original);
+      const result = await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(original);
+      expect(fs.readdirSync(path.dirname(configPath))).toEqual(["mcp_config.json"]);
+      expect(result.warnings).toContainEqual(expect.stringMatching(/Failed to configure MCP for windsurf:.*valid JSON/));
+      expect(configuredWindsurf(result.summary)).toBe(false);
+      expect(hasWindsurfInstructions()).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("test-only-other-token");
+    });
+
+    it("keeps a declined Glasstrace replacement without treating an existing file as setup proof", async () => {
+      const original = JSON.stringify(originalConfig);
+      fs.writeFileSync(configPath, original);
+      const result = await runInit({ projectRoot: tmpDir, yes: false, coverageMap: false });
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(original);
+      expect(configuredWindsurf(result.summary)).toBe(false);
+      expect(hasWindsurfInstructions()).toBe(false);
+    });
+
+    it("reports replacement failure without leaking contents or counting the old file as success", async () => {
+      const original = JSON.stringify(originalConfig);
+      fs.writeFileSync(configPath, original);
+      const actualWrite = atomicWrite.atomicWriteFileWithTmp;
+      vi.spyOn(atomicWrite, "atomicWriteFileWithTmp").mockImplementation(async (target, ...args) => {
+        if (target === configPath) throw new Error("test-only-other-token");
+        await actualWrite(target, ...args);
+      });
+      const result = await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(original);
+      expect(result.warnings).toContainEqual(expect.stringMatching(/Failed to configure MCP for windsurf: Cannot update Windsurf/));
+      expect(configuredWindsurf(result.summary)).toBe(false);
+      expect(hasWindsurfInstructions()).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("test-only-other-token");
+    });
+
+    it.skipIf(process.getuid?.() === 0)("reports unreadable input without changing it", async () => {
+      const original = JSON.stringify(originalConfig);
+      fs.writeFileSync(configPath, original);
+      fs.chmodSync(configPath, 0o000);
+      let result;
+      try {
+        result = await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
+      } finally {
+        fs.chmodSync(configPath, 0o600);
+      }
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(original);
+      expect(result.warnings).toContainEqual(expect.stringMatching(/Failed to configure MCP for windsurf: Cannot read Windsurf/));
+      expect(configuredWindsurf(result.summary)).toBe(false);
+      expect(hasWindsurfInstructions()).toBe(false);
+    });
+  });
+});
+
+describe("Windsurf init decision", () => {
+  const entry = { url: "https://api.glasstrace.dev/mcp", headers: { Authorization: "Bearer test-only-key" } };
+  const expectedContent = JSON.stringify({ mcpServers: { glasstrace: entry } });
+
+  it("compares only the intended entry and skips prompts for unrelated settings", async () => {
+    const prompt = vi.fn();
+    const action = await decideMcpConfigAction({
+      configPath: "/temporary/mcp_config.json", expectedContent, force: false, windsurf: true,
+      existsSync: () => true,
+      readFile: () => JSON.stringify({ other: [1, 2], mcpServers: { unrelated: { command: "local" }, glasstrace: entry } }),
+      prompt,
+    });
+    expect(action).toBe("write");
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("asks only about replacing its own differing entry (accepted=%s)", async (accepted) => {
+    const prompt = vi.fn(async () => accepted);
+    const action = await decideMcpConfigAction({
+      configPath: "/temporary/mcp_config.json", expectedContent, force: false, windsurf: true,
+      existsSync: () => true, readFile: () => JSON.stringify({ mcpServers: { glasstrace: { url: "https://old.example" } } }),
+      prompt,
+    });
+    expect(action).toBe(accepted ? "force-overwrite" : "skip");
+    expect(prompt).toHaveBeenCalledWith(expect.stringMatching(/Replace only that entry/), false);
   });
 });
 

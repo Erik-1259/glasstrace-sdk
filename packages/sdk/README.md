@@ -88,6 +88,14 @@ root file, then re-run init.
 
 ## Init & Verification
 
+For Windsurf, `glasstrace init` and `glasstrace mcp add` update only
+`mcpServers.glasstrace` in the shared user configuration, preserving other
+servers and settings. Init asks before replacing a different Glasstrace
+entry; `--yes` or `--force` accepts that replacement. A changed existing
+file is backed up beside it with owner-only permissions before replacement.
+Malformed or unreadable configuration is left unchanged; repair the file
+or its permissions, then retry.
+
 ```bash
 npm exec -- glasstrace init
 # pnpm app workspace:

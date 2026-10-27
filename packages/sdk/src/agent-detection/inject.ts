@@ -1,5 +1,8 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
+import { atomicWriteFileWithTmp } from "../atomic-write.js";
+import { mcpConfigMatches } from "../mcp-runtime.js";
 import type { DetectedAgent } from "./detect.js";
 
 /**
@@ -99,6 +102,87 @@ function isPermissionError(err: unknown): boolean {
   return code === "EACCES" || code === "EPERM" || code === "EROFS";
 }
 
+function parseWindsurfConfig(content: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error("Windsurf MCP configuration is not valid JSON; repair it before retrying.");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Windsurf MCP configuration must be a JSON object; repair it before retrying.");
+  }
+  const root = parsed as Record<string, unknown>;
+  const servers = root["mcpServers"];
+  if (servers !== undefined && (typeof servers !== "object" || servers === null || Array.isArray(servers))) {
+    throw new Error("Windsurf MCP configuration requires an object for mcpServers; repair it before retrying.");
+  }
+  return root;
+}
+
+/** @internal Prepare only the Glasstrace entry in Windsurf's shared JSON file. */
+export function prepareWindsurfMcpConfig(existingContent: string | null, content: string): {
+  content: string;
+  hasExistingEntry: boolean;
+} {
+  const expected = parseWindsurfConfig(content);
+  const desiredServers = expected["mcpServers"] as Record<string, unknown> | undefined;
+  const entry = desiredServers?.["glasstrace"];
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    throw new Error("Windsurf MCP configuration is missing a valid Glasstrace entry.");
+  }
+  const existing = existingContent === null ? {} : parseWindsurfConfig(existingContent);
+  const existingServers = (existing["mcpServers"] ?? {}) as Record<string, unknown>;
+  return {
+    content: JSON.stringify({ ...existing, mcpServers: { ...existingServers, glasstrace: entry } }, null, 2),
+    hasExistingEntry: Object.hasOwn(existingServers, "glasstrace"),
+  };
+}
+
+async function writeWindsurfMcpConfig(configPath: string, content: string): Promise<void> {
+  let original: Buffer | null = null;
+  try {
+    if (!(await lstat(configPath)).isFile()) {
+      throw new Error("unsupported file type");
+    }
+    original = await readFile(configPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error("Cannot read Windsurf MCP configuration; check the file type and permissions before retrying.");
+    }
+  }
+  const existingContent = original?.toString("utf-8") ?? null;
+  if (original !== null && !Buffer.from(existingContent!, "utf-8").equals(original)) {
+    throw new Error("Windsurf MCP configuration must use valid UTF-8; repair it before retrying.");
+  }
+  const prepared = prepareWindsurfMcpConfig(existingContent, content);
+  if (existingContent !== null && mcpConfigMatches(existingContent, prepared.content)) return;
+
+  try {
+    await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+    if (original !== null) {
+      const backup = await open(`${configPath}.glasstrace-backup-${randomUUID()}`, "wx", 0o600);
+      try {
+        await backup.writeFile(original);
+        await backup.sync();
+      } finally {
+        await backup.close();
+      }
+      if (!(await readFile(configPath)).equals(original)) {
+        throw new Error("configuration changed while preparing update");
+      }
+    }
+    await atomicWriteFileWithTmp(
+      configPath,
+      `${configPath}.glasstrace-tmp-${randomUUID()}`,
+      prepared.content,
+      { mode: 0o600 },
+    );
+  } catch {
+    throw new Error("Cannot update Windsurf MCP configuration; the existing file or its private backup is preserved. Check permissions and retry.");
+  }
+}
+
 /**
  * Writes MCP configuration content to an agent's config file path.
  *
@@ -106,7 +190,8 @@ function isPermissionError(err: unknown): boolean {
  * (owner read/write only) since config files may contain auth tokens.
  *
  * Fails gracefully: logs a warning to stderr on permission errors instead
- * of throwing.
+ * of throwing. Windsurf's shared JSON config instead merges only its
+ * Glasstrace entry, backs up changed files, and throws on unsafe updates.
  *
  * @param agent - The detected agent whose config path to write to.
  * @param content - The full configuration file content.
@@ -123,6 +208,10 @@ export async function writeMcpConfig(
   }
 
   const configPath = agent.mcpConfigPath;
+  if (agent.name === "windsurf") {
+    await writeWindsurfMcpConfig(configPath, content);
+    return;
+  }
   const parentDir = dirname(configPath);
 
   try {
