@@ -1254,6 +1254,10 @@ function isPromotableDescendant(entry: ExceptionLineageEntry): boolean {
   // 5b — render-route generic-error suppression. A render-route descendant
   // promotes only on an unexpected/infrastructure exception class.
   if (entry.nextSpanType === RENDER_ROUTE_SPAN_TYPE) {
+    // OTel recordException prefers Error.code over Error.name. Prisma's
+    // P2xxx Client/query-engine errors can therefore omit the class marker.
+    // Accept only the complete exception type, never code-like message text.
+    if (entry.type?.length === 5 && /^P2[0-9]{3}$/.test(entry.type)) return true;
     for (const marker of RENDER_ROUTE_INFRA_MARKERS) {
       if (haystack.includes(marker)) return true;
     }

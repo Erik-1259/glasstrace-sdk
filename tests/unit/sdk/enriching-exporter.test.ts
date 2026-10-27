@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
 import { GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
@@ -33,7 +36,7 @@ function createMockSpan(overrides?: {
   endTime?: [number, number];
   instrumentationScope?: { name: string; version?: string };
   status?: { code: SpanStatusCode; message?: string };
-  events?: Array<{ time: [number, number]; name: string; attributes?: Record<string, string | number | boolean> }>;
+  events?: ReadableSpan["events"];
   // Trace-shape overrides for the descendant boundary-masked tests. Runtime
   // reads `spanContext().traceId` / `spanContext().spanId` and the parent via
   // `parentSpanContext?.spanId`, so wire both here.
@@ -2188,6 +2191,7 @@ describe("GlasstraceExporter", () => {
       attributes?: Record<string, string | number | boolean>;
       exceptionType?: string;
       exceptionMessage?: string;
+      events?: ReadableSpan["events"];
     }): ReadableSpan {
       return createMockSpan({
         name: "render route (app) /[locale]/dashboard",
@@ -2199,7 +2203,7 @@ describe("GlasstraceExporter", () => {
         status: { code: SpanStatusCode.ERROR },
         attributes:
           overrides?.attributes ?? { "next.span_type": "AppRender.getBodyResult" },
-        events: [
+        events: overrides?.events ?? [
           createExceptionEvent(
             overrides?.exceptionType ?? "PrismaClientKnownRequestError",
             overrides?.exceptionMessage ?? "Can't reach database server (P1001)",
@@ -2215,6 +2219,191 @@ describe("GlasstraceExporter", () => {
         (s) => s.spanContext().spanId === D_SERVER,
       )!;
     }
+
+    // Exercise the installed OTel encoder: Error.code takes precedence over
+    // Error.name, so these events contain no Prisma class-name type marker.
+    async function recordedException(
+      code: string | undefined,
+      message = "The table Widget does not exist",
+      name = "PrismaClientKnownRequestError",
+    ): Promise<ReadableSpan["events"]> {
+      const recorded = new InMemorySpanExporter();
+      const provider = new BasicTracerProvider({
+        spanProcessors: [new SimpleSpanProcessor(recorded)],
+      });
+      try {
+        const span = provider.getTracer("prisma-recorded-exception-test").startSpan("query", {
+          startTime: [1700000000, 0],
+        });
+        span.recordException(Object.assign(new Error(message), { name, code }), [1700000000, 50_000_000]);
+        span.end([1700000000, 100_000_000]);
+        await provider.forceFlush();
+        const events = recorded.getFinishedSpans()[0].events;
+        expect(events[0].attributes?.["exception.type"]).toBe(code ?? name);
+        expect(events[0].attributes?.["exception.message"]).toBe(message);
+        return events;
+      } finally {
+        await provider.shutdown();
+      }
+    }
+
+    it.each(["P2021", "P2002", "P2025", "P2034"])(
+      "promotes recorded Prisma query-engine error %s without a class-name marker",
+      async (code) => {
+        const { exporter, delegate } = createExporter();
+        const server = descendantServerSpan();
+        const events = await recordedException(code);
+        expect(events[0].attributes?.["exception.type"]).not.toBe("PrismaClientKnownRequestError");
+        exporter.export([server, renderRouteDescendant({ events })], vi.fn());
+        expect(findEnrichedServer(delegate).attributes).toMatchObject({
+          [ATTR.HTTP_STATUS_CODE]: 500,
+          [ATTR.HTTP_BOUNDARY_MASKED]: true,
+          [ATTR.HTTP_BOUNDARY_MASKED_SCOPE]: "descendant",
+        });
+        // The exporter classifies its copy; it cannot change the HTTP response.
+        expect(server.attributes["http.status_code"]).toBe(200);
+      },
+    );
+
+    it.each([
+      "Error", "P202", "P20210", "p2021", "P2021 suffix", " P2021", "P2021\n", "P3001", "P6001",
+    ])("keeps a malformed or unrelated recorded code %j at 200", async (code) => {
+      const { exporter, delegate } = createExporter();
+      exporter.export([
+        descendantServerSpan(),
+        renderRouteDescendant({
+          events: await recordedException(code, "An application error containing P2021"),
+        }),
+      ], vi.fn());
+      expect(findEnrichedServer(delegate).attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(findEnrichedServer(delegate).attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBeUndefined();
+    });
+
+    it("does not promote a generic error merely mentioning P2021", async () => {
+      const { exporter, delegate } = createExporter();
+      exporter.export([
+        descendantServerSpan(),
+        renderRouteDescendant({
+          events: await recordedException(undefined, "Failed with P2021", "Error"),
+        }),
+      ], vi.fn());
+      expect(findEnrichedServer(delegate).attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+    });
+
+    it.each(["NEXT_REDIRECT", "NEXT_NOT_FOUND", "not_found"])(
+      "keeps the %s control-flow exclusion for recorded Prisma codes",
+      async (marker) => {
+        const { exporter, delegate } = createExporter();
+        exporter.export([
+          descendantServerSpan(),
+          renderRouteDescendant({ events: await recordedException("P2021", marker) }),
+        ], vi.fn());
+        expect(findEnrichedServer(delegate).attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      },
+    );
+
+    it("honors the expected-error escape hatch for recorded Prisma codes", async () => {
+      const { exporter, delegate } = createExporter();
+      exporter.export([
+        descendantServerSpan(),
+        renderRouteDescendant({
+          events: await recordedException("P2021"),
+          attributes: { "next.span_type": "AppRender.getBodyResult", "glasstrace.error.expected": true },
+        }),
+      ], vi.fn());
+      expect(findEnrichedServer(delegate).attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+    });
+
+    it.each(["trace", "parent"])("does not promote a P2021 from an unrelated %s", async (mismatch) => {
+      const { exporter, delegate } = createExporter();
+      const descendant = renderRouteDescendant({
+        events: await recordedException("P2021"),
+        parentSpanId: mismatch === "parent" ? "cccccccccccccccc" : D_SERVER,
+      });
+      if (mismatch === "trace") {
+        descendant.spanContext = () => ({ traceId: "2".repeat(32), spanId: D_RENDER, traceFlags: 1 });
+      }
+      exporter.export([descendantServerSpan(), descendant], vi.fn());
+      expect(findEnrichedServer(delegate).attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+    });
+
+    it("does not carry a recorded P2021 across sessions", async () => {
+      let key = TEST_API_KEY;
+      const { exporter, delegate } = createExporter({ apiKey: () => key });
+      exporter.export([renderRouteDescendant({ events: await recordedException("P2021") })], vi.fn());
+      key = "gt_dev_" + "b".repeat(48);
+      exporter.export([descendantServerSpan()], vi.fn());
+      const server = delegate.exportedSpans[1][0];
+      expect(server.attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(server.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBeUndefined();
+    });
+
+    it("does not retroactively promote an exported server after a P2021 arrives", async () => {
+      const { exporter, delegate } = createExporter();
+      exporter.export([descendantServerSpan()], vi.fn());
+      exporter.export([renderRouteDescendant({ events: await recordedException("P2021") })], vi.fn());
+      expect(findEnrichedServer(delegate).attributes[ATTR.HTTP_STATUS_CODE]).toBe(200);
+      expect(delegate.exportedSpans).toHaveLength(2);
+      expect(delegate.exportedSpans[1]).toHaveLength(1);
+    });
+
+    it.each(["index.js", "index.cjs"])(
+      "promotes recorded P2021 through the emitted %s bundle and honors the global disable flag",
+      async (filename) => {
+        const events = await recordedException("P2021");
+        const spans = [descendantServerSpan(), renderRouteDescendant({ events })].map((span) => ({
+          ...span,
+          spanContext: span.spanContext(),
+        }));
+        const bundlePath = fileURLToPath(new URL(`../../../packages/sdk/dist/${filename}`, import.meta.url));
+        // Fresh processes exercise the real CJS/ESM loaders and init-time flag.
+        // A missing/stale bundle must fail, not silently skip this regression.
+        const script = `
+          import { createRequire } from "node:module";
+          import { pathToFileURL } from "node:url";
+          const [bundle, rawSpans] = process.argv.slice(1);
+          const sdk = bundle.endsWith(".cjs")
+            ? createRequire(import.meta.url)(bundle)
+            : await import(pathToFileURL(bundle).href);
+          const spans = JSON.parse(rawSpans).map((span) => {
+            const context = span.spanContext;
+            return { ...span, spanContext: () => context };
+          });
+          let exported;
+          const exporter = new sdk.GlasstraceExporter({
+            getApiKey: () => "gt_dev_" + "a".repeat(48),
+            sessionManager: new sdk.SessionManager(),
+            getConfig: () => ({ requestBodies: false, queryParamValues: false,
+              envVarValues: false, fullConsoleOutput: false, importGraph: false }),
+            environment: undefined,
+            endpointUrl: "https://api.glasstrace.dev/v1/traces",
+            createDelegate: () => ({
+              export: (spans, cb) => { exported = spans; cb({ code: 0 }); },
+              shutdown: async () => {}, forceFlush: async () => {},
+            }),
+          });
+          exporter.export(spans, () => {});
+          console.log(JSON.stringify({
+            attributes: exported[0].attributes,
+            originalStatus: spans[0].attributes["http.status_code"],
+          }));
+        `;
+        for (const disabled of [false, true]) {
+          const output = execFileSync(process.execPath, [
+            "--input-type=module", "-e", script, bundlePath, JSON.stringify(spans),
+          ], {
+            encoding: "utf8",
+            timeout: 15_000,
+            env: { GLASSTRACE_DISABLE_BOUNDARY_MASKED: disabled ? "1" : "0" },
+          });
+          const result = JSON.parse(output);
+          expect(result.originalStatus).toBe(200);
+          expect(result.attributes[ATTR.HTTP_STATUS_CODE]).toBe(disabled ? 200 : 500);
+          expect(result.attributes[ATTR.HTTP_BOUNDARY_MASKED_SCOPE]).toBe(disabled ? undefined : "descendant");
+          expect(result.attributes[ATTR.HTTP_BOUNDARY_MASKED]).toBe(disabled ? undefined : true);
+        }
+      },
+    );
 
     it("promotes a SERVER 200 from a qualifying infra render-route descendant (true positive)", () => {
       const { exporter, delegate } = createExporter();
