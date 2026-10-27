@@ -49,7 +49,7 @@ export async function readAnonKey(projectRoot?: string): Promise<AnonApiKey | nu
     const keyPath = modules.path.join(root, GLASSTRACE_DIR, ANON_KEY_FILE);
     try {
       const content = await modules.fs.readFile(keyPath, "utf-8");
-      const result = AnonApiKeySchema.safeParse(content);
+      const result = AnonApiKeySchema.safeParse(content.trim());
       if (result.success) {
         return result.data;
       }

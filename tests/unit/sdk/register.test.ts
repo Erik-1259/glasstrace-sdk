@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SpanKind } from "@opentelemetry/api";
+import { BasicTracerProvider, SimpleSpanProcessor, type ReadableSpan } from "@opentelemetry/sdk-trace-base";
+import type { ExportResult } from "@opentelemetry/core";
+import { AnonApiKeySchema, GLASSTRACE_ATTRIBUTE_NAMES } from "@glasstrace/protocol";
 import {
   registerGlasstrace,
   _resetRegistrationForTesting,
   getDiscoveryHandler,
+  getSessionManager,
 } from "../../../packages/sdk/src/register.js";
 import {
   _resetConfigForTesting,
@@ -18,6 +23,10 @@ import {
 import * as otelConfig from "../../../packages/sdk/src/otel-config.js";
 import * as healthCollector from "../../../packages/sdk/src/health-collector.js";
 import * as heartbeat from "../../../packages/sdk/src/heartbeat.js";
+import * as anonKeys from "../../../packages/sdk/src/anon-key.js";
+import { GlasstraceExporter } from "../../../packages/sdk/src/enriching-exporter.js";
+import { deriveSessionId, getDateString, getOrigin } from "../../../packages/sdk/src/session.js";
+import { CoreState, executeShutdown, getCoreState } from "../../../packages/sdk/src/lifecycle.js";
 
 /** Valid developer API key for testing (gt_dev_ prefix + 48 hex chars). */
 const TEST_DEV_API_KEY = "gt_dev_" + "a".repeat(48);
@@ -627,6 +636,188 @@ describe("registerGlasstrace() Orchestrator", () => {
       await waitForBackgroundWork(300);
 
       expect(transport).toHaveBeenCalled();
+    });
+  });
+
+  describe("Anonymous identity consistency", () => {
+    const explicitKey = AnonApiKeySchema.parse("gt_anon_" + "d".repeat(48));
+    const unrelatedKey = AnonApiKeySchema.parse("gt_anon_" + "e".repeat(48));
+    let identityTempDir: string;
+    let initTransport: ReturnType<typeof createMockInitTransport>;
+    let heartbeatSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(async () => {
+      identityTempDir = await mkdtemp(join(tmpdir(), "glasstrace-identity-test-"));
+      vi.spyOn(process, "cwd").mockReturnValue(identityTempDir);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      initTransport = createMockInitTransport();
+      _setTransportForTesting(initTransport as never);
+      heartbeatSpy = vi.spyOn(heartbeat, "startHeartbeat");
+    });
+
+    afterEach(async () => {
+      _resetRegistrationForTesting();
+      await settleBackgroundTurns();
+      await rm(identityTempDir, { recursive: true, force: true });
+    });
+
+    async function waitForInit(): Promise<void> {
+      await vi.waitFor(() => expect(heartbeatSpy).toHaveBeenCalled(), { timeout: 4000 });
+    }
+
+    async function expectExportIdentity(key: string): Promise<string> {
+      const expectedSession = deriveSessionId(key, getOrigin(), getDateString(), 0);
+      const exportedSpans: ReadableSpan[] = [];
+      const createDelegate = vi.fn(() => ({
+        export(spans: ReadableSpan[], callback: (result: ExportResult) => void): void {
+          exportedSpans.push(...spans);
+          callback({ code: 0 });
+        },
+        async shutdown(): Promise<void> {},
+      }));
+      // Use the same canonical getter and shared session manager as the
+      // registered OTel path, then inspect the real exporter's wire boundary.
+      const exporter = new GlasstraceExporter({
+        getApiKey: otelConfig.getResolvedApiKey,
+        sessionManager: getSessionManager(),
+        getConfig: () => STANDARD_INIT_FIELDS.config,
+        endpointUrl: "https://example.invalid/v1/traces",
+        createDelegate,
+      });
+      const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+      try {
+        provider.getTracer("identity-test").startSpan("GET /identity", {
+          kind: SpanKind.SERVER,
+          attributes: { "http.method": "GET", "http.route": "/identity" },
+        }).end();
+        await provider.forceFlush();
+        expect(createDelegate).toHaveBeenCalledWith("https://example.invalid/v1/traces", {
+          Authorization: `Bearer ${key}`,
+        });
+        expect(exportedSpans).toHaveLength(1);
+        expect(exportedSpans[0]?.attributes[GLASSTRACE_ATTRIBUTE_NAMES.SESSION_ID]).toBe(expectedSession);
+      } finally {
+        await provider.shutdown();
+      }
+      return expectedSession;
+    }
+
+    const explicitCases = [true, false].flatMap((discovery) =>
+      [true, false].flatMap((existingFile) =>
+        ["option", "environment"].map((source) => ({ discovery, existingFile, source })),
+      ),
+    );
+
+    it.each(explicitCases)(
+      "uses the $source anonymous identity with discovery=$discovery and existingFile=$existingFile",
+      async ({ discovery, existingFile, source }) => {
+        process.env.GLASSTRACE_DISCOVERY_ENABLED = String(discovery);
+        const keyPath = join(identityTempDir, ".glasstrace", "anon_key");
+        if (existingFile) {
+          await mkdir(join(identityTempDir, ".glasstrace"), { recursive: true });
+          await writeFile(keyPath, unrelatedKey);
+        }
+        // The option case also proves precedence over a different env key.
+        process.env.GLASSTRACE_API_KEY = source === "environment" ? explicitKey : unrelatedKey;
+        const fallbackSpy = vi.spyOn(anonKeys, "getOrCreateAnonKey");
+
+        registerGlasstrace(source === "option" ? { apiKey: explicitKey } : undefined);
+        await waitForInit();
+
+        const expectedSession = await expectExportIdentity(explicitKey);
+        expect(initTransport).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ anonKey: explicitKey }),
+          expect.objectContaining({ headers: expect.objectContaining({ Authorization: `Bearer ${explicitKey}` }) }),
+        );
+        expect(heartbeatSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ apiKey: explicitKey }), explicitKey,
+          expect.any(String), expect.any(Number), expect.any(Function),
+        );
+        if (discovery) {
+          const response = await getDiscoveryHandler()?.(new Request("http://localhost/__glasstrace/config"));
+          expect(response?.status).toBe(200);
+          expect(await response?.json()).toMatchObject({ key: explicitKey, sessionId: expectedSession });
+        } else {
+          expect(getDiscoveryHandler()).toBeNull();
+        }
+
+        // The final heartbeat exercises the actual init consumer again.
+        await executeShutdown();
+        expect(initTransport).toHaveBeenCalledTimes(2);
+        expect(initTransport.mock.calls[1]?.[2]).toEqual(
+          expect.objectContaining({ headers: expect.objectContaining({ Authorization: `Bearer ${explicitKey}` }) }),
+        );
+        expect(fallbackSpy).not.toHaveBeenCalled();
+        if (existingFile) {
+          expect(await readFile(keyPath, "utf-8")).toBe(unrelatedKey);
+        } else {
+          await expect(readFile(keyPath, "utf-8")).rejects.toMatchObject({ code: "ENOENT" });
+        }
+      },
+    );
+
+    it.each([true, false])("keeps generated identity consistent with discovery=%s", async (discovery) => {
+      process.env.GLASSTRACE_DISCOVERY_ENABLED = String(discovery);
+      registerGlasstrace();
+      await waitForInit();
+
+      const generatedKey = await readFile(join(identityTempDir, ".glasstrace", "anon_key"), "utf-8");
+      expect(AnonApiKeySchema.safeParse(generatedKey).success).toBe(true);
+      const expectedSession = await expectExportIdentity(generatedKey);
+      expect(initTransport.mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({ headers: expect.objectContaining({ Authorization: `Bearer ${generatedKey}` }) }),
+      );
+      expect(heartbeatSpy.mock.calls[0]?.[1]).toBe(generatedKey);
+      if (discovery) {
+        const response = await getDiscoveryHandler()?.(new Request("http://localhost/__glasstrace/config"));
+        expect(await response?.json()).toMatchObject({ key: generatedKey, sessionId: expectedSession });
+      }
+    });
+
+    it.each([true, false])("discards delayed resolution after shutdown and re-registration with discovery=%s", async (discovery) => {
+      process.env.GLASSTRACE_DISCOVERY_ENABLED = String(discovery);
+      vi.spyOn(otelConfig, "configureOtel").mockResolvedValue(undefined);
+      let resolveKey!: (key: typeof unrelatedKey) => void;
+      const delayedKey = new Promise<typeof unrelatedKey>((resolve) => { resolveKey = resolve; });
+      vi.spyOn(anonKeys, "getOrCreateAnonKey").mockReturnValueOnce(delayedKey);
+      registerGlasstrace();
+      await executeShutdown();
+      expect(getCoreState()).toBe(CoreState.SHUTDOWN);
+
+      _resetRegistrationForTesting();
+      registerGlasstrace({ apiKey: explicitKey });
+      await waitForInit();
+      resolveKey(unrelatedKey);
+      await delayedKey;
+      await settleBackgroundTurns();
+
+      await expectExportIdentity(explicitKey);
+      expect(initTransport).toHaveBeenCalledTimes(1);
+      if (discovery) {
+        const response = await getDiscoveryHandler()?.(new Request("http://localhost/__glasstrace/config"));
+        expect(await response?.json()).toMatchObject({ key: explicitKey });
+      }
+    });
+
+    it.each([true, false])("does not resolve or initialize a key after shutdown with discovery=%s", async (discovery) => {
+      process.env.GLASSTRACE_DISCOVERY_ENABLED = String(discovery);
+      vi.spyOn(otelConfig, "configureOtel").mockResolvedValue(undefined);
+      let resolveKey!: (key: typeof unrelatedKey) => void;
+      const delayedKey = new Promise<typeof unrelatedKey>((resolve) => { resolveKey = resolve; });
+      vi.spyOn(anonKeys, "getOrCreateAnonKey").mockReturnValueOnce(delayedKey);
+      const setKeySpy = vi.spyOn(otelConfig, "setResolvedApiKey");
+      registerGlasstrace();
+      await executeShutdown();
+      resolveKey(unrelatedKey);
+      await delayedKey;
+      await settleBackgroundTurns();
+
+      expect(getCoreState()).toBe(CoreState.SHUTDOWN);
+      expect(setKeySpy).not.toHaveBeenCalled();
+      expect(initTransport).not.toHaveBeenCalled();
+      expect(heartbeatSpy).not.toHaveBeenCalled();
     });
   });
 
