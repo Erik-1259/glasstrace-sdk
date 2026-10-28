@@ -614,8 +614,10 @@ Descendant detection requires an exception **event** (not merely an
   an intentional error boundary) is **not** promoted. Promotion happens
   only for unexpected/infrastructure failure classes — currently
   database/driver errors such as a Prisma "can't reach database
-  server" failure. The class list is intentionally narrow and grows
-  additively; an unrecognized failure stays at 200 (a miss, never a
+  server" failure or a known-request error recorded with a complete
+  `P2xxx` exception type (for example, `P2021`). A code-like substring
+  in an error message does not qualify by itself. The class list is
+  intentionally narrow and grows additively; an unrecognized failure stays at 200 (a miss, never a
   false 500).
 - **Explicit opt-out per boundary.** Setting the span attribute
   `glasstrace.error.expected = true` on the boundary (or the server
