@@ -1,5 +1,13 @@
 # @glasstrace/sdk
 
+## 1.32.5
+
+### Patch Changes
+
+- 035055d: Preserve unrelated servers and settings when updating Windsurf MCP configuration, with private backups and safe replacement.
+- ee5ad42: Keep explicit anonymous credentials consistent across export, initialization, heartbeat, session derivation and runtime discovery. Preserve valid anonymous key files with surrounding whitespace and ignore stale key resolution after shutdown or re-registration.
+- b59d52a: Recognize recorded Prisma query errors when classifying server failures hidden by a render error boundary.
+
 ## 1.32.4
 
 ### Patch Changes
