@@ -1,6 +1,7 @@
 declare const __SDK_VERSION__: string;
 
 import type { GlasstraceOptions, AnonApiKey } from "@glasstrace/protocol";
+import { AnonApiKeySchema } from "@glasstrace/protocol";
 import { resolveConfig, isProductionDisabled, isAnonymousMode } from "./env-detection.js";
 import type { ResolvedConfig } from "./env-detection.js";
 import { SessionManager } from "./session.js";
@@ -234,7 +235,11 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     // Determine auth mode
     const anonymous = isAnonymousMode(config);
-    let effectiveKey: string | undefined = config.apiKey;
+    const effectiveKey = config.apiKey;
+    const parsedAnonKey = AnonApiKeySchema.safeParse(config.apiKey);
+    // Explicit anonymous credentials own this registration's identity.
+    // Only absent/invalid credentials use the file-backed fallback.
+    const configuredAnonKey = parsedAnonKey.success ? parsedAnonKey.data : null;
 
     // Set initial auth lifecycle state based on configuration
     initAuthState(anonymous ? AuthState.ANONYMOUS : AuthState.AUTHENTICATED);
@@ -278,6 +283,12 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
 
     setCoreState(CoreState.KEY_PENDING);
     const currentGeneration = registrationGeneration;
+    const isCurrentRegistration = (): boolean => {
+      const state = getCoreState();
+      return currentGeneration === registrationGeneration
+        && state !== CoreState.SHUTTING_DOWN
+        && state !== CoreState.SHUTDOWN;
+    };
 
     if (anotherProviderRegistered) {
       if (config.verbose) {
@@ -338,7 +349,9 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
       }
       if (discoveryEnabled) {
         let resolvedAnonKey: AnonApiKey | null = null;
-        const anonKeyPromise = getOrCreateAnonKey();
+        const anonKeyPromise = configuredAnonKey
+          ? Promise.resolve(configuredAnonKey)
+          : getOrCreateAnonKey();
 
         // Derive claim state from the init response.
         // Called on every discovery request so it reflects the latest state.
@@ -351,8 +364,7 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
           return null;
         };
 
-        // Use getResolvedApiKey() for session ID instead of
-        // capturing the mutable effectiveKey closure variable.
+        // Use the canonical resolved API key for session derivation.
         //
         // Internal compatibility only — see `packages/sdk/README.md`
         // "Browser-extension discovery". The runtime handler is not part
@@ -371,16 +383,15 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
         // Background: resolve key, update API key, then init
         void (async () => {
           try {
-            if (currentGeneration !== registrationGeneration) return;
+            if (!isCurrentRegistration()) return;
 
             const anonKey = await anonKeyPromise;
+            if (!isCurrentRegistration()) return;
+
             resolvedAnonKey = anonKey;
             setResolvedApiKey(anonKey);
             notifyApiKeyResolved();
             emitLifecycleEvent("auth:key_resolved", { key: maskKey(anonKey), mode: "anonymous" });
-            effectiveKey = anonKey;
-
-            if (currentGeneration !== registrationGeneration) return;
 
             // Update the discovery handler to serve the resolved key.
             // Use getResolvedApiKey() for canonical key state.
@@ -405,15 +416,14 @@ export function registerGlasstrace(options?: GlasstraceOptions): void {
         // Anonymous + non-dev: no discovery endpoint, just background init
         void (async () => {
           try {
-            if (currentGeneration !== registrationGeneration) return;
+            if (!isCurrentRegistration()) return;
 
-            const anonKey = await getOrCreateAnonKey();
+            const anonKey = configuredAnonKey ?? await getOrCreateAnonKey();
+            if (!isCurrentRegistration()) return;
+
             setResolvedApiKey(anonKey);
             notifyApiKeyResolved();
             emitLifecycleEvent("auth:key_resolved", { key: maskKey(anonKey), mode: "anonymous" });
-            effectiveKey = anonKey;
-
-            if (currentGeneration !== registrationGeneration) return;
 
             await backgroundInit(config, anonKey, currentGeneration);
           } catch (err) {

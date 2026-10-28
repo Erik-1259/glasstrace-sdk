@@ -131,6 +131,16 @@ total cap). HTTP 4xx/5xx and malformed responses are surfaced
 immediately. Set `GLASSTRACE_SKIP_INIT_VERIFY=1` to skip verification
 for offline installs.
 
+To supply an explicit anonymous identity at runtime, set
+`GLASSTRACE_API_KEY` or pass a valid anonymous key as
+`registerGlasstrace({ apiKey })`; the option takes precedence. While
+anonymous, export, SDK initialization, heartbeats, and session derivation
+use that key. The retained [runtime discovery handler](#browser-extension-discovery)
+also uses it when enabled. Registration does not persist the supplied
+key or replace the stored anonymous key or static discovery file. Reads
+of existing anonymous key files tolerate surrounding whitespace,
+including LF and CRLF, without replacing a valid key.
+
 ## Getting help
 
 ```bash

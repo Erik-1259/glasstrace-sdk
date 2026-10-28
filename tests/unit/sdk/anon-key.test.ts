@@ -234,6 +234,31 @@ describe("readAnonKey", () => {
     expect(result).toBe(validKey);
   });
 
+  it.each(["\n", "\r\n", " \t\n"])(
+    "preserves an existing key with surrounding whitespace %j",
+    async (whitespace) => {
+      await mkdir(join(tempDir, ".glasstrace"), { recursive: true });
+      const validKey = "gt_anon_" + "a".repeat(48);
+      const keyPath = join(tempDir, ".glasstrace", "anon_key");
+      const content = `${whitespace}${validKey}${whitespace}`;
+      await writeFile(keyPath, content);
+
+      expect(await readAnonKey(tempDir)).toBe(validKey);
+      expect(await getOrCreateAnonKey(tempDir)).toBe(validKey);
+      expect(await readFile(keyPath, "utf-8")).toBe(content);
+    },
+  );
+
+  it("rejects whitespace inside a key", async () => {
+    await mkdir(join(tempDir, ".glasstrace"), { recursive: true });
+    await writeFile(
+      join(tempDir, ".glasstrace", "anon_key"),
+      `gt_anon_${"a".repeat(24)}\n${"a".repeat(24)}`,
+    );
+
+    expect(await readAnonKey(tempDir)).toBeNull();
+  });
+
   it("returns ephemeral cached key when filesystem is unavailable", async () => {
     // Simulate write failure by blocking .glasstrace as a file
     await writeFile(join(tempDir, ".glasstrace"), "blocker");
