@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { atomicWriteFileWithTmp } from "../atomic-write.js";
@@ -139,47 +139,99 @@ export function prepareWindsurfMcpConfig(existingContent: string | null, content
   };
 }
 
-async function writeWindsurfMcpConfig(configPath: string, content: string): Promise<void> {
-  let original: Buffer | null = null;
+async function readWindsurfConfig(configPath: string): Promise<Buffer | null> {
   try {
     if (!(await lstat(configPath)).isFile()) {
       throw new Error("unsupported file type");
     }
-    original = await readFile(configPath);
+    return await readFile(configPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new Error("Cannot read Windsurf MCP configuration; check the file type and permissions before retrying.");
     }
+    return null;
   }
-  const existingContent = original?.toString("utf-8") ?? null;
-  if (original !== null && !Buffer.from(existingContent!, "utf-8").equals(original)) {
-    throw new Error("Windsurf MCP configuration must use valid UTF-8; repair it before retrying.");
-  }
-  const prepared = prepareWindsurfMcpConfig(existingContent, content);
-  if (existingContent !== null && mcpConfigMatches(existingContent, prepared.content)) return;
+}
 
+async function syncWindsurfParent(configPath: string): Promise<void> {
+  const directory = await open(dirname(configPath), "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+async function writeWindsurfMcpConfig(configPath: string, content: string): Promise<void> {
+  const lockPath = `${configPath}.glasstrace-lock`;
   try {
     await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
-    if (original !== null) {
-      const backup = await open(`${configPath}.glasstrace-backup-${randomUUID()}`, "wx", 0o600);
-      try {
-        await backup.writeFile(original);
-        await backup.sync();
-      } finally {
-        await backup.close();
-      }
-      if (!(await readFile(configPath)).equals(original)) {
-        throw new Error("configuration changed while preparing update");
-      }
-    }
-    await atomicWriteFileWithTmp(
-      configPath,
-      `${configPath}.glasstrace-tmp-${randomUUID()}`,
-      prepared.content,
-      { mode: 0o600 },
-    );
   } catch {
-    throw new Error("Cannot update Windsurf MCP configuration; the existing file or its private backup is preserved. Check permissions and retry.");
+    throw new Error("Cannot prepare Windsurf MCP configuration; check directory permissions before retrying.");
+  }
+  let guard;
+  try {
+    guard = await open(lockPath, "wx", 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("Windsurf MCP configuration is locked by another setup. Retry later; remove the .glasstrace-lock file only if no setup is running.");
+    }
+    throw new Error("Cannot lock Windsurf MCP configuration; check directory permissions before retrying.");
+  }
+  let stagedPath: string | undefined;
+  try {
+    const original = await readWindsurfConfig(configPath);
+    const existingContent = original?.toString("utf-8") ?? null;
+    if (original !== null && !Buffer.from(existingContent!, "utf-8").equals(original)) {
+      throw new Error("Windsurf MCP configuration must use valid UTF-8; repair it before retrying.");
+    }
+    const prepared = prepareWindsurfMcpConfig(existingContent, content);
+    if (existingContent !== null && mcpConfigMatches(existingContent, prepared.content)) {
+      try {
+        await chmod(configPath, 0o600);
+      } catch {
+        throw new Error("Cannot secure Windsurf MCP configuration; check file permissions before retrying.");
+      }
+      return;
+    }
+    try {
+      if (original !== null) {
+        const backup = await open(`${configPath}.glasstrace-backup-${randomUUID()}`, "wx", 0o600);
+        try {
+          await backup.writeFile(original);
+          await backup.sync();
+        } finally {
+          await backup.close();
+        }
+      }
+      stagedPath = `${configPath}.glasstrace-staged-${randomUUID()}`;
+      await atomicWriteFileWithTmp(stagedPath, `${stagedPath}.tmp`, prepared.content, { mode: 0o600 });
+    } catch {
+      throw new Error("Cannot stage Windsurf MCP configuration; the existing file is unchanged. Check permissions and retry.");
+    }
+    // The guard serializes SDK writers. External editors do not honor it;
+    // check after staging for their intervening edits. This is not an atomic
+    // compare-and-swap against arbitrary external writers.
+    const current = await readWindsurfConfig(configPath);
+    if (original === null ? current !== null : current === null || !current.equals(original)) {
+      throw new Error("Windsurf MCP configuration changed during setup; it was left untouched. Retry with the current file.");
+    }
+    try {
+      await rename(stagedPath, configPath);
+      stagedPath = undefined;
+      try {
+        await syncWindsurfParent(configPath);
+      } catch (err) {
+        // Windows cannot fsync a directory; match the atomic writer's policy.
+        if (!["EISDIR", "EINVAL", "EPERM", "ENOTSUP"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+      }
+    } catch {
+      throw new Error("Cannot update Windsurf MCP configuration; the existing file or its private backup is preserved. Check permissions and retry.");
+    }
+  } finally {
+    if (stagedPath !== undefined) await unlink(stagedPath).catch(() => {});
+    await guard.close().catch(() => {});
+    await unlink(lockPath).catch(() => {});
   }
 }
 

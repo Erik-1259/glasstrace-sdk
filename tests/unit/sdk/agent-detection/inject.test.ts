@@ -250,6 +250,93 @@ describe("Windsurf MCP configuration preservation", () => {
     expect(await readdir(testDir)).toEqual(["mcp_config.json"]);
   });
 
+  it("secures an already matching file without changing bytes or creating a backup", async () => {
+    const original = JSON.stringify({
+      ...existing,
+      mcpServers: { ...existing.mcpServers, glasstrace: replacement.mcpServers.glasstrace },
+    });
+    await writeFile(configPath, original, { mode: 0o644 });
+    await writeMcpConfig(agent(), JSON.stringify(replacement), testDir);
+    expect(await readFile(configPath, "utf-8")).toBe(original);
+    expect((await stat(configPath)).mode & 0o777).toBe(0o600);
+    expect(await readdir(testDir)).toEqual(["mcp_config.json"]);
+  });
+
+  it("fails safely when an unchanged file cannot be secured", async () => {
+    const original = JSON.stringify(replacement);
+    await writeFile(configPath, original, { mode: 0o644 });
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.doMock("node:fs/promises", () => ({
+      ...actualFs,
+      chmod: vi.fn().mockRejectedValueOnce(new Error("test-only-private-failure")),
+    }));
+    vi.resetModules();
+    try {
+      const fresh = await import("../../../../packages/sdk/src/agent-detection/inject.js");
+      await expect(fresh.writeMcpConfig(agent(), original, testDir)).rejects.toThrow(/Cannot secure Windsurf/);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+    expect(await readFile(configPath, "utf-8")).toBe(original);
+    expect((await stat(configPath)).mode & 0o777).toBe(0o644);
+    expect(await readdir(testDir)).toEqual(["mcp_config.json"]);
+  });
+
+  it("rejects a concurrent SDK writer while the private target guard is held", async () => {
+    await writeFile(configPath, JSON.stringify(existing));
+    const actualWrite = atomicWrite.atomicWriteFileWithTmp;
+    let stagingStarted!: () => void;
+    let finishStaging!: () => void;
+    const started = new Promise<void>((resolve) => { stagingStarted = resolve; });
+    const finish = new Promise<void>((resolve) => { finishStaging = resolve; });
+    vi.spyOn(atomicWrite, "atomicWriteFileWithTmp").mockImplementationOnce(async (...args) => {
+      stagingStarted();
+      await finish;
+      await actualWrite(...args);
+    });
+    const first = writeMcpConfig(agent(), JSON.stringify(replacement), testDir);
+    const firstResult = first.then(() => undefined, (error: unknown) => error);
+    await started;
+    try {
+      expect((await stat(`${configPath}.glasstrace-lock`)).mode & 0o777).toBe(0o600);
+      await expect(writeMcpConfig(agent(), JSON.stringify(replacement), testDir)).rejects.toThrow(/locked by another setup/);
+      expect(JSON.parse(await readFile(configPath, "utf-8"))).toEqual(existing);
+    } finally {
+      finishStaging();
+      await firstResult;
+    }
+    expect(await firstResult).toBeUndefined();
+    expect((await readdir(testDir)).some((name) => name.includes("glasstrace-lock"))).toBe(false);
+    await expect(writeMcpConfig(agent(), JSON.stringify(replacement), testDir)).resolves.toBeUndefined();
+  });
+
+  it.each([false, true])("preserves an external staging-time edit (initial file absent=%s)", async (initiallyAbsent) => {
+    const original = JSON.stringify(existing);
+    if (!initiallyAbsent) await writeFile(configPath, original);
+    const edited = JSON.stringify({
+      ...existing,
+      preferences: { ...existing.preferences, externalEdit: true },
+      mcpServers: { ...existing.mcpServers, third: { command: "external-editor-added" } },
+    });
+    const actualWrite = atomicWrite.atomicWriteFileWithTmp;
+    vi.spyOn(atomicWrite, "atomicWriteFileWithTmp").mockImplementationOnce(async (...args) => {
+      await actualWrite(...args);
+      await writeFile(configPath, edited);
+    });
+    const failure = await writeMcpConfig(agent(), JSON.stringify(replacement), testDir).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(await readFile(configPath, "utf-8")).toBe(edited);
+    expect(failure).toMatchObject({ message: expect.stringMatching(/changed during setup/) });
+    const files = await readdir(testDir);
+    expect(files.some((name) => /glasstrace-(?:staged|lock)/.test(name))).toBe(false);
+    const backups = files.filter((name) => name.includes("glasstrace-backup"));
+    expect(backups).toHaveLength(initiallyAbsent ? 0 : 1);
+    if (!initiallyAbsent) expect(await readFile(join(testDir, backups[0]!), "utf-8")).toBe(original);
+  });
+
   it.skipIf(process.getuid?.() === 0)("rejects unreadable configuration without overwriting it", async () => {
     const original = JSON.stringify(existing);
     await writeFile(configPath, original);

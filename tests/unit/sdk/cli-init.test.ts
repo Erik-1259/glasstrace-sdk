@@ -1298,12 +1298,12 @@ describe("runInit — MCP auto-configuration", () => {
       fs.writeFileSync(configPath, original);
       const actualWrite = atomicWrite.atomicWriteFileWithTmp;
       vi.spyOn(atomicWrite, "atomicWriteFileWithTmp").mockImplementation(async (target, ...args) => {
-        if (target === configPath) throw new Error("test-only-other-token");
+        if (target.startsWith(`${configPath}.glasstrace-staged-`)) throw new Error("test-only-other-token");
         await actualWrite(target, ...args);
       });
       const result = await runInit({ projectRoot: tmpDir, yes: true, coverageMap: false });
       expect(fs.readFileSync(configPath, "utf-8")).toBe(original);
-      expect(result.warnings).toContainEqual(expect.stringMatching(/Failed to configure MCP for windsurf: Cannot update Windsurf/));
+      expect(result.warnings).toContainEqual(expect.stringMatching(/Failed to configure MCP for windsurf: Cannot stage Windsurf/));
       expect(configuredWindsurf(result.summary)).toBe(false);
       expect(hasWindsurfInstructions()).toBe(false);
       expect(JSON.stringify(result)).not.toContain("test-only-other-token");
