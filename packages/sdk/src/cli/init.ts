@@ -24,7 +24,7 @@ import { getOrCreateAnonKey, readAnonKey } from "../anon-key.js";
 import { detectAgents } from "../agent-detection/detect.js";
 import { generateMcpConfig } from "../agent-detection/configs.js";
 import { injectAllTargets } from "../agent-detection/inject-all-targets.js";
-import { writeMcpConfig, updateGitignore } from "../agent-detection/inject.js";
+import { prepareWindsurfMcpConfig, writeMcpConfig, updateGitignore } from "../agent-detection/inject.js";
 import type { DetectedAgent } from "../agent-detection/detect.js";
 import { NEXT_CONFIG_NAMES, formatAgentName } from "./constants.js";
 import { resolveProjectRoot } from "./monorepo.js";
@@ -65,7 +65,8 @@ export interface InitOptions {
   coverageMap: boolean;
   /**
    * When true, skip interactive confirmation and overwrite existing
-   * MCP configuration files without prompting. Preservation of the
+   * MCP configuration files without prompting. Windsurf updates only
+   * Glasstrace's entry and preserves other servers/settings. Preservation of the
    * anonymous key, config cache, and developer API key still applies
    * regardless of this flag — `--force` only affects the MCP diff
    * prompt. Defaults to `false`.
@@ -101,6 +102,8 @@ export async function decideMcpConfigAction(options: {
   configPath: string | null;
   expectedContent: string;
   force: boolean;
+  /** Limit drift comparison and replacement to Windsurf's Glasstrace entry. */
+  windsurf?: boolean;
   readFile?: (p: string) => string;
   existsSync?: (p: string) => boolean;
   prompt?: (question: string, defaultValue: boolean) => Promise<boolean>;
@@ -118,13 +121,21 @@ export async function decideMcpConfigAction(options: {
   try {
     existingContent = read(configPath);
   } catch {
+    if (options.windsurf) {
+      throw new Error("Cannot read Windsurf MCP configuration; check permissions before retrying.");
+    }
     // Unreadable — treat as "write" since we can't assess drift.
     // This preserves the pre-hardening behavior for corrupt or
     // permission-restricted files.
     return "write";
   }
 
-  if (mcpConfigMatches(existingContent, expectedContent)) {
+  if (options.windsurf) {
+    const prepared = prepareWindsurfMcpConfig(existingContent, expectedContent);
+    if (!prepared.hasExistingEntry || mcpConfigMatches(existingContent, prepared.content)) return "write";
+  }
+
+  if (!options.windsurf && mcpConfigMatches(existingContent, expectedContent)) {
     return "write";
   }
 
@@ -133,7 +144,9 @@ export async function decideMcpConfigAction(options: {
   }
 
   const answer = await prompt(
-    `Existing MCP config at ${configPath} differs from Glasstrace's template. Overwrite?`,
+    options.windsurf
+      ? `Existing Glasstrace entry in ${configPath} differs from the template. Replace only that entry?`
+      : `Existing MCP config at ${configPath} differs from Glasstrace's template. Overwrite?`,
     false,
   );
   return answer ? "force-overwrite" : "skip";
@@ -871,13 +884,14 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
             configPath: agent.mcpConfigPath,
             expectedContent: configContent,
             force: options.force === true || options.yes,
+            windsurf: agent.name === "windsurf",
           });
 
           if (decision === "skip") {
             summary.push(
               `Preserved existing ${agent.mcpConfigPath ?? agent.name} (user declined overwrite)`,
             );
-            if (agent.mcpConfigPath !== null && fs.existsSync(agent.mcpConfigPath)) {
+            if (agent.name !== "windsurf" && agent.mcpConfigPath !== null && fs.existsSync(agent.mcpConfigPath)) {
               // Count existing user-edited config as "present" so the
               // marker file still gets written — otherwise nudges would
               // nag the user about MCP setup they consciously preserved.
