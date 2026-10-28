@@ -2349,12 +2349,10 @@ describe("GlasstraceExporter", () => {
     });
 
     const emittedBundles = ["index.js", "index.cjs"];
-    const bundlesBuilt = emittedBundles.every((filename) =>
-      existsSync(new URL(`../../../packages/sdk/dist/${filename}`, import.meta.url)),
-    );
-    // Match the existing bundle harness when a developer tests before building.
-    // CI builds first and must fail if either required artifact is missing.
-    it.skipIf(!process.env.CI && !bundlesBuilt).each(emittedBundles)(
+    const sdkDistExists = existsSync(new URL("../../../packages/sdk/dist/", import.meta.url));
+    // Allow prebuild tests; incomplete existing output must still fail below.
+    // CI builds first, and postbuild rejects an absent dist directory.
+    it.skipIf(!sdkDistExists).each(emittedBundles)(
       "promotes recorded P2021 through the emitted %s bundle and honors the global disable flag",
       async (filename) => {
         const events = await recordedException("P2021");
