@@ -1,6 +1,8 @@
 # Glasstrace SDK
 
 Server-side debugging SDK for AI coding agents. Captures traces,
+
+[![Glasstrace SDK on StartupScores](https://startupscores.com/badge/glasstrace-sdk.svg?style=shield&v=combo&theme=dark)](https://startupscores.com/open-source/glasstrace-sdk)
 errors, and runtime context from your Node.js application and delivers
 them to coding agents through an MCP server and live dashboard.
 
